@@ -20,18 +20,18 @@ ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" |
 #   ABUSEGUARD_MIRROR=<p>/  -> force that one prefix
 ABUSEGUARD_MIRROR="${ABUSEGUARD_MIRROR:-}"
 AG_GH_MIRRORS="https://gh-proxy.com/ https://gh.ddlc.top/ https://ghproxy.net/ https://ghfast.top/"
-AG_CURL="curl -fsSL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
-gh_fetch() {  # URL OUTFILE
+AG_CURL="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
+gh_fetch() {  # URL OUTFILE — direct then mirror chain, quietly
 	local url="$1" out="$2" pfx
 	case "$ABUSEGUARD_MIRROR" in
 		""|0|off|no)
-			$AG_CURL -o "$out" "$url" && return 0
-			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" && return 0; done
+			$AG_CURL -o "$out" "$url" 2>/dev/null && return 0
+			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" 2>/dev/null && return 0; done
 			return 1 ;;
 		cn|1|yes|on)
-			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" && return 0; done
+			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" 2>/dev/null && return 0; done
 			return 1 ;;
-		*) $AG_CURL -o "$out" "$ABUSEGUARD_MIRROR$url" ;;
+		*) $AG_CURL -o "$out" "$ABUSEGUARD_MIRROR$url" 2>/dev/null ;;
 	esac
 }
 

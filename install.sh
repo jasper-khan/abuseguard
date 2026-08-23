@@ -27,29 +27,29 @@ ABUSEGUARD_MIRROR="${ABUSEGUARD_MIRROR:-}"
 # Proxies that re-serve github.com URLs, fastest-first (benchmarked from CN).
 AG_GH_MIRRORS="https://gh-proxy.com/ https://gh.ddlc.top/ https://ghproxy.net/ https://ghfast.top/"
 # curl opts: give up on a dead host fast, abort if the transfer stalls under
-# 100 KB/s for 10s (catches throttling), hard-cap at 120s.
-AG_CURL="curl -fsSL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
+# 100 KB/s for 10s (catches throttling), hard-cap at 120s. No -S: curl stays
+# quiet on failure so a slow/aborted direct attempt doesn't print scary errors.
+AG_CURL="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
 
-# gh_fetch URL OUTFILE -- download a github.com URL to OUTFILE, resilient to
-# CN throttling via bounded, stall-aborting attempts with proxy fallback.
+# gh_fetch URL OUTFILE -- download a github.com URL to OUTFILE. Tries a direct
+# download first, then a chain of mirrors, quietly (curl errors -> /dev/null),
+# so the fallback is automatic and the user only sees the "downloading…" line.
 gh_fetch() {
 	local url="$1" out="$2" pfx
 	case "$ABUSEGUARD_MIRROR" in
 		""|0|off|no)
-			$AG_CURL -o "$out" "$url" && return 0
+			$AG_CURL -o "$out" "$url" 2>/dev/null && return 0
 			for pfx in $AG_GH_MIRRORS; do
-				warn "直连下载卡住，改用镜像 ${pfx#https://}"
-				$AG_CURL -o "$out" "$pfx$url" && return 0
+				$AG_CURL -o "$out" "$pfx$url" 2>/dev/null && return 0
 			done
 			return 1 ;;
 		cn|1|yes|on)
 			for pfx in $AG_GH_MIRRORS; do
-				$AG_CURL -o "$out" "$pfx$url" && return 0
-				warn "镜像 ${pfx#https://} 失败，尝试下一个"
+				$AG_CURL -o "$out" "$pfx$url" 2>/dev/null && return 0
 			done
 			return 1 ;;
 		*)
-			$AG_CURL -o "$out" "$ABUSEGUARD_MIRROR$url" ;;
+			$AG_CURL -o "$out" "$ABUSEGUARD_MIRROR$url" 2>/dev/null ;;
 	esac
 }
 
@@ -148,7 +148,7 @@ install_engine() {
 		return
 	fi
 	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/caddy-abuseguard-linux-$ARCH"
-	log "正在下载引擎（linux-$ARCH）..."
+	log "正在下载引擎（linux-$ARCH，自动选择线路，稍候）..."
 	gh_fetch "$url" "$ENGINE_BIN" \
 		|| die "引擎下载失败（直连与镜像都失败）。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
 	chmod 0755 "$ENGINE_BIN"
@@ -193,7 +193,7 @@ if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q 'dns.p
 	need_caddy=0
 fi
 if [ "$need_caddy" = "1" ]; then
-	log "正在下载带 cloudflare 模块的 Caddy（linux-$ARCH）..."
+	log "正在下载带 cloudflare 模块的 Caddy（linux-$ARCH，自动选择线路，稍候）..."
 	gh_fetch "https://github.com/$ABUSEGUARD_REPO/releases/latest/download/caddy-linux-$ARCH" "$CADDY_BIN" \
 		|| die "Caddy 下载失败（直连与镜像都失败）。可预置一个带 cloudflare 模块的 caddy 到 $CADDY_BIN 后重试。"
 	chmod 0755 "$CADDY_BIN"
@@ -329,13 +329,6 @@ systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer
 log "AbuseGuard 安装完成。"
 cat <<EOF
 
-  ============================================================
-    打开控制面板：  abuseguard
-  ============================================================
-
-  面板里可以：设置/修改 Cloudflare token（7）与 AbuseIPDB
-  key（6）、查看封禁、同步情报、查看日志等。
-
   文件位置：
     Caddyfile:    $CADDYFILE
     白名单:       $CONF_DIR/whitelist
@@ -348,3 +341,14 @@ cat <<EOF
 安全提示：Caddy 本身不提供鉴权。凡是你对外暴露的站点，除非自行加鉴权，
 否则都是公开的。安装器自带的自检站点只绑定 127.0.0.1。
 EOF
+
+# On an interactive terminal, drop straight into the control panel; otherwise
+# just leave the summary above and tell the user how to open it.
+if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
+	echo
+	log "即将进入控制面板（下次可随时运行：abuseguard）..."
+	sleep 1
+	exec "$PANEL_BIN" </dev/tty
+fi
+echo
+log "运行 abuseguard 打开控制面板。"
