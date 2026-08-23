@@ -60,12 +60,16 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	command -v tar >/dev/null 2>&1 || die "tar is required to bootstrap the installer."
 	AG_REF="${ABUSEGUARD_REF:-main}"
 	AG_TMP="$(mktemp -d)"
+	trap 'rm -rf "$AG_TMP"' EXIT
 	log "fetching repo $ABUSEGUARD_REPO@$AG_REF ..."
 	curl -fsSL "$(gh_proxy "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz")" \
 		| tar -xz -C "$AG_TMP" --strip-components=1 \
 		|| die "bootstrap download failed (set ABUSEGUARD_REPO / ABUSEGUARD_REF, or clone the repo and run ./install.sh)."
 	export ABUSEGUARD_REPO ABUSEGUARD_REF
-	exec bash "$AG_TMP/install.sh" "$@"
+	# Run (not exec) the unpacked installer so the EXIT trap above still fires
+	# and cleans the temp checkout; propagate its exit code.
+	bash "$AG_TMP/install.sh" "$@"
+	exit $?
 fi
 
 # --- OS + arch guard ---------------------------------------------------------
