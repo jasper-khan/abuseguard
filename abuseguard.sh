@@ -14,16 +14,25 @@ JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2"
 REPO_FILE="$CONF_DIR/repo"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" || echo jasper-khan/abuseguard )}"
 
-# Optional China/slow-network mirror for the update/uninstall fetches.
+# GitHub download resiliency for the update/uninstall fetches (see install.sh).
+#   ABUSEGUARD_MIRROR unset -> direct first, then auto proxy-chain fallback
+#   ABUSEGUARD_MIRROR=cn    -> straight to the proxy chain
+#   ABUSEGUARD_MIRROR=<p>/  -> force that one prefix
 ABUSEGUARD_MIRROR="${ABUSEGUARD_MIRROR:-}"
-gh_proxy() {
-	local u="$1" p
+AG_GH_MIRRORS="https://gh-proxy.com/ https://gh.ddlc.top/ https://ghproxy.net/ https://ghfast.top/"
+AG_CURL="curl -fsSL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
+gh_fetch() {  # URL OUTFILE
+	local url="$1" out="$2" pfx
 	case "$ABUSEGUARD_MIRROR" in
-		""|0|off|no) printf '%s' "$u"; return ;;
-		cn|1|yes|on) p="https://ghfast.top/" ;;
-		*)           p="$ABUSEGUARD_MIRROR" ;;
+		""|0|off|no)
+			$AG_CURL -o "$out" "$url" && return 0
+			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" && return 0; done
+			return 1 ;;
+		cn|1|yes|on)
+			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" && return 0; done
+			return 1 ;;
+		*) $AG_CURL -o "$out" "$ABUSEGUARD_MIRROR$url" ;;
 	esac
-	printf '%s%s' "$p" "$u"
 }
 
 C_G='\033[1;32m'; C_Y='\033[1;33m'; C_R='\033[1;31m'; C_B='\033[1;34m'; C_0='\033[0m'
@@ -128,14 +137,21 @@ act_logs() {
 
 act_update() {
 	echo "re-running installer from $ABUSEGUARD_REPO ..."
-	curl -fsSL "$(gh_proxy "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh")" | ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" bash || echo "update failed."
+	local f=/tmp/abuseguard-install.sh
+	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh" "$f"; then
+		ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" bash "$f" || echo "update failed."
+		rm -f "$f"
+	else
+		echo "could not fetch install.sh (tried direct + mirrors)."
+	fi
 	pause
 }
 
 act_uninstall() {
-	if curl -fsSL "$(gh_proxy "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/uninstall.sh")" -o /tmp/abuseguard-uninstall.sh 2>/dev/null; then
-		bash /tmp/abuseguard-uninstall.sh
-		rm -f /tmp/abuseguard-uninstall.sh
+	local f=/tmp/abuseguard-uninstall.sh
+	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/uninstall.sh" "$f"; then
+		bash "$f"
+		rm -f "$f"
 	else
 		echo "could not fetch uninstall.sh; run it from your local clone."
 	fi

@@ -15,19 +15,42 @@ set -euo pipefail
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-jasper-khan/abuseguard}"
 
-# Optional China/slow-network mirror (default off => direct, overseas unaffected).
-#   ABUSEGUARD_MIRROR=cn        use the built-in proxy (https://ghfast.top/) for
-#                               github.com downloads + fastly.jsdelivr for intel
-#   ABUSEGUARD_MIRROR=<prefix>/ use <prefix> as the github.com proxy prefix
+# GitHub download resiliency (matters mainly in mainland China, where direct
+# github.com downloads are throttled or blocked). Default behaviour: try a
+# direct download first (instant for overseas users), and only if it stalls
+# fall back through a chain of public GitHub proxies until one delivers.
+#   ABUSEGUARD_MIRROR unset      direct first, then auto proxy-chain fallback
+#   ABUSEGUARD_MIRROR=cn         skip direct, go straight to the proxy chain
+#                                (also switches the intel list to fastly.jsdelivr)
+#   ABUSEGUARD_MIRROR=<prefix>/  force this one proxy prefix, no chain
 ABUSEGUARD_MIRROR="${ABUSEGUARD_MIRROR:-}"
-gh_proxy() {
-	local u="$1" p
+# Proxies that re-serve github.com URLs, fastest-first (benchmarked from CN).
+AG_GH_MIRRORS="https://gh-proxy.com/ https://gh.ddlc.top/ https://ghproxy.net/ https://ghfast.top/"
+# curl opts: give up on a dead host fast, abort if the transfer stalls under
+# 100 KB/s for 10s (catches throttling), hard-cap at 120s.
+AG_CURL="curl -fsSL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
+
+# gh_fetch URL OUTFILE -- download a github.com URL to OUTFILE, resilient to
+# CN throttling via bounded, stall-aborting attempts with proxy fallback.
+gh_fetch() {
+	local url="$1" out="$2" pfx
 	case "$ABUSEGUARD_MIRROR" in
-		""|0|off|no) printf '%s' "$u"; return ;;
-		cn|1|yes|on) p="https://ghfast.top/" ;;
-		*)           p="$ABUSEGUARD_MIRROR" ;;
+		""|0|off|no)
+			$AG_CURL -o "$out" "$url" && return 0
+			for pfx in $AG_GH_MIRRORS; do
+				warn "direct download stalled; trying mirror ${pfx#https://}"
+				$AG_CURL -o "$out" "$pfx$url" && return 0
+			done
+			return 1 ;;
+		cn|1|yes|on)
+			for pfx in $AG_GH_MIRRORS; do
+				$AG_CURL -o "$out" "$pfx$url" && return 0
+				warn "mirror ${pfx#https://} failed; trying next"
+			done
+			return 1 ;;
+		*)
+			$AG_CURL -o "$out" "$ABUSEGUARD_MIRROR$url" ;;
 	esac
-	printf '%s%s' "$p" "$u"
 }
 
 CONF_DIR=/etc/caddy-abuseguard
@@ -62,9 +85,11 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	AG_TMP="$(mktemp -d)"
 	trap 'rm -rf "$AG_TMP"' EXIT
 	log "fetching repo $ABUSEGUARD_REPO@$AG_REF ..."
-	curl -fsSL "$(gh_proxy "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz")" \
-		| tar -xz -C "$AG_TMP" --strip-components=1 \
+	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz" "$AG_TMP/repo.tar.gz" \
 		|| die "bootstrap download failed (set ABUSEGUARD_REPO / ABUSEGUARD_REF, or clone the repo and run ./install.sh)."
+	tar -xzf "$AG_TMP/repo.tar.gz" -C "$AG_TMP" --strip-components=1 \
+		|| die "bootstrap extract failed."
+	rm -f "$AG_TMP/repo.tar.gz"
 	export ABUSEGUARD_REPO ABUSEGUARD_REF
 	# Run (not exec) the unpacked installer so the EXIT trap above still fires
 	# and cleans the temp checkout; propagate its exit code.
@@ -123,21 +148,9 @@ install_engine() {
 		return
 	fi
 	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/caddy-abuseguard-linux-$ARCH"
-	log "downloading engine: $(gh_proxy "$url")"
-	# Bounded attempt: github.com release downloads sometimes stall over HTTP/2
-	# from CN (they hang rather than error), so cap the time and fail fast.
-	# If it fails and no mirror was set, auto-fall back to the ghfast.top proxy
-	# so the plain one-liner still works from flaky networks.
-	local dl="curl -fsSL --connect-timeout 15 --max-time 90 --retry 1"
-	if ! $dl -o "$ENGINE_BIN" "$(gh_proxy "$url")"; then
-		if [ -z "$ABUSEGUARD_MIRROR" ]; then
-			warn "direct download failed/stalled; retrying via ghfast.top mirror"
-			$dl -o "$ENGINE_BIN" "https://ghfast.top/$url" \
-				|| die "engine download failed. Use --from-source or set ABUSEGUARD_ENGINE_BIN."
-		else
-			die "engine download failed. Use --from-source or set ABUSEGUARD_ENGINE_BIN."
-		fi
-	fi
+	log "downloading engine (linux-$ARCH)..."
+	gh_fetch "$url" "$ENGINE_BIN" \
+		|| die "engine download failed (tried direct + mirrors). Use --from-source or set ABUSEGUARD_ENGINE_BIN."
 	chmod 0755 "$ENGINE_BIN"
 }
 install_engine

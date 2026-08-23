@@ -45,17 +45,25 @@ The installer is idempotent: existing config, whitelist, key, and Caddyfile are 
 
 ### Slow network / China mirror
 
-All the installer's downloads (repo tarball, engine binary, threat-intel list, and update/uninstall fetches) default to their upstream hosts — no change for overseas users. If GitHub is slow or blocked, set `ABUSEGUARD_MIRROR` to route the GitHub downloads through a proxy and the intel list through Fastly's jsDelivr CDN:
+The installer's GitHub downloads (repo tarball + engine binary) try a **direct
+download first** and, only if it stalls, automatically fall back through a
+chain of public GitHub proxies until one delivers — so the plain one-liner
+works overseas (direct) and from mainland China (auto-proxy) with no flags.
+
+To skip the direct attempt entirely on a known-blocked network, set
+`ABUSEGUARD_MIRROR=cn` — it goes straight to the proxy chain and also points
+the threat-intel list at Fastly's jsDelivr CDN:
 
 ```bash
-# built-in default proxy (ghfast.top) + fastly.jsdelivr for the intel list
-sudo ABUSEGUARD_MIRROR=cn ./install.sh
-
-# or a proxy prefix of your choice
-sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh
+sudo ABUSEGUARD_MIRROR=cn ./install.sh          # straight to proxy chain
+sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # force one proxy
 ```
 
-The `abuseguard` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR` was set at install time. The Caddy custom build (`caddyserver.com`) is not proxied; if it's slow, install a Caddy that already has the `caddy-dns/cloudflare` module (e.g. via `xcaddy`) before running — the installer detects and keeps it.
+The `abuseguard` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR`
+was set at install time. The Caddy custom build (`caddyserver.com`) is not
+proxied; if it's slow, install a Caddy that already has the
+`caddy-dns/cloudflare` module (e.g. via `xcaddy`) before running — the
+installer detects and keeps it.
 
 ## The panel
 
