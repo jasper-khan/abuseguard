@@ -148,20 +148,26 @@ act_whitelist() {
 			for line in "${items[@]}"; do echo "  $line"; done
 		fi
 		echo
-		echo "  [1] 添加"
+		echo "  [1] 添加（可批量）"
 		echo "  [2] 删除"
 		echo "  [3] 用编辑器打开"
 		echo "  [0] 返回"
 		read -r -p "请选择: " c
 		case "$c" in
 			1)
-				read -r -p "  输入要放行的 IP 或 CIDR（如 1.2.3.4 或 10.0.0.0/8）: " ip
-				ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
-				[ -z "$ip" ] && continue
-				if ! wl_valid "$ip"; then echo "  格式无效：$ip"; sleep 1; continue; fi
-				if grep -qxF "$ip" "$WHITELIST" 2>/dev/null; then echo "  已存在：$ip"; sleep 1; continue; fi
-				printf '%s\n' "$ip" >> "$WHITELIST"; wl_reload
-				echo "  已添加：$ip"; sleep 1 ;;
+				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
+				local added=0 skipped=0 tok
+				while IFS= read -r ip; do
+					[ -z "$ip" ] && break
+					ip="${ip//,/ }"
+					for tok in $ip; do
+						if ! wl_valid "$tok"; then echo "    跳过(格式无效)：$tok"; skipped=$((skipped+1)); continue; fi
+						if grep -qxF "$tok" "$WHITELIST" 2>/dev/null; then echo "    跳过(已存在)：$tok"; skipped=$((skipped+1)); continue; fi
+						printf '%s\n' "$tok" >> "$WHITELIST"; added=$((added+1)); echo "    已加：$tok"
+					done
+				done
+				[ "$added" -gt 0 ] && wl_reload
+				echo "  完成：新增 $added，跳过 $skipped"; sleep 1 ;;
 			2)
 				[ "${#items[@]}" -eq 0 ] && { echo "  没有可删除的条目"; sleep 1; continue; }
 				i=1; for line in "${items[@]}"; do printf "  [%d] %s\n" "$i" "$line"; i=$((i+1)); done
