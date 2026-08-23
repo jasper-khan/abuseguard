@@ -274,7 +274,7 @@ install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 # skips cleanly (no error) with no tty or when ABUSEGUARD_NONINTERACTIVE=1.
 if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; then
 	echo
-	log "Optional setup — press Enter to skip either one (set later with: sudo abuseguard)."
+	log "Optional setup — press Enter to skip either one (set later with: abuseguard)."
 	printf '  Cloudflare API token (for TLS via DNS; Enter = skip): '
 	IFS= read -r cf_token <&3 || cf_token=""
 	if [ -n "$cf_token" ]; then
@@ -295,7 +295,7 @@ if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; 
 	fi
 	exec 3<&-
 else
-	log "non-interactive run: skipping token prompts (set later via: sudo abuseguard)"
+	log "non-interactive run: skipping token prompts (set later via: abuseguard)"
 fi
 
 # --- validate + enable -------------------------------------------------------
@@ -316,7 +316,7 @@ log "AbuseGuard installed."
 cat <<EOF
 
   ============================================================
-    Open the control panel:   sudo abuseguard
+    Open the control panel:   abuseguard
   ============================================================
 
   In the panel: set/change the Cloudflare token (7) and

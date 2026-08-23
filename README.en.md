@@ -46,7 +46,7 @@ The installer is idempotent: existing config, whitelist, key, and Caddyfile are 
 During install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; both can be set later from the panel. When it finishes, the terminal prominently shows how to open the panel:
 
 ```bash
-sudo abuseguard
+abuseguard
 ```
 
 > With no terminal (CI / nohup / piped), the prompts are skipped automatically; you can also force this with `ABUSEGUARD_NONINTERACTIVE=1`.
@@ -77,7 +77,7 @@ installer detects and keeps it.
 
 ## The panel
 
-Run `sudo abuseguard`:
+Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed):
 
 - status of services, jails, and timers
 - list currently-banned IPs per jail
@@ -140,7 +140,7 @@ Then `sudo systemctl reload caddy`. Change the snippet once — every protected 
 ## Update / uninstall
 
 ```bash
-sudo abuseguard                 # → 10 update, → 11 uninstall
+abuseguard                 # → 10 update, → 11 uninstall
 sudo ./uninstall.sh             # remove program files, keep config/state
 sudo ./uninstall.sh --purge     # also remove config, whitelist, state, logs
 sudo ./uninstall.sh --dry-run   # show what would be removed, change nothing

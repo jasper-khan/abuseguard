@@ -46,7 +46,7 @@ sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go�
 安装过程中会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，两者都能之后随时在面板里设置。装完终端会醒目显示进面板的命令：
 
 ```bash
-sudo abuseguard
+abuseguard
 ```
 
 > 在无终端的环境（CI / nohup / 管道）里，安装会自动跳过询问；也可显式设 `ABUSEGUARD_NONINTERACTIVE=1` 强制跳过。
@@ -68,7 +68,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 ## 控制面板
 
-运行 `sudo abuseguard`：
+直接运行 `abuseguard`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）：
 
 - 查看服务、jail、定时器的状态
 - 按 jail 列出当前被封禁的 IP
@@ -131,7 +131,7 @@ example.com {
 ## 更新 / 卸载
 
 ```bash
-sudo abuseguard                 # → 10 更新，→ 11 卸载
+abuseguard                 # → 10 更新，→ 11 卸载
 sudo ./uninstall.sh             # 删除程序文件，保留配置/状态
 sudo ./uninstall.sh --purge     # 连配置、白名单、状态、日志一并删除
 sudo ./uninstall.sh --dry-run   # 只打印将删除什么，不做任何改动

@@ -193,5 +193,14 @@ MENU
 	esac
 }
 
-[ "$(id -u)" = "0" ] || { echo "run as root: sudo abuseguard"; exit 1; }
+# The panel needs root (reads /etc/caddy-abuseguard, drives fail2ban/systemctl).
+# If launched as a normal user, transparently re-exec under sudo so plain
+# `abuseguard` opens the panel (prompting for a password only if sudo needs one).
+if [ "$(id -u)" != "0" ]; then
+	if command -v sudo >/dev/null 2>&1; then
+		exec sudo -- "$0" "$@"
+	fi
+	echo "abuseguard needs root — run it as root, or install sudo." >&2
+	exit 1
+fi
 while true; do menu; done
