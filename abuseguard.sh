@@ -109,11 +109,63 @@ act_banned() {
 	pause
 }
 
+# 校验 IPv4/IPv6（可带 /前缀），宽松匹配，挡住明显错误输入
+wl_valid() {
+	local x="$1"
+	printf '%s' "$x" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$' && return 0
+	printf '%s' "$x" | grep -qiE '^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(/[0-9]{1,3})?$' && return 0
+	return 1
+}
+
+# 重载 fail2ban 并清 ignore 缓存，让白名单改动立即生效
+wl_reload() { chown root:abuseguard "$WHITELIST" 2>/dev/null; chmod 0640 "$WHITELIST" 2>/dev/null; fail2ban-client reload >/dev/null 2>&1 || true; }
+
 act_whitelist() {
-	"${EDITOR:-nano}" "$WHITELIST"
-	fail2ban-client reload >/dev/null 2>&1 || true
-	echo "白名单已保存，fail2ban 已重载。"
-	pause
+	local -a items
+	local line ip num target tmp c i
+	while true; do
+		clear 2>/dev/null || true
+		echo -e "${C_B}== 白名单（这些 IP 永不封禁、永不上报）==${C_0}"
+		echo
+		items=()
+		while IFS= read -r line; do
+			line="${line%%#*}"; line="$(printf '%s' "$line" | tr -d '[:space:]')"
+			[ -n "$line" ] && items+=("$line")
+		done < "$WHITELIST"
+		if [ "${#items[@]}" -eq 0 ]; then
+			echo "  （空）"
+		else
+			i=1; for line in "${items[@]}"; do printf "  %2d) %s\n" "$i" "$line"; i=$((i+1)); done
+		fi
+		echo
+		echo "  a) 添加    d) 删除    e) 用编辑器打开    0) 返回"
+		read -r -p "请选择: " c
+		case "$c" in
+			a|A)
+				read -r -p "  输入要放行的 IP 或 CIDR（如 1.2.3.4 或 10.0.0.0/8）: " ip
+				ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
+				[ -z "$ip" ] && continue
+				if ! wl_valid "$ip"; then echo "  格式无效：$ip"; sleep 1; continue; fi
+				if grep -qxF "$ip" "$WHITELIST" 2>/dev/null; then echo "  已存在：$ip"; sleep 1; continue; fi
+				printf '%s\n' "$ip" >> "$WHITELIST"; wl_reload
+				echo "  已添加：$ip"; sleep 1 ;;
+			d|D)
+				[ "${#items[@]}" -eq 0 ] && { echo "  没有可删除的条目"; sleep 1; continue; }
+				read -r -p "  输入要删除的编号: " num
+				case "$num" in ''|*[!0-9]*) continue ;; esac
+				if [ "$num" -lt 1 ] || [ "$num" -gt "${#items[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
+				target="${items[$((num-1))]}"
+				tmp="$(mktemp)"
+				# 删掉“去注释去空格后 == target”的行，保留注释/空行/其它条目
+				awk -v t="$target" '{l=$0; sub(/#.*/,"",l); gsub(/[ \t]/,"",l); if (l!=t) print}' "$WHITELIST" > "$tmp" && cat "$tmp" > "$WHITELIST"
+				rm -f "$tmp"; wl_reload
+				echo "  已删除：$target"; sleep 1 ;;
+			e|E)
+				"${EDITOR:-nano}" "$WHITELIST"; wl_reload ;;
+			0) wl_reload; return ;;
+			*) ;;
+		esac
+	done
 }
 
 act_sync()  { runuser -u abuseguard -- "$ENGINE" sync-intel; pause; }
