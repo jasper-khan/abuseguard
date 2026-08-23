@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AbuseGuard control panel.  Run:  sudo abuseguard
+# AbuseGuard 控制面板。运行： abuseguard
 set -uo pipefail
 
 CONF_DIR=/etc/caddy-abuseguard
@@ -36,7 +36,7 @@ gh_fetch() {  # URL OUTFILE
 }
 
 C_G='\033[1;32m'; C_Y='\033[1;33m'; C_R='\033[1;31m'; C_B='\033[1;34m'; C_0='\033[0m'
-pause() { echo; read -r -p "press Enter to continue..." _; }
+pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
 count_banned() {
@@ -60,22 +60,22 @@ header() {
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
 	echo -e "${C_B}=======================================================${C_0}"
-	echo -e "               ${C_G}AbuseGuard${C_0}  control panel"
+	echo -e "                 ${C_G}AbuseGuard${C_0}  控制面板"
 	echo -e "${C_B}=======================================================${C_0}"
 	printf "  caddy: %b    fail2ban: %b\n" \
-		"$( [ "$caddy" = active ] && echo "${C_G}active${C_0}" || echo "${C_R}${caddy}${C_0}" )" \
-		"$( [ "$f2b" = active ] && echo "${C_G}active${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	printf "  intel IPs: %s    banned now: %s    reporting: %b\n" \
+		"$( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )" \
+		"$( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
+	printf "  情报 IP: %s    当前封禁: %s    上报: %b\n" \
 		"$intel" "$banned" \
-		"$( [ "$rep" = on ] && echo "${C_G}on${C_0}" || echo "${C_Y}off${C_0}" )"
+		"$( [ "$rep" = on ] && echo "${C_G}开${C_0}" || echo "${C_Y}关${C_0}" )"
 	echo -e "${C_B}-------------------------------------------------------${C_0}"
 }
 
 act_status() {
-	echo "== services =="
+	echo "== 服务 =="
 	for s in caddy fail2ban; do printf "  %-10s %s\n" "$s" "$(svc_state "$s")"; done
-	echo; echo "== jails =="; fail2ban-client status 2>/dev/null | sed 's/^/  /'
-	echo; echo "== timers =="; systemctl list-timers 'caddy-abuseguard-*' --no-pager 2>/dev/null | sed -n '1,6p'
+	echo; echo "== jail =="; fail2ban-client status 2>/dev/null | sed 's/^/  /'
+	echo; echo "== 定时器 =="; systemctl list-timers 'caddy-abuseguard-*' --no-pager 2>/dev/null | sed -n '1,6p'
 	pause
 }
 
@@ -91,7 +91,7 @@ act_banned() {
 act_whitelist() {
 	"${EDITOR:-nano}" "$WHITELIST"
 	fail2ban-client reload >/dev/null 2>&1 || true
-	echo "whitelist saved; fail2ban reloaded."
+	echo "白名单已保存，fail2ban 已重载。"
 	pause
 }
 
@@ -99,50 +99,50 @@ act_sync()  { runuser -u abuseguard -- "$ENGINE" sync-intel; pause; }
 act_flush() { runuser -u abuseguard -- "$ENGINE" report send-auto; pause; }
 
 act_key() {
-	read -r -p "AbuseIPDB API key (blank = keep current): " k
+	read -r -p "AbuseIPDB API key（留空=保持当前）: " k
 	if [ -n "$k" ]; then
 		printf '%s\n' "$k" > "$KEYFILE"; chown root:abuseguard "$KEYFILE"; chmod 0640 "$KEYFILE"
-		echo "key saved."
+		echo "已保存 key。"
 	fi
 	pause
 }
 
 act_cftoken() {
-	read -r -p "Cloudflare API token (blank = keep current): " t
+	read -r -p "Cloudflare API token（留空=保持当前）: " t
 	if [ -n "$t" ]; then
 		printf 'CF_API_TOKEN=%s\n' "$t" > "$CADDY_ENV"; chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
 		systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
-		echo "token saved; caddy reloaded."
+		echo "已保存 token，caddy 已重载。"
 	fi
 	pause
 }
 
 act_toggle() {
-	[ -f "$CONFIG" ] || { echo "no config"; pause; return; }
+	[ -f "$CONFIG" ] || { echo "没有配置文件"; pause; return; }
 	local en newv tmp
 	en="$(jq -r '.abuseipdb.enabled' "$CONFIG" 2>/dev/null)"
 	[ "$en" = "true" ] && newv=false || newv=true
 	tmp="$(mktemp)"
 	if jq ".abuseipdb.enabled = $newv" "$CONFIG" > "$tmp"; then cat "$tmp" > "$CONFIG"; fi
 	rm -f "$tmp"
-	echo "AbuseIPDB reporting now: $newv"
+	[ "$newv" = true ] && echo "AbuseIPDB 上报已开启" || echo "AbuseIPDB 上报已关闭"
 	pause
 }
 
 act_logs() {
-	echo "-- caddy (last 20) --";    journalctl -u caddy -n 20 --no-pager 2>/dev/null
-	echo "-- fail2ban (last 20) --"; journalctl -u fail2ban -n 20 --no-pager 2>/dev/null
+	echo "-- caddy（最近 20 条）--";    journalctl -u caddy -n 20 --no-pager 2>/dev/null
+	echo "-- fail2ban（最近 20 条）--"; journalctl -u fail2ban -n 20 --no-pager 2>/dev/null
 	pause
 }
 
 act_update() {
-	echo "re-running installer from $ABUSEGUARD_REPO ..."
+	echo "正在从 $ABUSEGUARD_REPO 重新运行安装器..."
 	local f=/tmp/abuseguard-install.sh
 	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh" "$f"; then
-		ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" bash "$f" || echo "update failed."
+		ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" bash "$f" || echo "更新失败。"
 		rm -f "$f"
 	else
-		echo "could not fetch install.sh (tried direct + mirrors)."
+		echo "无法获取 install.sh（直连与镜像均失败）。"
 	fi
 	pause
 }
@@ -153,7 +153,7 @@ act_uninstall() {
 		bash "$f"
 		rm -f "$f"
 	else
-		echo "could not fetch uninstall.sh; run it from your local clone."
+		echo "无法获取 uninstall.sh；请从本地克隆运行。"
 	fi
 	pause
 }
@@ -161,21 +161,21 @@ act_uninstall() {
 menu() {
 	header
 	cat <<'MENU'
-   1) Status (services, jails, timers)
-   2) List banned IPs (per jail)
-   3) Edit whitelist
-   4) Sync threat-intel now
-   5) Flush report queue now
-   6) Set AbuseIPDB API key
-   7) Set Cloudflare API token
-   8) Toggle AbuseIPDB reporting on/off
-   9) View recent logs
-  10) Update AbuseGuard (re-run installer)
-  11) Uninstall
-   0) Exit
+   1) 状态（服务、jail、定时器）
+   2) 查看被封禁的 IP（按 jail）
+   3) 编辑白名单
+   4) 立即同步威胁情报
+   5) 立即冲刷上报队列
+   6) 设置 AbuseIPDB API key
+   7) 设置 Cloudflare API token
+   8) 开关 AbuseIPDB 上报
+   9) 查看最近日志
+  10) 更新 AbuseGuard（重新运行安装器）
+  11) 卸载
+   0) 退出
 MENU
 	echo
-	read -r -p "choice: " choice
+	read -r -p "请选择: " choice
 	case "$choice" in
 		1) act_status ;;
 		2) act_banned ;;
@@ -200,7 +200,7 @@ if [ "$(id -u)" != "0" ]; then
 	if command -v sudo >/dev/null 2>&1; then
 		exec sudo -- "$0" "$@"
 	fi
-	echo "abuseguard needs root — run it as root, or install sudo." >&2
+	echo "abuseguard 需要 root 权限——请用 root 运行，或先安装 sudo。" >&2
 	exit 1
 fi
 while true; do menu; done
