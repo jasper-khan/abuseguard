@@ -1,0 +1,41 @@
+# AbuseGuard Caddy snippet.
+#
+# Load it once near the top of your main Caddyfile:
+#     import /etc/caddy/abuseguard.caddy
+# then inside every site block you want protected, add:
+#     import abuseguard
+#
+# It tags requests so fail2ban can act on them, and writes a small,
+# privacy-trimmed access log that keeps only what fail2ban needs.
+(abuseguard) {
+	# Tag every request to this site as "protected" (rate/intel jails read this).
+	log_append caddy_abuseguard_site protected
+
+	# Tag scans for well-known sensitive paths as probes (probe jails read this).
+	@caddy_abuseguard_probe path /.env /.env/* /.git /.git/* /phpmyadmin /phpmyadmin/* /vendor/phpunit /vendor/phpunit/* /cgi-bin /cgi-bin/*
+	log_append @caddy_abuseguard_probe caddy_abuseguard_probe web-probe
+
+	log caddy_abuseguard {
+		output file /var/log/caddy/abuseguard-access.json {
+			mode 0640
+			roll_size 100MiB
+			roll_keep 7
+			roll_keep_for 168h
+		}
+		# Keep client_ip + proto + the appended tags; drop everything else.
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				request>tls delete
+				request>host delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>method delete
+				request>uri delete
+				resp_headers delete
+				user_id delete
+			}
+		}
+	}
+}

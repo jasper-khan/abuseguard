@@ -1,0 +1,29 @@
+# Example production Caddyfile using AbuseGuard.
+#
+# The global block MUST trust your edge/reverse-proxy layer (e.g. Cloudflare)
+# so that `client_ip` is the real visitor and not the proxy. AbuseGuard bans
+# and reports client_ip, so getting this right is essential.
+#
+# `install.sh` can pre-fill the Cloudflare ranges for you when it generates a
+# fresh Caddyfile. If you manage your own Caddyfile, copy the block below.
+{
+	servers {
+		trusted_proxies static 127.0.0.1/8
+		trusted_proxies_strict
+	}
+}
+
+# Load the AbuseGuard snippet once.
+import /etc/caddy/abuseguard.caddy
+
+# Protect a site by importing the snippet inside its block.
+example.com {
+	import abuseguard
+
+	# Cloudflare DNS-01 challenge (token from /etc/caddy/.env -> CF_API_TOKEN):
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+
+	reverse_proxy localhost:8080
+}

@@ -1,0 +1,56 @@
+# AbuseGuard jails for Caddy.
+#
+# All jails read the same privacy-trimmed Caddy access log and block with
+# nftables (drop) on tcp/80 and tcp/443. The engine decides who to ignore:
+#   - intel jail : ban instantly ONLY if the IP is on the threat-intel list
+#                  (engine `intel-ignore`: exit 1 = on list = ban).
+#   - rate/probe : ban unknown IPs by behaviour, but never a whitelisted IP
+#                  (engine `unknown-ignore`: exit 0 = whitelisted = skip).
+# Whitelisted IPs (see /etc/caddy-abuseguard/whitelist) are never banned.
+[DEFAULT]
+backend      = auto
+usedns       = no
+bantime      = 90d
+# Caddy's default JSON log writes time as a Unix epoch under the "ts" key.
+datepattern  = "ts":{EPOCH}
+
+[caddy-intel]
+enabled       = true
+filter        = caddy-abuseguard-any
+logpath       = /var/log/caddy/abuseguard-access.json
+maxretry      = 1
+findtime      = 10m
+action        = nftables[type=multiport, port="80,443", protocol=tcp, blocktype=drop]
+ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard intel-ignore --ip <ip>
+ignorecache   = key="<ip>", max-count=50000, max-time=10m
+
+[caddy-rate-local]
+enabled       = true
+filter        = caddy-abuseguard-any
+logpath       = /var/log/caddy/abuseguard-access.json
+maxretry      = 30
+findtime      = 60s
+action        = nftables[type=multiport, port="80,443", protocol=tcp, blocktype=drop]
+                caddy-abuseguard-queue[profile=web-rate, transport=HTTP, target_port=443, window=60s]
+ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>
+ignorecache   = key="<ip>", max-count=50000, max-time=10m
+
+[caddy-probe-h1]
+enabled       = true
+filter        = caddy-abuseguard-probe-h1
+logpath       = /var/log/caddy/abuseguard-access.json
+maxretry      = 5
+findtime      = 10m
+action        = nftables[type=multiport, port="80,443", protocol=tcp, blocktype=drop]
+                caddy-abuseguard-queue[profile=web-probe, transport=HTTP/1.1, target_port=443, window=10m]
+ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>
+
+[caddy-probe-h2]
+enabled       = true
+filter        = caddy-abuseguard-probe-h2
+logpath       = /var/log/caddy/abuseguard-access.json
+maxretry      = 5
+findtime      = 10m
+action        = nftables[type=multiport, port="80,443", protocol=tcp, blocktype=drop]
+                caddy-abuseguard-queue[profile=web-probe, transport=HTTP/2.0, target_port=443, window=10m]
+ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>

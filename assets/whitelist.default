@@ -1,0 +1,11 @@
+# AbuseGuard whitelist
+# One IP or CIDR per line. Lines starting with '#' are comments.
+# Any address matched here is NEVER banned and NEVER reported.
+#
+# Loopback is always safe to keep:
+127.0.0.0/8
+::1
+#
+# Add your own trusted IPs / CIDRs below, e.g.:
+# 203.0.113.10
+# 198.51.100.0/24

@@ -1,0 +1,17 @@
+# Build output
+/engine/dist/
+/dist/
+*.exe
+caddy-abuseguard
+caddy-abuseguard-linux-*
+
+# Local secrets / state (never commit)
+*.key
+*.env
+.env
+whitelist.local
+config.json
+
+# Editor / OS
+.DS_Store
+*.swp

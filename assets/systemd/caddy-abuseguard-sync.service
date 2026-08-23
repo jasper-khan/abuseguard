@@ -1,0 +1,10 @@
+[Unit]
+Description=AbuseGuard: refresh threat-intel blocklist
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=abuseguard
+Group=abuseguard
+ExecStart=/usr/local/libexec/caddy-abuseguard sync-intel

@@ -1,0 +1,26 @@
+{
+  "allowlist_file": "/etc/caddy-abuseguard/whitelist",
+  "paths": {
+    "state_dir": "/var/lib/caddy-abuseguard",
+    "reports_dir": "/var/lib/caddy-abuseguard/reports"
+  },
+  "intel": {
+    "source_url": "https://raw.githubusercontent.com/borestad/blocklist-abuseipdb/{commit}/abuseipdb-s100-14d.ipv4",
+    "commit_url": "https://api.github.com/repos/borestad/blocklist-abuseipdb/commits?path=abuseipdb-s100-14d.ipv4&per_page=1",
+    "token_file": "",
+    "min_entries": 90000,
+    "max_entries": 120000,
+    "max_age": "48h"
+  },
+  "abuseipdb": {
+    "enabled": true,
+    "report_url": "https://api.abuseipdb.com/api/v2/report",
+    "report_key_file": "/etc/caddy-abuseguard/abuseipdb-report.key",
+    "daily_report_cap": 1000,
+    "dedupe_window": "15m",
+    "categories": {
+      "web-probe": "21",
+      "web-rate": "4,21"
+    }
+  }
+}
