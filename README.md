@@ -55,7 +55,7 @@ abuseguard
 
 ### 网络慢 / 大陆镜像
 
-安装器的 GitHub 下载（仓库 tarball + 引擎二进制）会**先尝试直连**，仅当直连卡住时，才自动依次经过一串公共 GitHub 代理，直到某个成功为止 —— 因此那条朴素的一行命令在海外（直连）和大陆（自动代理）都能用，无需任何参数。
+安装器的 GitHub 下载（仓库 tarball、引擎、以及带 cloudflare 模块的 Caddy）会**先尝试直连**，仅当直连卡住时，才自动依次经过一串公共 GitHub 代理，直到某个成功为止 —— 因此那条朴素的一行命令在海外（直连）和大陆（自动代理）都能用，无需任何参数。
 
 若你的网络已知被墙，想跳过直连尝试，可设置 `ABUSEGUARD_MIRROR=cn` —— 它会直接走代理链，并把威胁情报名单指向 Fastly 的 jsDelivr CDN：
 
@@ -64,7 +64,7 @@ sudo ABUSEGUARD_MIRROR=cn ./install.sh          # 直接走代理链
 sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个代理
 ```
 
-`abuseguard` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。Caddy 定制构建（`caddyserver.com`）不走代理；若它很慢，可在运行前先装好一个已内置 `caddy-dns/cloudflare` 模块的 Caddy（例如用 `xcaddy`）—— 安装器会检测到并保留它。
+引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建），因此都享受上面的直连→镜像回退，大陆无需额外配置。`abuseguard` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，安装器会自动检测并保留、跳过下载。
 
 ## 控制面板
 

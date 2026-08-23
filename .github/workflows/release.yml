@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: 'stable'
 
       - name: Build engine binaries (linux amd64/arm64)
         working-directory: engine
@@ -28,7 +28,20 @@ jobs:
               go build -trimpath -ldflags "-s -w" \
               -o "../dist/caddy-abuseguard-linux-$arch" .
           done
-          ( cd ../dist && sha256sum caddy-abuseguard-linux-* > SHA256SUMS.txt )
+
+      - name: Build Caddy with caddy-dns/cloudflare (linux amd64/arm64)
+        run: |
+          set -eu
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              "$(go env GOPATH)/bin/xcaddy" build \
+              --with github.com/caddy-dns/cloudflare \
+              --output "dist/caddy-linux-$arch"
+          done
+
+      - name: Checksums
+        run: ( cd dist && sha256sum caddy-abuseguard-linux-* caddy-linux-* > SHA256SUMS.txt )
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -36,4 +49,6 @@ jobs:
           files: |
             dist/caddy-abuseguard-linux-amd64
             dist/caddy-abuseguard-linux-arm64
+            dist/caddy-linux-amd64
+            dist/caddy-linux-arm64
             dist/SHA256SUMS.txt

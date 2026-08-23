@@ -55,10 +55,11 @@ abuseguard
 
 ### Slow network / China mirror
 
-The installer's GitHub downloads (repo tarball + engine binary) try a **direct
-download first** and, only if it stalls, automatically fall back through a
-chain of public GitHub proxies until one delivers — so the plain one-liner
-works overseas (direct) and from mainland China (auto-proxy) with no flags.
+The installer's GitHub downloads (repo tarball, engine, and the cloudflare-enabled
+Caddy) try a **direct download first** and, only if it stalls, automatically
+fall back through a chain of public GitHub proxies until one delivers — so the
+plain one-liner works overseas (direct) and from mainland China (auto-proxy)
+with no flags.
 
 To skip the direct attempt entirely on a known-blocked network, set
 `ABUSEGUARD_MIRROR=cn` — it goes straight to the proxy chain and also points
@@ -69,11 +70,12 @@ sudo ABUSEGUARD_MIRROR=cn ./install.sh          # straight to proxy chain
 sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # force one proxy
 ```
 
-The `abuseguard` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR`
-was set at install time. The Caddy custom build (`caddyserver.com`) is not
-proxied; if it's slow, install a Caddy that already has the
-`caddy-dns/cloudflare` module (e.g. via `xcaddy`) before running — the
-installer detects and keeps it.
+Both the engine and the cloudflare-enabled Caddy are downloaded from this
+repo's GitHub release (Caddy is built by CI with `xcaddy`), so both get the
+direct→mirror fallback above and need no extra setup in mainland China. The
+`abuseguard` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR` was
+set at install time. If a Caddy with the `caddy-dns/cloudflare` module already
+exists, the installer detects and keeps it, skipping the download.
 
 ## The panel
 

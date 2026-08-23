@@ -185,14 +185,17 @@ fi
 printf '%s\n' "$ABUSEGUARD_REPO" > "$CONF_DIR/repo"; chmod 0644 "$CONF_DIR/repo"
 
 # --- Caddy binary with the cloudflare DNS module -----------------------------
+# Downloaded from our own GitHub release (built by CI with xcaddy), so it gets
+# the same direct-then-mirror fallback as the engine. caddyserver.com's custom
+# build is not mirror-able (not github.com) and is throttled hard from CN.
 need_caddy=1
 if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q 'dns.providers.cloudflare'; then
 	need_caddy=0
 fi
 if [ "$need_caddy" = "1" ]; then
-	log "正在下载带 caddy-dns/cloudflare 的 Caddy（$ARCH）..."
-	curl -fsSL -o "$CADDY_BIN" "https://caddyserver.com/api/download?os=linux&arch=$ARCH&p=github.com/caddy-dns/cloudflare" \
-		|| die "Caddy 下载失败。"
+	log "正在下载带 cloudflare 模块的 Caddy（linux-$ARCH）..."
+	gh_fetch "https://github.com/$ABUSEGUARD_REPO/releases/latest/download/caddy-linux-$ARCH" "$CADDY_BIN" \
+		|| die "Caddy 下载失败（直连与镜像都失败）。可预置一个带 cloudflare 模块的 caddy 到 $CADDY_BIN 后重试。"
 	chmod 0755 "$CADDY_BIN"
 else
 	log "已有的 Caddy 已包含 cloudflare 模块"
