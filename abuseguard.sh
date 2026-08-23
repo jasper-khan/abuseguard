@@ -145,13 +145,16 @@ act_whitelist() {
 		if [ "${#items[@]}" -eq 0 ]; then
 			echo "  （空）"
 		else
-			i=1; for line in "${items[@]}"; do printf "  %2d) %s\n" "$i" "$line"; i=$((i+1)); done
+			for line in "${items[@]}"; do echo "  $line"; done
 		fi
 		echo
-		echo "  [a] 添加    [d] 删除    [e] 用编辑器打开    [0] 返回"
+		echo "  [1] 添加"
+		echo "  [2] 删除"
+		echo "  [3] 用编辑器打开"
+		echo "  [0] 返回"
 		read -r -p "请选择: " c
 		case "$c" in
-			a|A)
+			1)
 				read -r -p "  输入要放行的 IP 或 CIDR（如 1.2.3.4 或 10.0.0.0/8）: " ip
 				ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
 				[ -z "$ip" ] && continue
@@ -159,8 +162,9 @@ act_whitelist() {
 				if grep -qxF "$ip" "$WHITELIST" 2>/dev/null; then echo "  已存在：$ip"; sleep 1; continue; fi
 				printf '%s\n' "$ip" >> "$WHITELIST"; wl_reload
 				echo "  已添加：$ip"; sleep 1 ;;
-			d|D)
+			2)
 				[ "${#items[@]}" -eq 0 ] && { echo "  没有可删除的条目"; sleep 1; continue; }
+				i=1; for line in "${items[@]}"; do printf "  [%d] %s\n" "$i" "$line"; i=$((i+1)); done
 				read -r -p "  输入要删除的编号: " num
 				case "$num" in ''|*[!0-9]*) continue ;; esac
 				if [ "$num" -lt 1 ] || [ "$num" -gt "${#items[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
@@ -170,7 +174,7 @@ act_whitelist() {
 				awk -v t="$target" '{l=$0; sub(/#.*/,"",l); gsub(/[ \t]/,"",l); if (l!=t) print}' "$WHITELIST" > "$tmp" && cat "$tmp" > "$WHITELIST"
 				rm -f "$tmp"; wl_reload
 				echo "  已删除：$target"; sleep 1 ;;
-			e|E)
+			3)
 				"${EDITOR:-nano}" "$WHITELIST"; wl_reload ;;
 			0) wl_reload; return ;;
 			*) ;;
@@ -209,7 +213,7 @@ act_sites() {
 		while IFS=$'\t' read -r d u; do
 			[ -n "$d" ] || continue
 			doms+=("$d")
-			printf "  %2d) %-28s → %s\n" "${#doms[@]}" "$d" "$u"
+			printf "  %-28s → %s\n" "$d" "$u"
 		done < <(sites_lines)
 		[ "${#doms[@]}" -eq 0 ] && echo "  （暂无站点）"
 		echo
@@ -219,16 +223,20 @@ act_sites() {
 			echo "  证书方式：Caddy 自动 HTTPS（需 80/443 可直达；在面板设 CF token 可改用 DNS）"
 		fi
 		echo
-		echo "  [a] 添加站点    [d] 删除站点    [0] 返回"
+		echo "  [1] 添加站点"
+		echo "  [2] 删除站点"
+		echo "  [0] 返回"
 		read -r -p "请选择: " choice
 		case "$choice" in
-			a|A)
+			1)
 				read -r -p "  域名（如 example.com）: " dom
 				dom="$(printf '%s' "$dom" | tr -d '[:space:]')"
 				domain_valid "$dom" || { echo "  域名格式无效"; sleep 1; continue; }
 				[ -e "$SITES_DIR/$dom.caddy" ] && { echo "  该域名已存在"; sleep 1; continue; }
-				echo "  上游类型：[1] 本地端口（localhost:端口）   [2] 远程 IP:端口"
-				read -r -p "  选择 [1/2]: " t
+				echo "  上游类型："
+				echo "  [1] 本地端口（localhost:端口）"
+				echo "  [2] 远程 IP:端口"
+				read -r -p "  请选择: " t
 				case "$t" in
 					1) read -r -p "  本地端口: " port; port="$(printf '%s' "$port" | tr -d '[:space:]')"
 					   port_valid "$port" || { echo "  端口无效"; sleep 1; continue; }
@@ -260,8 +268,9 @@ act_sites() {
 				fi
 				systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
 				echo "  已添加 $dom → $up （caddy 已重载）"; sleep 1 ;;
-			d|D)
+			2)
 				[ "${#doms[@]}" -eq 0 ] && { echo "  没有可删除的站点"; sleep 1; continue; }
+				i=1; for d in "${doms[@]}"; do printf "  [%d] %s\n" "$i" "$d"; i=$((i+1)); done
 				read -r -p "  输入要删除的编号: " num
 				case "$num" in ''|*[!0-9]*) continue ;; esac
 				if [ "$num" -lt 1 ] || [ "$num" -gt "${#doms[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
