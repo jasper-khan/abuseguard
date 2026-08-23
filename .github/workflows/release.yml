@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  schedule:
+    - cron: '0 3 * * 0'      # weekly (Sun 03:00 UTC): rebuild Caddy against upstream latest
+  workflow_dispatch: {}       # manual "rebuild Caddy now" button
 
 permissions:
   contents: write
@@ -29,7 +32,7 @@ jobs:
               -o "../dist/caddy-abuseguard-linux-$arch" .
           done
 
-      - name: Build Caddy with caddy-dns/cloudflare (linux amd64/arm64)
+      - name: Build Caddy with caddy-dns/cloudflare (linux amd64/arm64, upstream latest)
         run: |
           set -eu
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -43,7 +46,9 @@ jobs:
       - name: Checksums
         run: ( cd dist && sha256sum caddy-abuseguard-linux-* caddy-linux-* > SHA256SUMS.txt )
 
-      - name: Publish GitHub release
+      # On a version tag: publish that tag's release.
+      - name: Publish tagged release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -52,3 +57,20 @@ jobs:
             dist/caddy-linux-amd64
             dist/caddy-linux-arm64
             dist/SHA256SUMS.txt
+
+      # On schedule / manual run: refresh the assets on the current latest
+      # release with the freshly-built binaries (Caddy tracks upstream latest).
+      - name: Refresh assets on latest release
+        if: github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName')"
+          if [ -z "$tag" ]; then echo "no existing release to refresh"; exit 0; fi
+          echo "refreshing assets on $tag"
+          gh release upload "$tag" \
+            dist/caddy-linux-amd64 dist/caddy-linux-arm64 \
+            dist/caddy-abuseguard-linux-amd64 dist/caddy-abuseguard-linux-arm64 \
+            dist/SHA256SUMS.txt \
+            --clobber --repo "$GITHUB_REPOSITORY"
