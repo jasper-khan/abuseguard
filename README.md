@@ -1,104 +1,97 @@
 # AbuseGuard
 
-AbuseGuard is a drop-in abuse-mitigation layer for a [Caddy](https://caddyserver.com/) reverse proxy on Debian/Ubuntu. It bans abusive and known-malicious IPs at the firewall (nftables) and can optionally auto-report them to [AbuseIPDB](https://www.abuseipdb.com/) — driven by fail2ban plus a small Go engine.
+[English](README.en.md) | **简体中文**
 
-One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS module), the fail2ban jails, a threat-intel sync, the optional reporter, and an interactive `abuseguard` panel.
+AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 反向代理的即插即用滥用缓解层。它在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
 
-## How it works
+一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `abuseguard` 控制面板。
+
+## 工作原理
 
 ```
-visitor ─▶ Caddy (protected site: `import abuseguard`)
-             │  writes a privacy-trimmed JSON access log
+访客 ─▶ Caddy（受保护站点：`import abuseguard`）
+             │  写入隐私精简的 JSON 访问日志
              ▼
-         fail2ban ──(matches)──▶ nftables DROP :80/:443   ← the ban
+         fail2ban ──(命中)──▶ nftables DROP :80/:443   ← 封禁
              │
-             └─(rate/probe)─▶ engine enqueue ─▶ report queue ──(timer)──▶ AbuseIPDB
+             └─(限速/探测)─▶ 引擎入队 ─▶ 上报队列 ──(定时器)──▶ AbuseIPDB
 ```
 
-- Caddy tags each request to a protected site and logs only what fail2ban needs (client IP, protocol, tags) — no paths, hosts, headers, or query strings.
-- fail2ban runs four jails against that log; bans are enforced with nftables (drop on tcp/80+443).
-- A Go engine (stdlib only, single static binary) makes the ban/ignore decisions, keeps the threat-intel list fresh, and flushes queued reports.
+- Caddy 为每个到受保护站点的请求打标签，只记录 fail2ban 所需的字段（客户端 IP、协议、标签）——不记录路径、主机名、请求头或查询串。
+- fail2ban 针对该日志运行四个 jail；封禁由 nftables 执行（对 tcp/80+443 丢弃）。
+- 一个 Go 引擎（仅用标准库、单个静态二进制）负责封禁/放行判定、保持威胁情报名单新鲜、并冲刷上报队列。
 
-## Requirements
+## 环境要求
 
-- Debian 11/12 or Ubuntu 20.04+ (amd64 or arm64), with root (sudo).
-- Intended for a public server behind an edge proxy (e.g. Cloudflare). AbuseGuard bans/reports the **real client IP**, so `trusted_proxies` must be correct.
+- Debian 11/12 或 Ubuntu 20.04+（amd64 或 arm64），需 root（sudo）。
+- 适用于位于边缘代理（如 Cloudflare）之后的公网服务器。AbuseGuard 封禁/上报的是**真实客户端 IP**，因此 `trusted_proxies` 必须配置正确。
 
-## Install
+## 安装
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jasper-khan/abuseguard/main/install.sh)
 ```
 
-or clone and run:
+或克隆后运行：
 
 ```bash
 git clone https://github.com/jasper-khan/abuseguard
 cd abuseguard
-sudo ./install.sh                 # download the prebuilt engine from the latest release
-sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
+sudo ./install.sh                 # 从最新 release 下载预编译引擎
+sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go）
 ```
 
-The installer is idempotent: existing config, whitelist, key, and Caddyfile are never overwritten.
+安装器是幂等的：已有的 config、whitelist、key 和 Caddyfile 都不会被覆盖。
 
-> Set `ABUSEGUARD_REPO=you/abuseguard` to install from your own fork.
+> 设置 `ABUSEGUARD_REPO=you/abuseguard` 可从你自己的 fork 安装。
 
-### Slow network / China mirror
+### 网络慢 / 大陆镜像
 
-The installer's GitHub downloads (repo tarball + engine binary) try a **direct
-download first** and, only if it stalls, automatically fall back through a
-chain of public GitHub proxies until one delivers — so the plain one-liner
-works overseas (direct) and from mainland China (auto-proxy) with no flags.
+安装器的 GitHub 下载（仓库 tarball + 引擎二进制）会**先尝试直连**，仅当直连卡住时，才自动依次经过一串公共 GitHub 代理，直到某个成功为止 —— 因此那条朴素的一行命令在海外（直连）和大陆（自动代理）都能用，无需任何参数。
 
-To skip the direct attempt entirely on a known-blocked network, set
-`ABUSEGUARD_MIRROR=cn` — it goes straight to the proxy chain and also points
-the threat-intel list at Fastly's jsDelivr CDN:
+若你的网络已知被墙，想跳过直连尝试，可设置 `ABUSEGUARD_MIRROR=cn` —— 它会直接走代理链，并把威胁情报名单指向 Fastly 的 jsDelivr CDN：
 
 ```bash
-sudo ABUSEGUARD_MIRROR=cn ./install.sh          # straight to proxy chain
-sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # force one proxy
+sudo ABUSEGUARD_MIRROR=cn ./install.sh          # 直接走代理链
+sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个代理
 ```
 
-The `abuseguard` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR`
-was set at install time. The Caddy custom build (`caddyserver.com`) is not
-proxied; if it's slow, install a Caddy that already has the
-`caddy-dns/cloudflare` module (e.g. via `xcaddy`) before running — the
-installer detects and keeps it.
+`abuseguard` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。Caddy 定制构建（`caddyserver.com`）不走代理；若它很慢，可在运行前先装好一个已内置 `caddy-dns/cloudflare` 模块的 Caddy（例如用 `xcaddy`）—— 安装器会检测到并保留它。
 
-## The panel
+## 控制面板
 
-Run `sudo abuseguard`:
+运行 `sudo abuseguard`：
 
-- status of services, jails, and timers
-- list currently-banned IPs per jail
-- edit the whitelist (reloads fail2ban)
-- sync threat-intel now / flush the report queue now
-- set the AbuseIPDB key / Cloudflare token
-- toggle AbuseIPDB reporting on/off
-- view recent logs, update, uninstall
+- 查看服务、jail、定时器的状态
+- 按 jail 列出当前被封禁的 IP
+- 编辑白名单（会重载 fail2ban）
+- 立即同步威胁情报 / 立即冲刷上报队列
+- 设置 AbuseIPDB key / Cloudflare token
+- 开关 AbuseIPDB 上报
+- 查看近期日志、更新、卸载
 
-## Protection model
+## 防护模型
 
-| Jail | Trigger | Threshold | Who gets banned |
+| Jail | 触发条件 | 阈值 | 封禁对象 |
 | --- | --- | --- | --- |
-| `caddy-intel` | any request to a protected site | 1 hit | only IPs on the threat-intel list |
-| `caddy-rate-local` | any request to a protected site | 30 in 60s | any non-whitelisted IP + queued for report |
-| `caddy-probe-h1` | HTTP/1.1 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
-| `caddy-probe-h2` | HTTP/2 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
+| `caddy-intel` | 对受保护站点的任意请求 | 命中 1 次 | 仅威胁情报名单上的 IP |
+| `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 30 次 | 任意非白名单 IP + 加入上报队列 |
+| `caddy-probe-h1` | 用 HTTP/1.1 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
+| `caddy-probe-h2` | 用 HTTP/2 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 
-Ban time is 90 days. Whitelisted IPs (`/etc/caddy-abuseguard/whitelist`) are never banned and never reported. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
+封禁时长为 90 天。白名单 IP（`/etc/caddy-abuseguard/whitelist`）永不封禁、永不上报。「敏感路径」= `/.env`、`/.git`、`/phpmyadmin`、`/vendor/phpunit`、`/cgi-bin`（及其子路径）。
 
-## Threat intel
+## 威胁情报
 
-The intel jail bans nothing until the list is synced. The engine pulls a public AbuseIPDB-derived blocklist and refuses a list that is implausibly small (<90k) or large (>120k); on any failure it keeps the previous list. Refresh runs every 6h (and via the panel).
+在名单同步之前，intel jail 不封禁任何人。引擎会拉取一份公开的、源自 AbuseIPDB 的封禁名单，并拒绝加载明显异常偏小（<9 万）或偏大（>12 万）的名单；任何失败都会保留上一次的名单。刷新每 6 小时执行一次（也可通过面板手动触发）。
 
-## AbuseIPDB reporting (optional)
+## AbuseIPDB 上报（可选）
 
-Reporting is enabled in the config by default but does nothing until you set an API key (panel → 6). Reports are privacy-safe (no host/path/headers), deduped (15m), and capped (1000/day). The flush runs every 10m. Turn it off entirely with panel → 8.
+配置里上报默认开启，但在你设置 API key（面板 → 6）之前不会做任何事。上报是隐私安全的（不含主机名/路径/请求头）、按 IP 去重（15 分钟窗口）、并有上限（每天 1000 条）。冲刷每 10 分钟执行一次。要彻底关闭，用面板 → 8。
 
-## Add your sites
+## 接入你的站点
 
-Put `import abuseguard` inside each site block in `/etc/caddy/Caddyfile`:
+在 `/etc/caddy/Caddyfile` 的每个站点块里加入 `import abuseguard`：
 
 ```caddyfile
 example.com {
@@ -110,47 +103,47 @@ example.com {
 }
 ```
 
-Then `sudo systemctl reload caddy`. Change the snippet once — every protected site follows.
+然后 `sudo systemctl reload caddy`。片段只需改一处 —— 每个受保护站点都会跟随生效。
 
-## Files
+## 文件位置
 
 ```
-/usr/local/bin/caddy                          Caddy (with caddy-dns/cloudflare)
-/usr/local/bin/abuseguard                     control panel
-/usr/local/libexec/caddy-abuseguard           Go engine
-/etc/caddy/Caddyfile                          your sites
-/etc/caddy/abuseguard.caddy                   the (abuseguard) snippet
-/etc/caddy-abuseguard/config.json             engine config
-/etc/caddy-abuseguard/whitelist               never-ban list
-/etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key (optional)
-/var/lib/caddy-abuseguard/                     intel list + report queue/state
-/var/log/caddy/abuseguard-access.json         privacy-trimmed access log
+/usr/local/bin/caddy                          Caddy（内置 caddy-dns/cloudflare）
+/usr/local/bin/abuseguard                     控制面板
+/usr/local/libexec/caddy-abuseguard           Go 引擎
+/etc/caddy/Caddyfile                          你的站点
+/etc/caddy/abuseguard.caddy                   (abuseguard) 片段
+/etc/caddy-abuseguard/config.json             引擎配置
+/etc/caddy-abuseguard/whitelist               永不封禁名单
+/etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key（可选）
+/var/lib/caddy-abuseguard/                     情报名单 + 上报队列/状态
+/var/log/caddy/abuseguard-access.json         隐私精简的访问日志
 ```
 
-## Update / uninstall
+## 更新 / 卸载
 
 ```bash
-sudo abuseguard                 # → 10 update, → 11 uninstall
-sudo ./uninstall.sh             # remove program files, keep config/state
-sudo ./uninstall.sh --purge     # also remove config, whitelist, state, logs
-sudo ./uninstall.sh --dry-run   # show what would be removed, change nothing
+sudo abuseguard                 # → 10 更新，→ 11 卸载
+sudo ./uninstall.sh             # 删除程序文件，保留配置/状态
+sudo ./uninstall.sh --purge     # 连配置、白名单、状态、日志一并删除
+sudo ./uninstall.sh --dry-run   # 只打印将删除什么，不做任何改动
 ```
 
-Uninstall leaves the Caddy binary, the service accounts, and existing nft bans in place.
+卸载会保留 Caddy 二进制、服务账户，以及已有的 nft 封禁规则。
 
-## Security notes
+## 安全须知
 
-- Caddy adds no authentication. Anything you expose is public unless you add auth yourself.
-- The installer's self-test site binds `127.0.0.1:8080` only.
-- Secrets (`*.key`, `.env`) are mode 0640 and git-ignored; never commit them.
+- Caddy 本身不提供任何鉴权。凡是你对外暴露的站点，除非你自己加了鉴权，否则都是公开的。
+- 安装器的自检站点只绑定 `127.0.0.1:8080`。
+- 密钥（`*.key`、`.env`）权限为 0640 且已被 git 忽略；切勿提交。
 
-## Build / release
+## 构建 / 发布
 
-- `engine/` is a single Go module, stdlib only, `go 1.21`.
-- Tagging `vX.Y.Z` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `caddy-abuseguard-linux-{amd64,arm64}` and attaches them to the release. `install.sh` downloads these by default.
+- `engine/` 是单个 Go module，仅用标准库，`go 1.21`。
+- 打 `vX.Y.Z` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，它构建 `caddy-abuseguard-linux-{amd64,arm64}` 并附加到 release。`install.sh` 默认下载这些产物。
 
-See [docs/design.md](docs/design.md) for the architecture and the fail-safe rules.
+架构与「失败即安全」规则详见 [docs/design.md](docs/design.md)。
 
-## License
+## 许可证
 
-MIT — see [LICENSE](LICENSE).
+MIT —— 见 [LICENSE](LICENSE)。
