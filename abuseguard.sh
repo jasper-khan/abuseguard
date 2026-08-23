@@ -72,18 +72,39 @@ header() {
 }
 
 act_status() {
-	echo "== 服务 =="
-	for s in caddy fail2ban; do printf "  %-10s %s\n" "$s" "$(svc_state "$s")"; done
-	echo; echo "== jail =="; fail2ban-client status 2>/dev/null | sed 's/^/  /'
-	echo; echo "== 定时器 =="; systemctl list-timers 'caddy-abuseguard-*' --no-pager 2>/dev/null | sed -n '1,6p'
+	local st n desc next
+	echo "服务状态："
+	for s in caddy fail2ban; do
+		st="$(svc_state "$s")"; [ "$st" = active ] && st="运行中"
+		printf "  %-12s%s\n" "$s" "$st"
+	done
+	echo
+	echo "封禁 jail（各自当前封禁数）："
+	for j in $JAILS; do
+		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
+		[ -z "$n" ] && n="未启用"
+		printf "  %-20s%s\n" "$j" "$n"
+	done
+	echo
+	echo "定时任务："
+	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
+		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
+		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
+			next="$(systemctl show "$u" -p NextElapseUSecRealtime --value 2>/dev/null)"
+			case "$next" in ""|0|n/a) echo "  $desc：已启用" ;; *) echo "  $desc：已启用（下次 $next）" ;; esac
+		else
+			echo "  $desc：未启用"
+		fi
+	done
 	pause
 }
 
 act_banned() {
+	local ips
 	for j in $JAILS; do
 		echo "== $j =="
-		fail2ban-client status "$j" 2>/dev/null \
-			| sed -n '/Banned IP list/s/.*:[[:space:]]*//p' | tr ' ' '\n' | sed '/^$/d;s/^/  /'
+		ips="$(fail2ban-client status "$j" 2>/dev/null | sed -n '/Banned IP list/s/.*:[[:space:]]*//p' | tr ' ' '\n' | sed '/^$/d')"
+		if [ -n "$ips" ]; then printf '%s\n' "$ips" | sed 's/^/  /'; else echo "  （无）"; fi
 	done
 	pause
 }

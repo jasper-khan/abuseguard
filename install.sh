@@ -38,14 +38,14 @@ gh_fetch() {
 		""|0|off|no)
 			$AG_CURL -o "$out" "$url" && return 0
 			for pfx in $AG_GH_MIRRORS; do
-				warn "direct download stalled; trying mirror ${pfx#https://}"
+				warn "直连下载卡住，改用镜像 ${pfx#https://}"
 				$AG_CURL -o "$out" "$pfx$url" && return 0
 			done
 			return 1 ;;
 		cn|1|yes|on)
 			for pfx in $AG_GH_MIRRORS; do
 				$AG_CURL -o "$out" "$pfx$url" && return 0
-				warn "mirror ${pfx#https://} failed; trying next"
+				warn "镜像 ${pfx#https://} 失败，尝试下一个"
 			done
 			return 1 ;;
 		*)
@@ -73,22 +73,22 @@ log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" = "0" ] || die "please run as root (sudo)."
+[ "$(id -u)" = "0" ] || die "请以 root 运行（sudo）。"
 
 # --- self-bootstrap ----------------------------------------------------------
 # When run detached from the repo (e.g. `curl ... install.sh | bash`), the
 # asset/engine trees are missing next to this script. Fetch the repo tarball
 # into a temp dir and re-exec from there so the one-command install works.
 if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
-	command -v tar >/dev/null 2>&1 || die "tar is required to bootstrap the installer."
+	command -v tar >/dev/null 2>&1 || die "自举需要 tar 命令。"
 	AG_REF="${ABUSEGUARD_REF:-main}"
 	AG_TMP="$(mktemp -d)"
 	trap 'rm -rf "$AG_TMP"' EXIT
-	log "fetching repo $ABUSEGUARD_REPO@$AG_REF ..."
+	log "正在获取仓库 $ABUSEGUARD_REPO@$AG_REF ..."
 	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz" "$AG_TMP/repo.tar.gz" \
-		|| die "bootstrap download failed (set ABUSEGUARD_REPO / ABUSEGUARD_REF, or clone the repo and run ./install.sh)."
+		|| die "自举下载失败（可设置 ABUSEGUARD_REPO / ABUSEGUARD_REF，或克隆仓库后运行 ./install.sh）。"
 	tar -xzf "$AG_TMP/repo.tar.gz" -C "$AG_TMP" --strip-components=1 \
-		|| die "bootstrap extract failed."
+		|| die "自举解压失败。"
 	rm -f "$AG_TMP/repo.tar.gz"
 	export ABUSEGUARD_REPO ABUSEGUARD_REF
 	# Run (not exec) the unpacked installer so the EXIT trap above still fires
@@ -98,31 +98,31 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 fi
 
 # --- OS + arch guard ---------------------------------------------------------
-. /etc/os-release 2>/dev/null || die "cannot read /etc/os-release."
+. /etc/os-release 2>/dev/null || die "无法读取 /etc/os-release。"
 case " ${ID:-} ${ID_LIKE:-} " in
 	*" debian "*|*" ubuntu "*) : ;;
-	*) die "unsupported OS '${PRETTY_NAME:-unknown}'. AbuseGuard supports Debian/Ubuntu only." ;;
+	*) die "不支持的系统 '${PRETTY_NAME:-unknown}'。AbuseGuard 仅支持 Debian/Ubuntu。" ;;
 esac
 case "$(uname -m)" in
 	x86_64|amd64) ARCH=amd64 ;;
 	aarch64|arm64) ARCH=arm64 ;;
-	*) die "unsupported architecture '$(uname -m)'. Only amd64/arm64 are supported." ;;
+	*) die "不支持的架构 '$(uname -m)'。仅支持 amd64/arm64。" ;;
 esac
-log "target: ${PRETTY_NAME:-Debian/Ubuntu} ($ARCH)"
+log "目标系统：${PRETTY_NAME:-Debian/Ubuntu}（$ARCH）"
 
 # --- dependencies ------------------------------------------------------------
-log "installing dependencies (fail2ban, nftables, curl, jq, libcap2-bin)..."
+log "正在安装依赖（fail2ban、nftables、curl、jq、libcap2-bin）..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq fail2ban nftables curl jq ca-certificates libcap2-bin >/dev/null
 
 # --- service accounts --------------------------------------------------------
 if ! id caddy >/dev/null 2>&1; then
-	log "creating system user 'caddy'"
+	log "创建系统用户 'caddy'"
 	useradd --system --user-group --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
 fi
 if ! id abuseguard >/dev/null 2>&1; then
-	log "creating system user 'abuseguard'"
+	log "创建系统用户 'abuseguard'"
 	useradd --system --user-group --shell /usr/sbin/nologin abuseguard
 fi
 
@@ -135,26 +135,26 @@ install -d -m 0750 -o caddy -g caddy "$LOG_DIR"
 # --- engine ------------------------------------------------------------------
 install_engine() {
 	if [ -n "${ABUSEGUARD_ENGINE_BIN:-}" ]; then
-		[ -f "$ABUSEGUARD_ENGINE_BIN" ] || die "ABUSEGUARD_ENGINE_BIN '$ABUSEGUARD_ENGINE_BIN' not found."
-		log "installing engine from ABUSEGUARD_ENGINE_BIN"
+		[ -f "$ABUSEGUARD_ENGINE_BIN" ] || die "找不到 ABUSEGUARD_ENGINE_BIN 指定的文件 '$ABUSEGUARD_ENGINE_BIN'。"
+		log "从 ABUSEGUARD_ENGINE_BIN 安装引擎"
 		install -m 0755 "$ABUSEGUARD_ENGINE_BIN" "$ENGINE_BIN"
 		return
 	fi
 	if [ "$FROM_SOURCE" = "1" ]; then
-		command -v go >/dev/null 2>&1 || die "--from-source needs the Go toolchain (install 'go' first)."
-		log "building engine from source ($SRC_DIR/engine)"
+		command -v go >/dev/null 2>&1 || die "--from-source 需要 Go 工具链（请先安装 go）。"
+		log "从源码编译引擎（$SRC_DIR/engine）"
 		( cd "$SRC_DIR/engine" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$ENGINE_BIN" . )
 		chmod 0755 "$ENGINE_BIN"
 		return
 	fi
 	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/caddy-abuseguard-linux-$ARCH"
-	log "downloading engine (linux-$ARCH)..."
+	log "正在下载引擎（linux-$ARCH）..."
 	gh_fetch "$url" "$ENGINE_BIN" \
-		|| die "engine download failed (tried direct + mirrors). Use --from-source or set ABUSEGUARD_ENGINE_BIN."
+		|| die "引擎下载失败（直连与镜像都失败）。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
 	chmod 0755 "$ENGINE_BIN"
 }
 install_engine
-log "engine: $("$ENGINE_BIN" version 2>/dev/null || echo installed)"
+log "引擎：$("$ENGINE_BIN" version 2>/dev/null || echo 已安装)"
 
 # --- config, whitelist, key (only if absent) ---------------------------------
 if [ ! -f "$CONF_DIR/config.json" ]; then
@@ -166,21 +166,21 @@ if [ ! -f "$CONF_DIR/config.json" ]; then
 		jq '.intel.source_url = "https://fastly.jsdelivr.net/gh/borestad/blocklist-abuseipdb@{commit}/abuseipdb-s100-14d.ipv4"' \
 			"$CONF_DIR/config.json" > "$tmp" && install -m 0640 -o root -g abuseguard "$tmp" "$CONF_DIR/config.json"
 		rm -f "$tmp"
-		log "mirror mode: intel source set to fastly.jsdelivr"
+		log "镜像模式：情报源已切换到 fastly.jsdelivr"
 	fi
-	log "wrote $CONF_DIR/config.json"
+	log "已写入 $CONF_DIR/config.json"
 else
-	log "kept existing $CONF_DIR/config.json"
+	log "保留已有的 $CONF_DIR/config.json"
 fi
 if [ ! -f "$CONF_DIR/whitelist" ]; then
 	install -m 0640 -o root -g abuseguard "$SRC_DIR/assets/whitelist.default" "$CONF_DIR/whitelist"
-	log "wrote $CONF_DIR/whitelist"
+	log "已写入 $CONF_DIR/whitelist"
 else
-	log "kept existing $CONF_DIR/whitelist"
+	log "保留已有的 $CONF_DIR/whitelist"
 fi
 if [ ! -f "$CONF_DIR/abuseipdb-report.key" ]; then
 	install -m 0640 -o root -g abuseguard /dev/null "$CONF_DIR/abuseipdb-report.key"
-	log "created empty $CONF_DIR/abuseipdb-report.key (set your key via the panel)"
+	log "已创建空的 $CONF_DIR/abuseipdb-report.key（可在面板中设置 key）"
 fi
 printf '%s\n' "$ABUSEGUARD_REPO" > "$CONF_DIR/repo"; chmod 0644 "$CONF_DIR/repo"
 
@@ -190,34 +190,34 @@ if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q 'dns.p
 	need_caddy=0
 fi
 if [ "$need_caddy" = "1" ]; then
-	log "downloading Caddy with caddy-dns/cloudflare ($ARCH)..."
+	log "正在下载带 caddy-dns/cloudflare 的 Caddy（$ARCH）..."
 	curl -fsSL -o "$CADDY_BIN" "https://caddyserver.com/api/download?os=linux&arch=$ARCH&p=github.com/caddy-dns/cloudflare" \
-		|| die "Caddy download failed."
+		|| die "Caddy 下载失败。"
 	chmod 0755 "$CADDY_BIN"
 else
-	log "existing Caddy already has the cloudflare module"
+	log "已有的 Caddy 已包含 cloudflare 模块"
 fi
-setcap 'cap_net_bind_service=+ep' "$CADDY_BIN" || warn "setcap failed; Caddy may need root to bind :80/:443"
+setcap 'cap_net_bind_service=+ep' "$CADDY_BIN" || warn "setcap 失败；Caddy 绑定 :80/:443 可能需要 root"
 
 # --- Caddy snippet + env + systemd unit --------------------------------------
 install -m 0644 "$SRC_DIR/assets/caddy/abuseguard.caddy" "$SNIPPET"
 if [ ! -f "$CADDY_ENV" ]; then
 	printf 'CF_API_TOKEN=\n' > "$CADDY_ENV"; chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
-	log "created $CADDY_ENV (set CF_API_TOKEN via the panel)"
+	log "已创建 $CADDY_ENV（可在面板中设置 CF_API_TOKEN）"
 fi
 install -m 0644 "$SRC_DIR/assets/systemd/caddy.service" /etc/systemd/system/caddy.service
 
 # --- Caddyfile (only if absent) ----------------------------------------------
 if [ ! -f "$CADDYFILE" ]; then
-	log "fetching Cloudflare IP ranges for trusted_proxies..."
+	log "正在获取 Cloudflare IP 段用于 trusted_proxies..."
 	CF_V4="$(curl -fsSL https://www.cloudflare.com/ips-v4 2>/dev/null || true)"
 	CF_V6="$(curl -fsSL https://www.cloudflare.com/ips-v6 2>/dev/null || true)"
 	CF_RANGES="$(printf '%s\n%s\n' "$CF_V4" "$CF_V6" | grep -E '[0-9a-fA-F:.]+/[0-9]+' | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')"
-	[ -n "$CF_RANGES" ] || warn "could not fetch Cloudflare ranges; trusting loopback only"
+	[ -n "$CF_RANGES" ] || warn "无法获取 Cloudflare IP 段；仅信任回环地址"
 	cat > "$CADDYFILE" <<EOF
-# Generated by AbuseGuard install.sh. Edit freely.
+# 由 AbuseGuard install.sh 生成，可自由编辑。
 #
-# The global block trusts your edge proxy so client_ip is the real visitor.
+# 全局块信任你的边缘代理，使 client_ip 为真实访客 IP。
 {
 	servers {
 		trusted_proxies static 127.0.0.1/8 ::1 ${CF_RANGES}
@@ -225,18 +225,18 @@ if [ ! -f "$CADDYFILE" ]; then
 	}
 }
 
-# Load the AbuseGuard logging/probe snippet once.
+# 引入一次 AbuseGuard 的日志/探测片段。
 import ${SNIPPET}
 
-# Loopback-only self-test site created by the installer. Safe to remove.
-# It proves the log + fail2ban pipeline works without exposing anything.
+# 安装器创建的仅回环自检站点，可安全删除。
+# 它在不暴露任何东西的情况下验证 日志 + fail2ban 链路是否正常。
 http://127.0.0.1:8080 {
 	bind 127.0.0.1
 	import abuseguard
 	respond "abuseguard test ok"
 }
 
-# --- Add your real sites below, e.g.: ----------------------------------------
+# --- 在下面添加你的真实站点，例如： ------------------------------------------
 # example.com {
 # 	import abuseguard
 # 	tls {
@@ -245,16 +245,16 @@ http://127.0.0.1:8080 {
 # 	reverse_proxy localhost:3000
 # }
 EOF
-	log "wrote $CADDYFILE"
+	log "已写入 $CADDYFILE"
 else
-	log "kept existing $CADDYFILE (add 'import $SNIPPET' + 'import abuseguard' yourself)"
+	log "保留已有的 $CADDYFILE（请自行加入 'import $SNIPPET' 和 'import abuseguard'）"
 fi
 
 # ensure the access log exists and is caddy-writable before fail2ban starts
 [ -e "$LOG_DIR/abuseguard-access.json" ] || install -m 0640 -o caddy -g caddy /dev/null "$LOG_DIR/abuseguard-access.json"
 
 # --- fail2ban assets ---------------------------------------------------------
-log "installing fail2ban filters / action / jails"
+log "正在安装 fail2ban 的 filter / action / jail"
 install -m 0644 "$SRC_DIR"/assets/fail2ban/filter.d/*.conf /etc/fail2ban/filter.d/
 install -m 0644 "$SRC_DIR"/assets/fail2ban/action.d/*.conf /etc/fail2ban/action.d/
 install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/caddy-abuseguard.local" /etc/fail2ban/jail.d/caddy-abuseguard.local
@@ -267,70 +267,81 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/s
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 
 # --- optional interactive setup ----------------------------------------------
-# Prompt for the two secrets when a real terminal is available. We *open*
-# /dev/tty (fd 3) rather than test -r, because the device node can exist
-# without a usable controlling terminal (containers, piped runs) — opening it
-# is the only reliable check. Works under `bash <(curl ...)` and `curl | bash`;
-# skips cleanly (no error) with no tty or when ABUSEGUARD_NONINTERACTIVE=1.
+# Ask (y/N, default No) before prompting for each secret, so a plain Enter
+# means "don't configure now". Reads from an explicitly-opened /dev/tty so it
+# works under `bash <(curl ...)` and `curl | bash`; skips cleanly with no tty
+# or when ABUSEGUARD_NONINTERACTIVE=1.
 if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; then
 	echo
-	log "Optional setup — press Enter to skip either one (set later with: abuseguard)."
-	printf '  Cloudflare API token (for TLS via DNS; Enter = skip): '
-	IFS= read -r cf_token <&3 || cf_token=""
-	if [ -n "$cf_token" ]; then
-		printf 'CF_API_TOKEN=%s\n' "$cf_token" > "$CADDY_ENV"
-		chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
-		log "saved Cloudflare token"
-	else
-		log "skipped Cloudflare token"
-	fi
-	printf '  AbuseIPDB API key (for auto-reporting; Enter = skip): '
-	IFS= read -r aipdb_key <&3 || aipdb_key=""
-	if [ -n "$aipdb_key" ]; then
-		printf '%s\n' "$aipdb_key" > "$CONF_DIR/abuseipdb-report.key"
-		chown root:abuseguard "$CONF_DIR/abuseipdb-report.key"; chmod 0640 "$CONF_DIR/abuseipdb-report.key"
-		log "saved AbuseIPDB key"
-	else
-		log "skipped AbuseIPDB key (reporting stays idle until a key is set)"
-	fi
+	log "可选配置（以下两项都可稍后随时用 abuseguard 面板设置）"
+	printf '  现在设置 Cloudflare API token 吗？（用于自动签发 TLS 证书）[y/N] '
+	IFS= read -r ans <&3 || ans=""
+	case "$ans" in
+		[yY]|[yY][eE][sS])
+			printf '    请粘贴 Cloudflare API token（回车确认）: '
+			IFS= read -r cf_token <&3 || cf_token=""
+			if [ -n "$cf_token" ]; then
+				printf 'CF_API_TOKEN=%s\n' "$cf_token" > "$CADDY_ENV"
+				chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
+				log "已保存 Cloudflare token"
+			else
+				log "未输入，跳过 Cloudflare token"
+			fi ;;
+		*) log "跳过 Cloudflare token" ;;
+	esac
+	printf '  现在设置 AbuseIPDB API key 吗？（用于自动上报恶意 IP）[y/N] '
+	IFS= read -r ans <&3 || ans=""
+	case "$ans" in
+		[yY]|[yY][eE][sS])
+			printf '    请粘贴 AbuseIPDB API key（回车确认）: '
+			IFS= read -r aipdb_key <&3 || aipdb_key=""
+			if [ -n "$aipdb_key" ]; then
+				printf '%s\n' "$aipdb_key" > "$CONF_DIR/abuseipdb-report.key"
+				chown root:abuseguard "$CONF_DIR/abuseipdb-report.key"; chmod 0640 "$CONF_DIR/abuseipdb-report.key"
+				log "已保存 AbuseIPDB key"
+			else
+				log "未输入，跳过 AbuseIPDB key"
+			fi ;;
+		*) log "跳过 AbuseIPDB key（设置前不会上报）" ;;
+	esac
 	exec 3<&-
 else
-	log "non-interactive run: skipping token prompts (set later via: abuseguard)"
+	log "非交互运行：跳过密钥询问（稍后用 abuseguard 面板设置）"
 fi
 
 # --- validate + enable -------------------------------------------------------
-log "validating Caddyfile"
-"$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null || die "Caddyfile validation failed."
+log "正在校验 Caddyfile"
+"$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null || die "Caddyfile 校验失败。"
 
 systemctl daemon-reload
-log "enabling + starting services"
+log "正在启用并启动服务"
 # reload-or-restart (not just enable --now) so a re-run reloads the freshly
 # written Caddyfile / fail2ban jails even when the service is already running.
 systemctl enable caddy >/dev/null 2>&1 || true
-systemctl reload-or-restart caddy || die "failed to start caddy (see: journalctl -u caddy)"
+systemctl reload-or-restart caddy || die "caddy 启动失败（查看：journalctl -u caddy）"
 systemctl enable fail2ban >/dev/null 2>&1 || true
-systemctl reload-or-restart fail2ban || warn "fail2ban did not start cleanly (see: journalctl -u fail2ban)"
+systemctl reload-or-restart fail2ban || warn "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
-log "AbuseGuard installed."
+log "AbuseGuard 安装完成。"
 cat <<EOF
 
   ============================================================
-    Open the control panel:   abuseguard
+    打开控制面板：  abuseguard
   ============================================================
 
-  In the panel: set/change the Cloudflare token (7) and
-  AbuseIPDB key (6), list bans, sync intel, view logs, etc.
+  面板里可以：设置/修改 Cloudflare token（7）与 AbuseIPDB
+  key（6）、查看封禁、同步情报、查看日志等。
 
-  Files:
+  文件位置：
     Caddyfile:    $CADDYFILE
-    Whitelist:    $CONF_DIR/whitelist
-    Config:       $CONF_DIR/config.json
-    Access log:   $LOG_DIR/abuseguard-access.json
+    白名单:       $CONF_DIR/whitelist
+    配置:         $CONF_DIR/config.json
+    访问日志:     $LOG_DIR/abuseguard-access.json
 
-  Add your sites to $CADDYFILE (put 'import abuseguard'
-  inside each site block), then: sudo systemctl reload caddy
+  在 $CADDYFILE 里添加你的站点（每个站点块内放
+  'import abuseguard'），然后执行：sudo systemctl reload caddy
 
-SECURITY: Caddy adds no authentication. Any site you expose is public unless
-you add auth yourself. The bundled self-test site binds 127.0.0.1 only.
+安全提示：Caddy 本身不提供鉴权。凡是你对外暴露的站点，除非自行加鉴权，
+否则都是公开的。安装器自带的自检站点只绑定 127.0.0.1。
 EOF
