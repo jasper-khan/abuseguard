@@ -119,9 +119,19 @@ install_engine() {
 		return
 	fi
 	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/caddy-abuseguard-linux-$ARCH"
-	url="$(gh_proxy "$url")"
-	log "downloading engine: $url"
-	curl -fsSL -o "$ENGINE_BIN" "$url" || die "engine download failed. Use --from-source or set ABUSEGUARD_ENGINE_BIN."
+	log "downloading engine: $(gh_proxy "$url")"
+	# Try the (possibly mirrored) URL; if that fails and no mirror was set,
+	# auto-fall back to the ghfast.top proxy so the plain one-liner still works
+	# from networks where github.com release downloads are flaky (e.g. CN).
+	if ! curl -fsSL --retry 2 -o "$ENGINE_BIN" "$(gh_proxy "$url")"; then
+		if [ -z "$ABUSEGUARD_MIRROR" ]; then
+			warn "direct download failed; retrying via ghfast.top mirror"
+			curl -fsSL --retry 2 -o "$ENGINE_BIN" "https://ghfast.top/$url" \
+				|| die "engine download failed. Use --from-source or set ABUSEGUARD_ENGINE_BIN."
+		else
+			die "engine download failed. Use --from-source or set ABUSEGUARD_ENGINE_BIN."
+		fi
+	fi
 	chmod 0755 "$ENGINE_BIN"
 }
 install_engine
