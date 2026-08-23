@@ -148,7 +148,7 @@ act_whitelist() {
 			i=1; for line in "${items[@]}"; do printf "  %2d) %s\n" "$i" "$line"; i=$((i+1)); done
 		fi
 		echo
-		echo "  a) 添加    d) 删除    e) 用编辑器打开    0) 返回"
+		echo "  [a] 添加    [d] 删除    [e] 用编辑器打开    [0] 返回"
 		read -r -p "请选择: " c
 		case "$c" in
 			a|A)
@@ -219,7 +219,7 @@ act_sites() {
 			echo "  证书方式：Caddy 自动 HTTPS（需 80/443 可直达；在面板设 CF token 可改用 DNS）"
 		fi
 		echo
-		echo "  a) 添加站点    d) 删除站点    0) 返回"
+		echo "  [a] 添加站点    [d] 删除站点    [0] 返回"
 		read -r -p "请选择: " choice
 		case "$choice" in
 			a|A)
@@ -227,7 +227,7 @@ act_sites() {
 				dom="$(printf '%s' "$dom" | tr -d '[:space:]')"
 				domain_valid "$dom" || { echo "  域名格式无效"; sleep 1; continue; }
 				[ -e "$SITES_DIR/$dom.caddy" ] && { echo "  该域名已存在"; sleep 1; continue; }
-				echo "  上游类型：1) 本地端口（localhost:端口）   2) 远程 IP:端口"
+				echo "  上游类型：[1] 本地端口（localhost:端口）   [2] 远程 IP:端口"
 				read -r -p "  选择 [1/2]: " t
 				case "$t" in
 					1) read -r -p "  本地端口: " port; port="$(printf '%s' "$port" | tr -d '[:space:]')"
@@ -341,19 +341,19 @@ act_uninstall() {
 menu() {
 	header
 	cat <<'MENU'
-   1) 状态（服务、受保护站点、jail、定时器）
-   2) 站点/反代管理（加域名→自动 import abuseguard）
-   3) 查看被封禁的 IP（按 jail）
-   4) 编辑白名单
-   5) 立即同步威胁情报
-   6) 立即冲刷上报队列
-   7) 设置 AbuseIPDB API key
-   8) 设置 Cloudflare API token
-   9) 开关 AbuseIPDB 上报
-  10) 查看最近日志
-  11) 更新 AbuseGuard（重新运行安装器）
-  12) 卸载
-   0) 退出
+   [1]  状态（服务、受保护站点、jail、定时器）
+   [2]  站点/反代管理（加域名→自动 import abuseguard）
+   [3]  查看被封禁的 IP（按 jail）
+   [4]  编辑白名单
+   [5]  立即同步威胁情报
+   [6]  立即冲刷上报队列
+   [7]  设置 AbuseIPDB API key
+   [8]  设置 Cloudflare API token
+   [9]  开关 AbuseIPDB 上报
+  [10]  查看最近日志
+  [11]  更新 AbuseGuard（重新运行安装器）
+  [12]  卸载
+   [0]  退出
 MENU
 	echo
 	read -r -p "请选择: " choice
