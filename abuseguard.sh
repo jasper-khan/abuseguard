@@ -7,7 +7,10 @@ CONFIG="$CONF_DIR/config.json"
 WHITELIST="$CONF_DIR/whitelist"
 KEYFILE="$CONF_DIR/abuseipdb-report.key"
 ENGINE=/usr/local/libexec/caddy-abuseguard
+CADDY=/usr/local/bin/caddy
 CADDY_ENV=/etc/caddy/.env
+CADDYFILE=/etc/caddy/Caddyfile
+SITES_DIR=/etc/caddy/sites
 STATE_DIR=/var/lib/caddy-abuseguard
 INTEL="$STATE_DIR/intel.txt"
 JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2"
@@ -72,12 +75,19 @@ header() {
 }
 
 act_status() {
-	local st n desc next
+	local st n desc next d u
 	echo "服务状态："
 	for s in caddy fail2ban; do
 		st="$(svc_state "$s")"; [ "$st" = active ] && st="运行中"
 		printf "  %-12s%s\n" "$s" "$st"
 	done
+	echo
+	echo "受保护站点（域名 → 反代上游）："
+	if [ -n "$(sites_lines)" ]; then
+		while IFS=$'\t' read -r d u; do [ -n "$d" ] && printf "  %-28s → %s\n" "$d" "$u"; done < <(sites_lines)
+	else
+		echo "  （暂无，可用菜单「站点/反代管理」添加）"
+	fi
 	echo
 	echo "封禁 jail（各自当前封禁数）："
 	for j in $JAILS; do
@@ -168,6 +178,103 @@ act_whitelist() {
 	done
 }
 
+# ---- 站点 / 反向代理管理 ----
+# CF token 是否已设置（决定站点用 Cloudflare DNS 还是 Caddy 默认 HTTPS）
+cf_is_set() { grep -qE '^CF_API_TOKEN=.+' "$CADDY_ENV" 2>/dev/null; }
+# 域名校验（example.com、a.b.co）
+domain_valid() { printf '%s' "$1" | grep -qiE '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$'; }
+# 端口校验（1-65535）
+port_valid() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+# host:port 校验
+hostport_valid() { local h="${1%:*}" p="${1##*:}"; [ "$1" != "$h" ] && [ -n "$h" ] && port_valid "$p"; }
+# 列出受保护站点：每行「域名<TAB>上游」
+sites_lines() {
+	local f base up
+	for f in "$SITES_DIR"/*.caddy; do
+		[ -e "$f" ] || continue
+		base="$(basename "$f" .caddy)"; [ "$base" = "_placeholder" ] && continue
+		up="$(grep -oE 'reverse_proxy[[:space:]]+[^ ]+' "$f" 2>/dev/null | head -1 | awk '{print $2}')"
+		printf '%s\t%s\n' "$base" "${up:-?}"
+	done
+}
+
+act_sites() {
+	local choice dom t port hp up tls f num target out d u
+	local -a doms
+	while true; do
+		clear 2>/dev/null || true
+		echo -e "${C_B}== 站点 / 反向代理（每个站点自动启用 AbuseGuard 防护）==${C_0}"
+		echo
+		doms=()
+		while IFS=$'\t' read -r d u; do
+			[ -n "$d" ] || continue
+			doms+=("$d")
+			printf "  %2d) %-28s → %s\n" "${#doms[@]}" "$d" "$u"
+		done < <(sites_lines)
+		[ "${#doms[@]}" -eq 0 ] && echo "  （暂无站点）"
+		echo
+		if cf_is_set; then
+			echo "  证书方式：Cloudflare DNS（已配置 CF token）"
+		else
+			echo "  证书方式：Caddy 自动 HTTPS（需 80/443 可直达；在面板设 CF token 可改用 DNS）"
+		fi
+		echo
+		echo "  a) 添加站点    d) 删除站点    0) 返回"
+		read -r -p "请选择: " choice
+		case "$choice" in
+			a|A)
+				read -r -p "  域名（如 example.com）: " dom
+				dom="$(printf '%s' "$dom" | tr -d '[:space:]')"
+				domain_valid "$dom" || { echo "  域名格式无效"; sleep 1; continue; }
+				[ -e "$SITES_DIR/$dom.caddy" ] && { echo "  该域名已存在"; sleep 1; continue; }
+				echo "  上游类型：1) 本地端口（localhost:端口）   2) 远程 IP:端口"
+				read -r -p "  选择 [1/2]: " t
+				case "$t" in
+					1) read -r -p "  本地端口: " port; port="$(printf '%s' "$port" | tr -d '[:space:]')"
+					   port_valid "$port" || { echo "  端口无效"; sleep 1; continue; }
+					   up="localhost:$port" ;;
+					2) read -r -p "  远程 IP:端口（如 10.0.0.5:8080）: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
+					   hostport_valid "$hp" || { echo "  IP:端口 格式无效"; sleep 1; continue; }
+					   up="$hp" ;;
+					*) continue ;;
+				esac
+				if cf_is_set; then
+					tls=$'\ttls {\n\t\tdns cloudflare {env.CF_API_TOKEN}\n\t}\n'
+				else
+					tls=""
+				fi
+				f="$SITES_DIR/$dom.caddy"
+				{
+					printf '%s {\n' "$dom"
+					printf '\timport abuseguard\n'
+					[ -n "$tls" ] && printf '%s' "$tls"
+					printf '\treverse_proxy %s\n}\n' "$up"
+				} > "$f"
+				chmod 0644 "$f"
+				out="$("$CADDY" validate --config "$CADDYFILE" --adapter caddyfile 2>&1)"
+				if [ $? -ne 0 ]; then
+					rm -f "$f"
+					echo "  配置校验失败，已回滚。错误："
+					printf '%s\n' "$out" | grep -iE 'error|invalid' | head -3 | sed 's/^/    /'
+					sleep 2; continue
+				fi
+				systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
+				echo "  已添加 $dom → $up （caddy 已重载）"; sleep 1 ;;
+			d|D)
+				[ "${#doms[@]}" -eq 0 ] && { echo "  没有可删除的站点"; sleep 1; continue; }
+				read -r -p "  输入要删除的编号: " num
+				case "$num" in ''|*[!0-9]*) continue ;; esac
+				if [ "$num" -lt 1 ] || [ "$num" -gt "${#doms[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
+				target="${doms[$((num-1))]}"
+				rm -f "$SITES_DIR/$target.caddy"
+				systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
+				echo "  已删除 $target （caddy 已重载）"; sleep 1 ;;
+			0) return ;;
+			*) ;;
+		esac
+	done
+}
+
 act_sync()  { runuser -u abuseguard -- "$ENGINE" sync-intel; pause; }
 act_flush() { runuser -u abuseguard -- "$ENGINE" report send-auto; pause; }
 
@@ -234,33 +341,35 @@ act_uninstall() {
 menu() {
 	header
 	cat <<'MENU'
-   1) 状态（服务、jail、定时器）
-   2) 查看被封禁的 IP（按 jail）
-   3) 编辑白名单
-   4) 立即同步威胁情报
-   5) 立即冲刷上报队列
-   6) 设置 AbuseIPDB API key
-   7) 设置 Cloudflare API token
-   8) 开关 AbuseIPDB 上报
-   9) 查看最近日志
-  10) 更新 AbuseGuard（重新运行安装器）
-  11) 卸载
+   1) 状态（服务、受保护站点、jail、定时器）
+   2) 站点/反代管理（加域名→自动 import abuseguard）
+   3) 查看被封禁的 IP（按 jail）
+   4) 编辑白名单
+   5) 立即同步威胁情报
+   6) 立即冲刷上报队列
+   7) 设置 AbuseIPDB API key
+   8) 设置 Cloudflare API token
+   9) 开关 AbuseIPDB 上报
+  10) 查看最近日志
+  11) 更新 AbuseGuard（重新运行安装器）
+  12) 卸载
    0) 退出
 MENU
 	echo
 	read -r -p "请选择: " choice
 	case "$choice" in
 		1) act_status ;;
-		2) act_banned ;;
-		3) act_whitelist ;;
-		4) act_sync ;;
-		5) act_flush ;;
-		6) act_key ;;
-		7) act_cftoken ;;
-		8) act_toggle ;;
-		9) act_logs ;;
-		10) act_update ;;
-		11) act_uninstall ;;
+		2) act_sites ;;
+		3) act_banned ;;
+		4) act_whitelist ;;
+		5) act_sync ;;
+		6) act_flush ;;
+		7) act_key ;;
+		8) act_cftoken ;;
+		9) act_toggle ;;
+		10) act_logs ;;
+		11) act_update ;;
+		12) act_uninstall ;;
 		0) exit 0 ;;
 		*) ;;
 	esac

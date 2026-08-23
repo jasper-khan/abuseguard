@@ -70,9 +70,10 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 直接运行 `abuseguard`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）：
 
-- 查看服务、jail、定时器的状态
+- 查看状态：服务、**受保护域名**、jail、定时器
+- **站点/反代管理**：输入域名 + 上游（本地端口或远程 IP:端口）即自动生成受保护的反代站点（自动写入 `import abuseguard` + 按需 TLS），也可列出/删除
 - 按 jail 列出当前被封禁的 IP
-- 编辑白名单（会重载 fail2ban）
+- 编辑白名单（面板内增删，会重载 fail2ban）
 - 立即同步威胁情报 / 立即冲刷上报队列
 - 设置 AbuseIPDB key / Cloudflare token
 - 开关 AbuseIPDB 上报

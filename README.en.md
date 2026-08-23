@@ -81,9 +81,10 @@ exists, the installer detects and keeps it, skipping the download.
 
 Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed):
 
-- status of services, jails, and timers
+- status: services, **protected domains**, jails, timers
+- **sites / reverse-proxy manager**: enter a domain + upstream (local port or remote IP:port) and it generates a protected reverse-proxy site (auto `import abuseguard` + TLS as needed); also list/delete
 - list currently-banned IPs per jail
-- edit the whitelist (reloads fail2ban)
+- edit the whitelist (in-panel add/remove, reloads fail2ban)
 - sync threat-intel now / flush the report queue now
 - set the AbuseIPDB key / Cloudflare token
 - toggle AbuseIPDB reporting on/off

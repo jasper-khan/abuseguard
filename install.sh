@@ -65,6 +65,7 @@ CADDY_ETC=/etc/caddy
 CADDY_ENV="$CADDY_ETC/.env"
 CADDYFILE="$CADDY_ETC/Caddyfile"
 SNIPPET="$CADDY_ETC/abuseguard.caddy"
+SITES_DIR="$CADDY_ETC/sites"
 
 FROM_SOURCE=0
 [ "${1:-}" = "--from-source" ] && FROM_SOURCE=1
@@ -204,6 +205,17 @@ setcap 'cap_net_bind_service=+ep' "$CADDY_BIN" || warn "setcap 失败；Caddy �
 
 # --- Caddy snippet + env + systemd unit --------------------------------------
 install -m 0644 "$SRC_DIR/assets/caddy/abuseguard.caddy" "$SNIPPET"
+# Panel-managed reverse-proxy sites live here, one <domain>.caddy each. The
+# placeholder keeps `import sites/*.caddy` matching at least one file (an empty
+# glob would fail Caddyfile adaptation).
+install -d -m 0755 "$SITES_DIR"
+if [ ! -e "$SITES_DIR/_placeholder.caddy" ]; then
+	cat > "$SITES_DIR/_placeholder.caddy" <<'PH'
+# AbuseGuard 站点目录：由面板（abuseguard → 站点/反代管理）自动管理。
+# 每个反代站点一个 <域名>.caddy 文件；本占位文件请勿删除。
+PH
+	chmod 0644 "$SITES_DIR/_placeholder.caddy"
+fi
 if [ ! -f "$CADDY_ENV" ]; then
 	printf 'CF_API_TOKEN=\n' > "$CADDY_ENV"; chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
 	log "已创建 $CADDY_ENV（可在面板中设置 CF_API_TOKEN）"
@@ -231,6 +243,9 @@ if [ ! -f "$CADDYFILE" ]; then
 # 引入一次 AbuseGuard 的日志/探测片段。
 import ${SNIPPET}
 
+# 由面板管理的反代站点（每个域名一个文件）。
+import ${SITES_DIR}/*.caddy
+
 # 安装器创建的仅回环自检站点，可安全删除。
 # 它在不暴露任何东西的情况下验证 日志 + fail2ban 链路是否正常。
 http://127.0.0.1:8080 {
@@ -250,7 +265,11 @@ http://127.0.0.1:8080 {
 EOF
 	log "已写入 $CADDYFILE"
 else
-	log "保留已有的 $CADDYFILE（请自行加入 'import $SNIPPET' 和 'import abuseguard'）"
+	log "保留已有的 $CADDYFILE"
+	if ! grep -q "$SITES_DIR" "$CADDYFILE" 2>/dev/null; then
+		printf '\n# 由面板管理的反代站点\nimport %s/*.caddy\n' "$SITES_DIR" >> "$CADDYFILE"
+		log "已在 Caddyfile 中加入 import sites/*.caddy"
+	fi
 fi
 
 # ensure the access log exists and is caddy-writable before fail2ban starts
