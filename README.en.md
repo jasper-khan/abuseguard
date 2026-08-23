@@ -43,6 +43,14 @@ sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
 
 The installer is idempotent: existing config, whitelist, key, and Caddyfile are never overwritten.
 
+During install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; both can be set later from the panel. When it finishes, the terminal prominently shows how to open the panel:
+
+```bash
+sudo abuseguard
+```
+
+> With no terminal (CI / nohup / piped), the prompts are skipped automatically; you can also force this with `ABUSEGUARD_NONINTERACTIVE=1`.
+>
 > Set `ABUSEGUARD_REPO=you/abuseguard` to install from your own fork.
 
 ### Slow network / China mirror

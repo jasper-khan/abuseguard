@@ -43,6 +43,14 @@ sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go�
 
 安装器是幂等的：已有的 config、whitelist、key 和 Caddyfile 都不会被覆盖。
 
+安装过程中会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，两者都能之后随时在面板里设置。装完终端会醒目显示进面板的命令：
+
+```bash
+sudo abuseguard
+```
+
+> 在无终端的环境（CI / nohup / 管道）里，安装会自动跳过询问；也可显式设 `ABUSEGUARD_NONINTERACTIVE=1` 强制跳过。
+>
 > 设置 `ABUSEGUARD_REPO=you/abuseguard` 可从你自己的 fork 安装。
 
 ### 网络慢 / 大陆镜像

@@ -266,6 +266,38 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.service"   /etc/s
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 
+# --- optional interactive setup ----------------------------------------------
+# Prompt for the two secrets when a real terminal is available. We *open*
+# /dev/tty (fd 3) rather than test -r, because the device node can exist
+# without a usable controlling terminal (containers, piped runs) — opening it
+# is the only reliable check. Works under `bash <(curl ...)` and `curl | bash`;
+# skips cleanly (no error) with no tty or when ABUSEGUARD_NONINTERACTIVE=1.
+if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; then
+	echo
+	log "Optional setup — press Enter to skip either one (set later with: sudo abuseguard)."
+	printf '  Cloudflare API token (for TLS via DNS; Enter = skip): '
+	IFS= read -r cf_token <&3 || cf_token=""
+	if [ -n "$cf_token" ]; then
+		printf 'CF_API_TOKEN=%s\n' "$cf_token" > "$CADDY_ENV"
+		chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
+		log "saved Cloudflare token"
+	else
+		log "skipped Cloudflare token"
+	fi
+	printf '  AbuseIPDB API key (for auto-reporting; Enter = skip): '
+	IFS= read -r aipdb_key <&3 || aipdb_key=""
+	if [ -n "$aipdb_key" ]; then
+		printf '%s\n' "$aipdb_key" > "$CONF_DIR/abuseipdb-report.key"
+		chown root:abuseguard "$CONF_DIR/abuseipdb-report.key"; chmod 0640 "$CONF_DIR/abuseipdb-report.key"
+		log "saved AbuseIPDB key"
+	else
+		log "skipped AbuseIPDB key (reporting stays idle until a key is set)"
+	fi
+	exec 3<&-
+else
+	log "non-interactive run: skipping token prompts (set later via: sudo abuseguard)"
+fi
+
 # --- validate + enable -------------------------------------------------------
 log "validating Caddyfile"
 "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null || die "Caddyfile validation failed."
@@ -283,17 +315,21 @@ systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer
 log "AbuseGuard installed."
 cat <<EOF
 
-  Panel:        sudo abuseguard
-  Caddyfile:    $CADDYFILE
-  Whitelist:    $CONF_DIR/whitelist
-  Config:       $CONF_DIR/config.json
-  Access log:   $LOG_DIR/abuseguard-access.json
+  ============================================================
+    Open the control panel:   sudo abuseguard
+  ============================================================
 
-Next steps:
-  1. sudo abuseguard  ->  option 7 sets your Cloudflare API token (for TLS),
-     option 6 sets your AbuseIPDB key (only needed for auto-reporting).
-  2. Add your sites to $CADDYFILE (put 'import abuseguard' inside each block),
-     then: sudo systemctl reload caddy
+  In the panel: set/change the Cloudflare token (7) and
+  AbuseIPDB key (6), list bans, sync intel, view logs, etc.
+
+  Files:
+    Caddyfile:    $CADDYFILE
+    Whitelist:    $CONF_DIR/whitelist
+    Config:       $CONF_DIR/config.json
+    Access log:   $LOG_DIR/abuseguard-access.json
+
+  Add your sites to $CADDYFILE (put 'import abuseguard'
+  inside each site block), then: sudo systemctl reload caddy
 
 SECURITY: Caddy adds no authentication. Any site you expose is public unless
 you add auth yourself. The bundled self-test site binds 127.0.0.1 only.
