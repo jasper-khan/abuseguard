@@ -132,13 +132,18 @@ example.com {
 ## 更新 / 卸载
 
 ```bash
-abuseguard                 # → 10 更新，→ 11 卸载
-sudo ./uninstall.sh             # 删除程序文件，保留配置/状态
-sudo ./uninstall.sh --purge     # 连配置、白名单、状态、日志一并删除
-sudo ./uninstall.sh --dry-run   # 只打印将删除什么，不做任何改动
+abuseguard                       # 面板：[11] 更新、[12] 卸载
+sudo ./uninstall.sh              # 交互选择：保守 / 彻底
+sudo ./uninstall.sh --conservative   # 保守：删 AbuseGuard，保留 Caddy 和你的反代
+sudo ./uninstall.sh --purge          # 彻底：按安装清单删 AbuseGuard 装的一切
+sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何改动
 ```
 
-卸载会保留 Caddy 二进制、服务账户，以及已有的 nft 封禁规则。
+卸载**对称于安装**：安装时会记录一份清单（哪些是 AbuseGuard 新建的、哪些你原本就有）。
+
+- **保守卸载**：只删 AbuseGuard 组件，并从 Caddyfile 摘掉 AbuseGuard 的引入（`import abuseguard`、snippet、自检站点），**保留你原有的 Caddy、账户和反代配置**。
+- **彻底卸载**：再按清单删 AbuseGuard 安装的 Caddy/账户/配置 —— 但**装之前你已有的一律不动**（原本就有 Caddy 就不会删 Caddy）。清单丢失时自动降级为最保守处理。
+- 用面板加过的反代站点，卸载时可选「保留反代、只去防护」或「一起删」。原有 Caddyfile 在安装时已备份为 `Caddyfile.pre-abuseguard`。
 
 ## 安全须知
 

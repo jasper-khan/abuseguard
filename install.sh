@@ -117,6 +117,16 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq fail2ban nftables curl jq ca-certificates libcap2-bin >/dev/null
 
+# --- record pre-install state (for symmetric uninstall) ----------------------
+# Snapshot what already exists BEFORE creating anything, so uninstall can tell
+# "installed by AbuseGuard" (safe to remove) from "user already had it" (keep).
+PRE_CADDY_BIN=0;  [ -e "$CADDY_BIN" ] && PRE_CADDY_BIN=1 || :
+PRE_CADDY_SVC=0;  [ -e /etc/systemd/system/caddy.service ] && PRE_CADDY_SVC=1 || :
+PRE_CADDY_USER=0; id caddy >/dev/null 2>&1 && PRE_CADDY_USER=1 || :
+PRE_AG_USER=0;    id abuseguard >/dev/null 2>&1 && PRE_AG_USER=1 || :
+PRE_CADDYFILE=0;  [ -e "$CADDYFILE" ] && PRE_CADDYFILE=1 || :
+PRE_CADDY_ETC=0;  [ -e "$CADDY_ETC" ] && PRE_CADDY_ETC=1 || :
+
 # --- service accounts --------------------------------------------------------
 if ! id caddy >/dev/null 2>&1; then
 	log "创建系统用户 'caddy'"
@@ -132,6 +142,21 @@ install -d -m 0755 "$LIBEXEC_DIR" "$CADDY_ETC"
 install -d -m 0750 -o root -g abuseguard "$CONF_DIR"
 install -d -m 0750 -o abuseguard -g abuseguard "$STATE_DIR" "$REPORTS_DIR"
 install -d -m 0750 -o caddy -g caddy "$LOG_DIR"
+
+# Write the install manifest ONCE (first install); a re-run must not overwrite
+# the original pre-install snapshot.
+if [ ! -f "$STATE_DIR/install-manifest" ]; then
+	cat > "$STATE_DIR/install-manifest" <<EOF
+caddy_bin_preexisting=$PRE_CADDY_BIN
+caddy_service_preexisting=$PRE_CADDY_SVC
+caddy_user_preexisting=$PRE_CADDY_USER
+abuseguard_user_preexisting=$PRE_AG_USER
+caddyfile_preexisting=$PRE_CADDYFILE
+caddy_etc_preexisting=$PRE_CADDY_ETC
+EOF
+	chmod 0640 "$STATE_DIR/install-manifest"
+	log "已记录安装清单（供卸载时对称回滚）"
+fi
 
 # --- engine ------------------------------------------------------------------
 install_engine() {
@@ -223,6 +248,12 @@ fi
 install -m 0644 "$SRC_DIR/assets/systemd/caddy.service" /etc/systemd/system/caddy.service
 
 # --- Caddyfile (only if absent) ----------------------------------------------
+# If the user already had a Caddyfile, back it up once so uninstall can restore
+# their exact original config.
+if [ "$PRE_CADDYFILE" = 1 ] && [ ! -e "$CADDY_ETC/Caddyfile.pre-abuseguard" ]; then
+	cp -a "$CADDYFILE" "$CADDY_ETC/Caddyfile.pre-abuseguard"
+	log "已备份原 Caddyfile 到 $CADDY_ETC/Caddyfile.pre-abuseguard"
+fi
 if [ ! -f "$CADDYFILE" ]; then
 	log "正在获取 Cloudflare IP 段用于 trusted_proxies..."
 	CF_V4="$(curl -fsSL https://www.cloudflare.com/ips-v4 2>/dev/null || true)"

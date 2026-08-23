@@ -143,13 +143,25 @@ Then `sudo systemctl reload caddy`. Change the snippet once — every protected 
 ## Update / uninstall
 
 ```bash
-abuseguard                 # → 10 update, → 11 uninstall
-sudo ./uninstall.sh             # remove program files, keep config/state
-sudo ./uninstall.sh --purge     # also remove config, whitelist, state, logs
-sudo ./uninstall.sh --dry-run   # show what would be removed, change nothing
+abuseguard                       # panel: [11] update, [12] uninstall
+sudo ./uninstall.sh              # interactive: conservative / thorough
+sudo ./uninstall.sh --conservative   # conservative: remove AbuseGuard, keep Caddy + your sites
+sudo ./uninstall.sh --purge          # thorough: also remove what AbuseGuard installed
+sudo ./uninstall.sh --dry-run        # show what would be removed, change nothing
 ```
 
-Uninstall leaves the Caddy binary, the service accounts, and existing nft bans in place.
+Uninstall is **symmetric to install**: install records a manifest (what
+AbuseGuard created vs. what you already had).
+
+- **Conservative**: remove AbuseGuard's components and strip its bits from the
+  Caddyfile (`import abuseguard`, the snippet, the self-test site), **keeping
+  your existing Caddy, accounts, and reverse-proxy config**.
+- **Thorough**: additionally remove the Caddy/accounts/config that AbuseGuard
+  installed — but **anything that pre-existed the install is left untouched**
+  (if you already had Caddy, Caddy stays). Falls back to the safest path if the
+  manifest is missing.
+- Panel-added reverse-proxy sites can be kept (de-protected) or deleted. Your
+  original Caddyfile is backed up at install time as `Caddyfile.pre-abuseguard`.
 
 ## Security notes
 
