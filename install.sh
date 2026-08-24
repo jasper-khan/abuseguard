@@ -34,6 +34,10 @@ AG_CURL="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --m
 # total-time cap — a healthy mirror at a moderate ~300KB/s must not be killed
 # mid-download (40MB > 120s), which would churn the whole chain or fail outright.
 AG_CURL_BIG="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10"
+# For the tiny SHA256SUMS.txt: no stall detection (a few hundred bytes never
+# sustains 100KB/s anyway), a short hard cap, and retries. Verification is
+# mandatory, so this fetch is made as robust as possible instead of optional.
+AG_CURL_SUMS="curl -fsL --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 1"
 
 # gh_fetch URL OUTFILE -- download a github.com URL to OUTFILE. Tries a direct
 # download first, then a chain of mirrors, quietly (curl errors -> /dev/null),
@@ -163,28 +167,40 @@ EOF
 fi
 
 # --- integrity: verify downloaded binaries against the release SHA256SUMS -----
-# engine + Caddy come through third-party GitHub proxies, so verify them. The
-# tiny SHA256SUMS.txt is fetched preferring a DIRECT GitHub pull (a few hundred
-# bytes — fine even on a throttled link), then the mirror chain. Honest limit:
-# if you force ONE mirror for everything (ABUSEGUARD_MIRROR=<prefix>/), the sums
-# travel that same path, so this guards against a passive/caching mirror, not an
-# active tamperer on that single forced path.
+# engine + Caddy come through third-party GitHub proxies, so every downloaded
+# binary MUST match the release checksums. Verification is MANDATORY, not
+# best-effort: if the checksums cannot be obtained we abort, rather than quietly
+# installing something unverified. That is practical because the sums file is
+# tiny, so it is fetched over every available route with retries: direct GitHub
+# first (fine even on a throttled link), then the whole mirror chain.
+# Honest limit: if you force ONE mirror for everything (ABUSEGUARD_MIRROR=<prefix>/),
+# the sums travel that same path, so this guards against a passive/caching
+# mirror, not an active tamperer on that single forced path.
 SUMS_FILE=""
-sums_get() {  # OUTFILE — fetch SHA256SUMS.txt (direct first, then mirror chain)
+# sums_require -- fetch SHA256SUMS.txt once, on first actual need (so a
+# --from-source / preset-binary install never fetches it at all). Aborts the
+# install if it cannot be had; it never degrades to "skip verification".
+sums_require() {
+	if [ -n "$SUMS_FILE" ]; then return 0; fi
 	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/SHA256SUMS.txt"
-	$AG_CURL -o "$1" "$url" 2>/dev/null && return 0
-	gh_fetch "$url" "$1"
+	local f; f="$(mktemp)"
+	log "正在获取 SHA256SUMS（校验二进制用）..."
+	if { $AG_CURL_SUMS -o "$f" "$url" 2>/dev/null || gh_fetch "$url" "$f" "$AG_CURL_SUMS"; } && [ -s "$f" ]; then
+		SUMS_FILE="$f"
+		trap 'rm -f "$SUMS_FILE"' EXIT
+		return 0
+	fi
+	rm -f "$f"
+	die "无法获取 SHA256SUMS.txt（直连与镜像均已重试）。为避免安装未经校验的二进制，安装已中止；请检查网络后重试，或用 --from-source 本地编译引擎。"
 }
-sha_for() {  # BASENAME — echo the expected sha256 from SUMS_FILE, or "" if absent
-	{ [ -n "$SUMS_FILE" ] && [ -s "$SUMS_FILE" ]; } || { echo ""; return; }
-	awk -v f="$1" '$2==f || $2=="*"f {print $1; exit}' "$SUMS_FILE"
-}
-verify_sha256() {  # FILE EXPECTED — die on mismatch; skip quietly if EXPECTED=""
-	local file="$1" want="$2" got
-	[ -n "$want" ] || return 0
+verify_sha256() {  # FILE BASENAME -- abort unless FILE matches the release checksum
+	local file="$1" fn="$2" want got
+	sums_require
+	want="$(awk -v f="$fn" '$2==f || $2=="*"f {print $1; exit}' "$SUMS_FILE")"
+	[ -n "$want" ] || die "SHA256SUMS.txt 里没有 $fn 的校验值，无法校验，安装已中止。"
 	got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
-	[ "$got" = "$want" ] || die "$(basename "$file") 校验失败（期望 $want，实际 ${got:-空}）——可能被镜像篡改或下载损坏，已中止。"
-	log "已校验 $(basename "$file")（sha256 ✓）"
+	[ "$got" = "$want" ] || die "$fn 校验失败（期望 $want，实际 ${got:-空}）——可能被镜像篡改或下载损坏，已中止。"
+	log "已校验 $fn（sha256 ✓）"
 }
 
 # --- engine ------------------------------------------------------------------
@@ -207,18 +223,9 @@ install_engine() {
 	log "正在下载引擎（linux-$ARCH，自动选择线路，稍候）..."
 	gh_fetch "$url" "$ENGINE_BIN" "$AG_CURL_BIG" \
 		|| die "引擎下载失败（直连与镜像都失败）。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
-	verify_sha256 "$ENGINE_BIN" "$(sha_for "$fn")"
+	verify_sha256 "$ENGINE_BIN" "$fn"
 	chmod 0755 "$ENGINE_BIN"
 }
-# Fetch the release checksums once (used to verify both the engine and Caddy).
-SUMS_FILE="$(mktemp)"
-trap 'rm -f "$SUMS_FILE"' EXIT
-if sums_get "$SUMS_FILE"; then
-	log "已获取 SHA256SUMS（用于校验下载的二进制）"
-else
-	warn "未能获取 SHA256SUMS.txt（直连与镜像均失败）——本次将无法校验下载的二进制。"
-	: > "$SUMS_FILE"
-fi
 install_engine
 log "引擎：$("$ENGINE_BIN" version 2>/dev/null || echo 已安装)"
 
@@ -263,12 +270,13 @@ if [ "$need_caddy" = "1" ]; then
 	log "正在下载带 cloudflare 模块的 Caddy（linux-$ARCH，自动选择线路，稍候）..."
 	gh_fetch "https://github.com/$ABUSEGUARD_REPO/releases/latest/download/$caddy_fn" "$CADDY_BIN" "$AG_CURL_BIG" \
 		|| die "Caddy 下载失败（直连与镜像都失败）。可预置一个带 cloudflare 模块的 caddy 到 $CADDY_BIN 后重试。"
-	verify_sha256 "$CADDY_BIN" "$(sha_for "$caddy_fn")"
+	verify_sha256 "$CADDY_BIN" "$caddy_fn"
 	chmod 0755 "$CADDY_BIN"
 else
 	log "已有的 Caddy 已包含 cloudflare 模块"
 fi
-rm -f "$SUMS_FILE"; trap - EXIT   # checksums no longer needed; drop the temp + its EXIT trap
+# checksums no longer needed; drop the temp + its EXIT trap (if we fetched one)
+if [ -n "$SUMS_FILE" ]; then rm -f "$SUMS_FILE"; SUMS_FILE=""; trap - EXIT; fi
 setcap 'cap_net_bind_service=+ep' "$CADDY_BIN" || warn "setcap 失败；Caddy 绑定 :80/:443 可能需要 root"
 
 # --- Caddy snippet + env + systemd unit --------------------------------------
@@ -301,12 +309,14 @@ if [ ! -f "$CADDYFILE" ]; then
 	log "正在获取 Cloudflare IP 段用于 trusted_proxies..."
 	CF_V4="$(curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v4 2>/dev/null || true)"
 	CF_V6="$(curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v6 2>/dev/null || true)"
-	CF_RANGES="$(printf '%s\n%s\n' "$CF_V4" "$CF_V6" | grep -E '[0-9a-fA-F:.]+/[0-9]+' | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')"
+	# `|| true`: under `set -euo pipefail` a no-match grep exits 1 and would abort
+	# the whole install here — before the fallback below ever runs.
+	CF_RANGES="$(printf '%s\n%s\n' "$CF_V4" "$CF_V6" | grep -E '[0-9a-fA-F:.]+/[0-9]+' | tr '\n' ' ' | sed 's/  */ /g; s/ *$//' || true)"
 	# Live fetch failed (slow/blocked network)? Fall back to the bundled snapshot
 	# so trusted_proxies is never loopback-only behind Cloudflare — which would
 	# make Caddy treat every visitor as a CF edge IP and ban Cloudflare itself.
 	if [ -z "$CF_RANGES" ] && [ -f "$SRC_DIR/assets/caddy/cloudflare-ips.fallback" ]; then
-		CF_RANGES="$(grep -E '[0-9a-fA-F:.]+/[0-9]+' "$SRC_DIR/assets/caddy/cloudflare-ips.fallback" | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')"
+		CF_RANGES="$(grep -E '[0-9a-fA-F:.]+/[0-9]+' "$SRC_DIR/assets/caddy/cloudflare-ips.fallback" | tr '\n' ' ' | sed 's/  */ /g; s/ *$//' || true)"
 		[ -n "$CF_RANGES" ] && warn "未能实时获取 Cloudflare IP 段，已使用内置快照（可能过期）。若你在 Cloudflare 之后，请务必核对 $CADDYFILE 的 trusted_proxies——配置错误会封禁 Cloudflare 自身、导致站点整体不可用。"
 	fi
 	[ -n "$CF_RANGES" ] || warn "无法获取 Cloudflare IP 段（实时与内置快照均失败）；仅信任回环。若在 Cloudflare 之后，请手动补上 trusted_proxies，否则可能自我封禁。"

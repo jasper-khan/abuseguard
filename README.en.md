@@ -77,12 +77,17 @@ direct→mirror fallback above and need no extra setup in mainland China. The
 set at install time. If a Caddy with the `caddy-dns/cloudflare` module already
 exists, the installer detects and keeps it, skipping the download.
 
-**Integrity check**: the downloaded engine and Caddy are verified against the
-release's `SHA256SUMS.txt`; the sums file is fetched preferring a direct GitHub
-pull (tiny — works even when throttled), and a mismatch aborts the install. An
-honest caveat: if you force a single mirror for everything
-(`ABUSEGUARD_MIRROR=<prefix>/`), the sums travel that same path, so this guards
-against a passive/caching mirror, not an active tamperer on that one path.
+**Integrity check (mandatory)**: the downloaded engine and Caddy MUST match the
+release's `SHA256SUMS.txt`. That file is tiny, so it is fetched as robustly as
+possible: direct GitHub first (works even when throttled), then the whole mirror
+chain, with retries. **A mismatch, or an unobtainable sums file, aborts the
+install**; verification never degrades to "skip it and continue". On a network
+failure, retry or build locally with `--from-source`. The sums are fetched
+lazily, only when a binary is actually downloaded, so `--from-source` and
+`ABUSEGUARD_ENGINE_BIN` installs never fetch them. An honest caveat: if you
+force a single mirror for everything (`ABUSEGUARD_MIRROR=<prefix>/`), the sums
+travel that same path, so this guards against a passive/caching mirror, not an
+active tamperer on that one path.
 
 **Cloudflare range fallback**: when generating the Caddyfile the installer
 fetches Cloudflare's IP ranges for `trusted_proxies`; if that fetch fails on a

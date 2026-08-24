@@ -159,8 +159,10 @@ act_ban() {
 	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
 	[ -z "$ip" ] && return
 	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
-	# 各 jail 共用同一条 nftables 封禁（drop 80/443），封任一 jail 即全局生效
-	if fail2ban-client set caddy-rate-local banip "$ip" >/dev/null 2>&1; then
+	# 各 jail 共用同一条 nftables 封禁（drop 80/443），封任一 jail 即全局生效。
+	# 用 caddy-intel：它只做防火墙 drop、不挂上报动作，手动封禁不会被自动上报到
+	# AbuseIPDB（其余 jail 带 queue 动作，手动封会误报一个管理员本地拉黑的 IP）。
+	if fail2ban-client set caddy-intel banip "$ip" >/dev/null 2>&1; then
 		echo "  已封禁 $ip。"
 	else
 		echo "  封禁失败（检查 jail 是否启用）。"
