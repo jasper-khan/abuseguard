@@ -77,14 +77,29 @@ direct→mirror fallback above and need no extra setup in mainland China. The
 set at install time. If a Caddy with the `caddy-dns/cloudflare` module already
 exists, the installer detects and keeps it, skipping the download.
 
+**Integrity check**: the downloaded engine and Caddy are verified against the
+release's `SHA256SUMS.txt`; the sums file is fetched preferring a direct GitHub
+pull (tiny — works even when throttled), and a mismatch aborts the install. An
+honest caveat: if you force a single mirror for everything
+(`ABUSEGUARD_MIRROR=<prefix>/`), the sums travel that same path, so this guards
+against a passive/caching mirror, not an active tamperer on that one path.
+
+**Cloudflare range fallback**: when generating the Caddyfile the installer
+fetches Cloudflare's IP ranges for `trusted_proxies`; if that fetch fails on a
+restricted network it falls back to a bundled snapshot
+(`assets/caddy/cloudflare-ips.fallback`), so `trusted_proxies` is never
+loopback-only behind Cloudflare — which would make Caddy treat every visitor as
+a Cloudflare edge IP and ban Cloudflare itself, taking the whole site down.
+
 ## The panel
 
 Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed):
 
-- status: services, **protected domains**, jails, timers
+- status: services, **protected domains**, jails, timers, **threat-intel last-sync age**
 - **sites / reverse-proxy manager**: enter a domain + upstream (local port or remote IP:port) and it generates a protected reverse-proxy site (auto `import abuseguard` + TLS as needed); also list/delete
 - list currently-banned IPs per jail
-- edit the whitelist (in-panel add/remove, reloads fail2ban)
+- **unban / ban a specific IP** (one-click release for a false positive)
+- edit the whitelist (in-panel add/remove; **an added IP is auto-unbanned** and fail2ban reloaded)
 - sync threat-intel now / flush the report queue now
 - set the AbuseIPDB key / Cloudflare token
 - toggle AbuseIPDB reporting on/off
@@ -95,7 +110,7 @@ Just run `abuseguard` (the panel needs root; a normal user is transparently re-r
 | Jail | Trigger | Threshold | Who gets banned |
 | --- | --- | --- | --- |
 | `caddy-intel` | any request to a protected site | 1 hit | only IPs on the threat-intel list |
-| `caddy-rate-local` | any request to a protected site | 30 in 60s | any non-whitelisted IP + queued for report |
+| `caddy-rate-local` | any request to a protected site | 120 in 60s | any non-whitelisted IP + queued for report |
 | `caddy-probe-h1` | HTTP/1.1 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
 | `caddy-probe-h2` | HTTP/2 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
 
@@ -168,6 +183,8 @@ AbuseGuard created vs. what you already had).
 - Caddy adds no authentication. Anything you expose is public unless you add auth yourself.
 - The installer's self-test site binds `127.0.0.1:8080` only.
 - Secrets (`*.key`, `.env`) are mode 0640 and git-ignored; never commit them.
+- Downloaded binaries are verified against `SHA256SUMS.txt` (see the integrity check under "Slow network / China mirror").
+- Caddy runs under a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, restricted capability set, syscall filtering); the two engine timers are hardened too.
 
 ## Build / release
 

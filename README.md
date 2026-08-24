@@ -66,14 +66,19 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建），因此都享受上面的直连→镜像回退，大陆无需额外配置。`abuseguard` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，安装器会自动检测并保留、跳过下载。
 
+**完整性校验**：下载的 engine 与 Caddy 会用 release 里的 `SHA256SUMS.txt` 校验；校验文件优先直连 GitHub 获取（体积极小，被限速也能拿到），不符即中止安装。诚实说明边界：若你用 `ABUSEGUARD_MIRROR=<prefix>/` 强制单一镜像，校验文件也会走该镜像，此时只能防"被动缓存型"镜像、防不住对该线路的主动篡改。
+
+**Cloudflare IP 段兜底**：生成 Caddyfile 时会拉取 Cloudflare 的 IP 段填入 `trusted_proxies`；若网络受限拉取失败，会退回内置快照（`assets/caddy/cloudflare-ips.fallback`），避免 `trusted_proxies` 只剩回环——那会让 Caddy 把所有访客都当成 Cloudflare 边缘 IP，进而封禁 Cloudflare 自身、导致整站不可用。
+
 ## 控制面板
 
 直接运行 `abuseguard`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）：
 
-- 查看状态：服务、**受保护域名**、jail、定时器
+- 查看状态：服务、**受保护域名**、jail、定时器、**情报最后同步时间**
 - **站点/反代管理**：输入域名 + 上游（本地端口或远程 IP:端口）即自动生成受保护的反代站点（自动写入 `import abuseguard` + 按需 TLS），也可列出/删除
 - 按 jail 列出当前被封禁的 IP
-- 编辑白名单（面板内增删，会重载 fail2ban）
+- **解封 / 立即封禁指定 IP**（误封可一键解封）
+- 编辑白名单（面板内增删；**新增会自动解封该 IP** 并重载 fail2ban）
 - 立即同步威胁情报 / 立即冲刷上报队列
 - 设置 AbuseIPDB key / Cloudflare token
 - 开关 AbuseIPDB 上报
@@ -84,7 +89,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 | Jail | 触发条件 | 阈值 | 封禁对象 |
 | --- | --- | --- | --- |
 | `caddy-intel` | 对受保护站点的任意请求 | 命中 1 次 | 仅威胁情报名单上的 IP |
-| `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 30 次 | 任意非白名单 IP + 加入上报队列 |
+| `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 120 次 | 任意非白名单 IP + 加入上报队列 |
 | `caddy-probe-h1` | 用 HTTP/1.1 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 | `caddy-probe-h2` | 用 HTTP/2 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 
@@ -150,6 +155,8 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 - Caddy 本身不提供任何鉴权。凡是你对外暴露的站点，除非你自己加了鉴权，否则都是公开的。
 - 安装器的自检站点只绑定 `127.0.0.1:8080`。
 - 密钥（`*.key`、`.env`）权限为 0640 且已被 git 忽略；切勿提交。
+- 下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络慢 / 大陆镜像」的完整性校验说明）。
+- Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务同样加固。
 
 ## 构建 / 发布
 

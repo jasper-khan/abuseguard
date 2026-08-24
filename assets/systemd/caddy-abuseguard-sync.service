@@ -8,3 +8,20 @@ Type=oneshot
 User=abuseguard
 Group=abuseguard
 ExecStart=/usr/local/libexec/caddy-abuseguard sync-intel
+
+# --- sandboxing (unprivileged; only needs to write its own state dir) --------
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/caddy-abuseguard
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

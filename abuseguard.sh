@@ -56,21 +56,41 @@ reporting_state() {
 	[ "$(jq -r '.abuseipdb.enabled' "$CONFIG" 2>/dev/null)" = "true" ] && echo on || echo off
 }
 
+# 情报最后同步距今小时数（无 meta 或解析失败则回空）
+intel_age_h() {
+	local meta="$STATE_DIR/intel-last-sync.txt" gen ts now
+	[ -f "$meta" ] || { echo ""; return; }
+	gen="$(jq -r '.generated_at // empty' "$meta" 2>/dev/null)"
+	[ -n "$gen" ] || { echo ""; return; }
+	ts="$(date -d "$gen" +%s 2>/dev/null)" || { echo ""; return; }
+	now="$(date +%s)"
+	echo $(( (now - ts) / 3600 ))
+}
+
 header() {
 	clear 2>/dev/null || true
-	local caddy f2b intel banned rep
+	local caddy f2b intel banned rep age fresh keyst
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
+	age="$(intel_age_h)"
+	if [ -z "$age" ]; then fresh="（未同步）"
+	elif [ "$age" -gt 12 ]; then fresh="$(printf '（最后同步 %b%sh 前，建议检查%b）' "$C_Y" "$age" "$C_0")"
+	else fresh="（最后同步 ${age}h 前）"; fi
+	keyst=""
+	if [ "$rep" = on ]; then
+		[ -s "$KEYFILE" ] && keyst="（key 已配）" || keyst="$(printf '%b（未配 key，暂不上报）%b' "$C_Y" "$C_0")"
+	fi
 	echo -e "${C_B}=======================================================${C_0}"
 	echo -e "                 ${C_G}AbuseGuard${C_0}  控制面板"
 	echo -e "${C_B}=======================================================${C_0}"
 	printf "  caddy: %b    fail2ban: %b\n" \
 		"$( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )" \
 		"$( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	printf "  情报 IP: %s    当前封禁: %s    上报: %b\n" \
-		"$intel" "$banned" \
-		"$( [ "$rep" = on ] && echo "${C_G}开${C_0}" || echo "${C_Y}关${C_0}" )"
+	printf "  情报 IP: %s %b   当前封禁: %s   上报: %b %b\n" \
+		"$intel" "$fresh" "$banned" \
+		"$( [ "$rep" = on ] && echo "${C_G}开${C_0}" || echo "${C_Y}关${C_0}" )" \
+		"$keyst"
 	echo -e "${C_B}-------------------------------------------------------${C_0}"
 }
 
@@ -119,6 +139,35 @@ act_banned() {
 	pause
 }
 
+act_unban() {
+	local ip
+	read -r -p "输入要解封的 IP（留空取消）: " ip
+	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
+	[ -z "$ip" ] && return
+	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
+	if fail2ban-client unban "$ip" >/dev/null 2>&1; then
+		echo "  已解封 $ip（所有 jail）。"
+	else
+		echo "  解封失败，或该 IP 当前未被封禁。"
+	fi
+	pause
+}
+
+act_ban() {
+	local ip
+	read -r -p "输入要立即封禁的 IP（留空取消）: " ip
+	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
+	[ -z "$ip" ] && return
+	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
+	# 各 jail 共用同一条 nftables 封禁（drop 80/443），封任一 jail 即全局生效
+	if fail2ban-client set caddy-rate-local banip "$ip" >/dev/null 2>&1; then
+		echo "  已封禁 $ip。"
+	else
+		echo "  封禁失败（检查 jail 是否启用）。"
+	fi
+	pause
+}
+
 # 校验 IPv4/IPv6（可带 /前缀），宽松匹配，挡住明显错误输入
 wl_valid() {
 	local x="$1"
@@ -156,18 +205,20 @@ act_whitelist() {
 		case "$c" in
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
-				local added=0 skipped=0 tok
+				local added=0 skipped=0 tok; local -a added_ips=()
 				while IFS= read -r ip; do
 					[ -z "$ip" ] && break
 					ip="${ip//,/ }"
 					for tok in $ip; do
 						if ! wl_valid "$tok"; then echo "    跳过(格式无效)：$tok"; skipped=$((skipped+1)); continue; fi
 						if grep -qxF "$tok" "$WHITELIST" 2>/dev/null; then echo "    跳过(已存在)：$tok"; skipped=$((skipped+1)); continue; fi
-						printf '%s\n' "$tok" >> "$WHITELIST"; added=$((added+1)); echo "    已加：$tok"
+						printf '%s\n' "$tok" >> "$WHITELIST"; added=$((added+1)); added_ips+=("$tok"); echo "    已加：$tok"
 					done
 				done
 				[ "$added" -gt 0 ] && wl_reload
-				echo "  完成：新增 $added，跳过 $skipped"; sleep 1 ;;
+				# reload 只影响未来判定；正被封的 IP 需显式解封才能立即放行
+				[ "$added" -gt 0 ] && for tok in "${added_ips[@]}"; do fail2ban-client unban "$tok" >/dev/null 2>&1; done
+				echo "  完成：新增 $added，跳过 $skipped（加白的 IP 若在封禁中已一并解封）"; sleep 1 ;;
 			2)
 				[ "${#items[@]}" -eq 0 ] && { echo "  没有可删除的条目"; sleep 1; continue; }
 				i=1; for line in "${items[@]}"; do printf "  [%d] %s\n" "$i" "$line"; i=$((i+1)); done
@@ -359,15 +410,17 @@ menu() {
    [1]  状态（服务、受保护站点、jail、定时器）
    [2]  站点/反代管理（加域名→自动 import abuseguard）
    [3]  查看被封禁的 IP（按 jail）
-   [4]  编辑白名单
-   [5]  立即同步威胁情报
-   [6]  立即冲刷上报队列
-   [7]  设置 AbuseIPDB API key
-   [8]  设置 Cloudflare API token
-   [9]  开关 AbuseIPDB 上报
-  [10]  查看最近日志
-  [11]  更新 AbuseGuard（重新运行安装器）
-  [12]  卸载
+   [4]  解封指定 IP
+   [5]  立即封禁指定 IP
+   [6]  编辑白名单
+   [7]  立即同步威胁情报
+   [8]  立即冲刷上报队列
+   [9]  设置 AbuseIPDB API key
+  [10]  设置 Cloudflare API token
+  [11]  开关 AbuseIPDB 上报
+  [12]  查看最近日志
+  [13]  更新 AbuseGuard（重新运行安装器）
+  [14]  卸载
    [0]  退出
 MENU
 	echo
@@ -376,15 +429,17 @@ MENU
 		1) act_status ;;
 		2) act_sites ;;
 		3) act_banned ;;
-		4) act_whitelist ;;
-		5) act_sync ;;
-		6) act_flush ;;
-		7) act_key ;;
-		8) act_cftoken ;;
-		9) act_toggle ;;
-		10) act_logs ;;
-		11) act_update ;;
-		12) act_uninstall ;;
+		4) act_unban ;;
+		5) act_ban ;;
+		6) act_whitelist ;;
+		7) act_sync ;;
+		8) act_flush ;;
+		9) act_key ;;
+		10) act_cftoken ;;
+		11) act_toggle ;;
+		12) act_logs ;;
+		13) act_update ;;
+		14) act_uninstall ;;
 		0) exit 0 ;;
 		*) ;;
 	esac

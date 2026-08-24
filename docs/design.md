@@ -45,7 +45,7 @@ The access log deletes headers, TLS, host, remote_ip/port, method, uri and resp_
 
 ## Trust boundary
 
-Bans/reports target `client_ip`, so Caddy must trust the edge proxy (`trusted_proxies` + `trusted_proxies_strict`). The installer pre-fills the current Cloudflare ranges plus loopback when it generates a Caddyfile. Get this wrong and you ban your proxy, not the attacker.
+Bans/reports target `client_ip`, so Caddy must trust the edge proxy (`trusted_proxies` + `trusted_proxies_strict`). The installer pre-fills the current Cloudflare ranges plus loopback when it generates a Caddyfile. Get this wrong and you ban your proxy, not the attacker. If the live Cloudflare-range fetch fails (restricted network), the installer falls back to a bundled snapshot (`assets/caddy/cloudflare-ips.fallback`) rather than leaving `trusted_proxies` loopback-only — otherwise every visitor would look like a Cloudflare edge IP and the rate jail would ban Cloudflare itself.
 
 ## Users & permissions
 
@@ -53,6 +53,11 @@ Bans/reports target `client_ip`, so Caddy must trust the edge proxy (`trusted_pr
 - `abuseguard` runs the engine (report / sync / enqueue / ignore) with no shell and no firewall rights.
 - fail2ban (root) owns the actual nftables bans; the engine never touches the firewall.
 - The config dir is `root:abuseguard 0750`; secrets are `0640`.
+- Caddy and both engine timers run under hardened systemd units (`NoNewPrivileges`, `ProtectSystem=strict` with explicit `ReadWritePaths`, restricted address families/capabilities, `SystemCallFilter=@system-service`).
+
+## Supply chain
+
+Prebuilt binaries (engine + cloudflare-enabled Caddy) ship from the repo's GitHub release. Because downloads may traverse third-party GitHub proxies (the mainland-China fallback), `install.sh` verifies each binary against the release `SHA256SUMS.txt`, fetching that sums file preferring a direct GitHub pull. This defeats a passive/caching mirror; a single forced mirror carrying both the sums and the binaries is outside the guarantee. `--from-source` and a caller-supplied `ABUSEGUARD_ENGINE_BIN` skip verification (locally trusted).
 
 ## Non-goals
 
