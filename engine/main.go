@@ -48,6 +48,22 @@ func mustConfig() *Config {
 	return c
 }
 
+// ignoreSafeConfig loads the config for the ignorecommand paths ONLY.
+// Those paths must fail SAFE: for fail2ban, exit 1 means "ban this IP", and the
+// intel jail matches every request with maxretry=1 -- so a config error must
+// never bubble up as exit 1, or an unreadable config would ban every visitor
+// (the whitelist check happens after this point and could not save them).
+// Any failure therefore exits 0 = "ignore this candidate": we skip one
+// possible ban rather than risk banning everyone.
+func ignoreSafeConfig() *Config {
+	c, err := loadConfig()
+	if err != nil {
+		logf("ignore: load config failed (%v); ignoring this candidate to avoid a false ban", err)
+		os.Exit(0)
+	}
+	return c
+}
+
 func runEnqueue(args []string) {
 	fs := flag.NewFlagSet("enqueue", flag.ExitOnError)
 	ip := fs.String("ip", "", "offending IP")
@@ -76,7 +92,7 @@ func runIntelIgnore(args []string) {
 	if *ip == "" {
 		os.Exit(0)
 	}
-	c := mustConfig()
+	c := ignoreSafeConfig()
 	if loadAllowlist(c.AllowlistFile).Contains(*ip) {
 		os.Exit(0) // whitelisted => ignore
 	}
@@ -96,7 +112,7 @@ func runUnknownIgnore(args []string) {
 	if *ip == "" {
 		os.Exit(0)
 	}
-	c := mustConfig()
+	c := ignoreSafeConfig()
 	if loadAllowlist(c.AllowlistFile).Contains(*ip) {
 		os.Exit(0) // whitelisted => ignore
 	}

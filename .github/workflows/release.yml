@@ -43,6 +43,20 @@ jobs:
               --output "dist/caddy-linux-$arch"
           done
 
+      # Gate: the freshly built Caddy must still produce a log the fail2ban
+      # filters match. We deliberately track upstream latest, so this is what
+      # keeps an incompatible Caddy from silently disabling every jail. On
+      # failure the job stops here, before any upload, so releases/latest keeps
+      # the last known-good binary.
+      - name: Install fail2ban (for fail2ban-regex)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fail2ban
+
+      - name: Verify log <-> filter contract (built Caddy, amd64)
+        run: |
+          set -eu
+          chmod +x dist/caddy-linux-amd64
+          ./scripts/verify-log-contract.sh "$PWD/dist/caddy-linux-amd64"
+
       - name: Checksums
         run: ( cd dist && sha256sum caddy-abuseguard-linux-* caddy-linux-* > SHA256SUMS.txt )
 

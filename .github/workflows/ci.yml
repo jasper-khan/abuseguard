@@ -1,0 +1,69 @@
+name: ci
+
+# Runs on every push/PR. Two gates:
+#   1. the Go engine must compile and vet clean (a non-compiling engine must
+#      never reach main -- it has happened);
+#   2. the Caddy-log <-> fail2ban-filter contract must hold, checked against
+#      upstream-latest Caddy. Because release.yml deliberately tracks Caddy
+#      latest, this is what turns "upstream silently changed the log schema and
+#      every jail stopped banning" into a red build instead of a quiet outage.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Build + vet engine
+        working-directory: engine
+        run: |
+          set -eu
+          go build ./...
+          go vet ./...
+      - name: Cross-compile the release targets
+        working-directory: engine
+        run: |
+          set -eu
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "/tmp/engine-$arch" .
+          done
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check the shell scripts
+        run: |
+          set -eu
+          for f in install.sh uninstall.sh abuseguard.sh scripts/*.sh; do
+            bash -n "$f" && echo "ok: $f"
+          done
+
+  log-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fail2ban (for fail2ban-regex)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fail2ban
+      - name: Fetch upstream-latest Caddy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release download --repo caddyserver/caddy \
+            --pattern 'caddy_*_linux_amd64.tar.gz' --output /tmp/caddy.tar.gz
+          tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+          chmod +x /tmp/caddy
+          /tmp/caddy version
+      - name: Verify log <-> filter contract
+        run: ./scripts/verify-log-contract.sh /tmp/caddy
