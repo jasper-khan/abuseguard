@@ -134,6 +134,8 @@ PRE_CADDY_USER=0; id caddy >/dev/null 2>&1 && PRE_CADDY_USER=1 || :
 PRE_AG_USER=0;    id abuseguard >/dev/null 2>&1 && PRE_AG_USER=1 || :
 PRE_CADDYFILE=0;  [ -e "$CADDYFILE" ] && PRE_CADDYFILE=1 || :
 PRE_CADDY_ETC=0;  [ -e "$CADDY_ETC" ] && PRE_CADDY_ETC=1 || :
+PRE_LOG_DIR=0;    [ -e "$LOG_DIR" ] && PRE_LOG_DIR=1 || :
+PRE_CADDY_LIB=0;  [ -e /var/lib/caddy ] && PRE_CADDY_LIB=1 || :
 
 # --- service accounts --------------------------------------------------------
 if ! id caddy >/dev/null 2>&1; then
@@ -161,6 +163,8 @@ caddy_user_preexisting=$PRE_CADDY_USER
 abuseguard_user_preexisting=$PRE_AG_USER
 caddyfile_preexisting=$PRE_CADDYFILE
 caddy_etc_preexisting=$PRE_CADDY_ETC
+log_dir_preexisting=$PRE_LOG_DIR
+caddy_lib_preexisting=$PRE_CADDY_LIB
 EOF
 	chmod 0640 "$STATE_DIR/install-manifest"
 	log "已记录安装清单（供卸载时对称回滚）"
@@ -295,6 +299,12 @@ fi
 if [ ! -f "$CADDY_ENV" ]; then
 	printf 'CF_API_TOKEN=\n' > "$CADDY_ENV"; chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
 	log "已创建 $CADDY_ENV（可在面板中设置 CF_API_TOKEN）"
+fi
+# If a packaged Caddy unit exists (/lib/systemd/system/caddy.service), ours in
+# /etc/systemd/system takes precedence and shadows it. Say so, since uninstall
+# removes ours and the packaged one then needs re-enabling.
+if [ "$PRE_CADDY_SVC" = 0 ] && [ -e /lib/systemd/system/caddy.service ]; then
+	warn "检测到系统已有 Caddy 服务单元（/lib/systemd/system/caddy.service）。AbuseGuard 的单元会覆盖它；卸载后如需恢复原服务，请执行：sudo systemctl enable --now caddy"
 fi
 install -m 0644 "$SRC_DIR/assets/systemd/caddy.service" /etc/systemd/system/caddy.service
 

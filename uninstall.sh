@@ -25,6 +25,7 @@ CADDY_ETC=/etc/caddy
 CADDYFILE=/etc/caddy/Caddyfile
 SNIPPET=/etc/caddy/abuseguard.caddy
 SITES_DIR=/etc/caddy/sites
+CADDY_ENV=/etc/caddy/.env
 MANIFEST="$STATE_DIR/install-manifest"
 
 MODE=""; KEEP_SITES=""; YES=0; DRY=0
@@ -58,6 +59,8 @@ m_caddy_user="$(mval caddy_user_preexisting)"
 m_ag_user="$(mval abuseguard_user_preexisting)"
 m_caddyfile="$(mval caddyfile_preexisting)"
 m_caddy_etc="$(mval caddy_etc_preexisting)"
+m_log_dir="$(mval log_dir_preexisting)"
+m_caddy_lib="$(mval caddy_lib_preexisting)"
 
 if [ "$MANIFEST_OK" = 0 ]; then
 	warn "未找到安装清单，无法确认哪些是 AbuseGuard 安装的；为安全起见将不动 Caddy/账户/配置。"
@@ -115,7 +118,8 @@ if [ "$YES" != 1 ] && [ "$DRY" != 1 ]; then
 	if [ "$MODE" = thorough ]; then
 		[ "$m_caddy_bin" = 0 ]  && echo "  · 将删除 Caddy 二进制（AbuseGuard 安装的）" || echo "  · 保留 Caddy 二进制（你原有的）"
 		[ "$m_caddy_user" = 0 ] && echo "  · 将删除 caddy 账户" || echo "  · 保留 caddy 账户（你原有的）"
-		echo "  · 将删除配置/状态/日志"
+		echo "  · 将删除 AbuseGuard 的配置/状态目录"
+		[ "$m_log_dir" = 0 ]  && echo "  · 将删除 $LOG_DIR（AbuseGuard 创建的）" || echo "  · 保留 $LOG_DIR（你原有的日志目录，只删 AbuseGuard 自己的日志文件）"
 	fi
 	c=n; have_tty && { read -r -p "确认继续? [y/N] " c <&3; exec 3<&-; }
 	case "$c" in y|Y|yes|YES) : ;; *) echo "已取消"; exit 0 ;; esac
@@ -181,12 +185,46 @@ if [ "$MODE" = thorough ]; then
 	# only delete the Caddyfile if AbuseGuard created it (else we kept the user's, just cleaned)
 	[ "$m_caddyfile" = 0 ]  && run "rm -f '$CADDYFILE' '$CADDY_ETC/Caddyfile.pre-abuseguard'"
 	[ "$m_ag_user" = 0 ]    && run "userdel abuseguard >/dev/null 2>&1 || true"
-	[ "$m_caddy_user" = 0 ] && run "userdel -r caddy >/dev/null 2>&1 || true"
+	# userdel -r removes the home dir (/var/lib/caddy, where Caddy keeps certs).
+	# Only safe when AbuseGuard created both the account AND that directory.
+	if [ "$m_caddy_user" = 0 ]; then
+		if [ "$m_caddy_lib" = 0 ]; then
+			run "userdel -r caddy >/dev/null 2>&1 || true"
+		else
+			run "userdel caddy >/dev/null 2>&1 || true"
+			log "已保留 /var/lib/caddy（你原有的 Caddy 数据/证书目录）"
+		fi
+	fi
 	[ -n "$CONF_DIR" ]  && run "rm -rf -- '$CONF_DIR'"
 	[ -n "$STATE_DIR" ] && run "rm -rf -- '$STATE_DIR'"
-	[ -n "$LOG_DIR" ]   && run "rm -rf -- '$LOG_DIR'"
+	# Only remove the log dir if AbuseGuard created it. A pre-existing
+	# /var/log/caddy is almost certainly the user's own Caddy logs (it is the
+	# packaged default), so there we delete only our own log files.
+	if [ "$m_log_dir" = 0 ]; then
+		[ -n "$LOG_DIR" ] && run "rm -rf -- '$LOG_DIR'"
+	else
+		run "rm -f -- '$LOG_DIR'/abuseguard-access.json '$LOG_DIR'/abuseguard-access*.json"
+		log "已保留你原有的 $LOG_DIR（仅删除 AbuseGuard 自己的日志文件）"
+	fi
 	# remove /etc/caddy only if AbuseGuard created it and it's now empty
-	if [ "$m_caddy_etc" = 0 ]; then run "rmdir '$CADDY_ETC' 2>/dev/null || true"; fi
+	# Remove the files AbuseGuard itself created in /etc/caddy, so the dir can
+	# actually be removed. Keep .env if it holds a token the user configured.
+	if [ "$m_caddy_etc" = 0 ]; then
+		if [ -f "$CADDY_ENV" ] && ! grep -qE '^CF_API_TOKEN=.+' "$CADDY_ENV" 2>/dev/null; then
+			run "rm -f -- '$CADDY_ENV'"
+		elif [ -f "$CADDY_ENV" ]; then
+			warn "保留 $CADDY_ENV（内含你设置的 CF_API_TOKEN）"
+		fi
+		[ -f "$SITES_DIR/_placeholder.caddy" ] && run "rm -f -- '$SITES_DIR/_placeholder.caddy'"
+		run "rmdir '$SITES_DIR' 2>/dev/null || true"
+		if [ "$DRY" != 1 ]; then
+			if rmdir "$CADDY_ETC" 2>/dev/null; then
+				log "已删除 $CADDY_ETC"
+			elif [ -d "$CADDY_ETC" ]; then
+				warn "保留 $CADDY_ETC（非空，其中的文件不是 AbuseGuard 创建的）：$(ls -A "$CADDY_ETC" | tr '\n' ' ')"
+			fi
+		fi
+	fi
 	log "彻底卸载完成（按安装清单，只删了 AbuseGuard 安装的部分）。"
 else
 	log "保守卸载完成：已保留 Caddy、账户、配置；Caddyfile 中的 AbuseGuard 配置已摘除。"
@@ -202,6 +240,12 @@ if [ "$DRY" != 1 ] && [ -x "$CADDY_BIN" ] && [ -f "$CADDYFILE" ]; then
 	else
 		warn "清理后的 Caddyfile 未通过校验，已保留原样，请手动检查 $CADDYFILE（原始备份见 $CADDY_ETC/Caddyfile.pre-abuseguard，若存在）。"
 	fi
+fi
+
+# If a packaged Caddy unit exists, ours shadowed it and has now been removed;
+# systemd needs a nudge and the service needs re-enabling.
+if [ "$DRY" != 1 ] && [ -e /lib/systemd/system/caddy.service ]; then
+	warn "系统仍有原生 Caddy 服务单元（/lib/systemd/system/caddy.service）。如需恢复你原有的 Caddy 服务，请执行：sudo systemctl enable --now caddy"
 fi
 
 log "done."
