@@ -25,13 +25,21 @@ type intelMeta struct {
 func intelTxtPath(c *Config) string  { return c.Paths.StateDir + "/intel.txt" }
 func intelMetaPath(c *Config) string { return c.Paths.StateDir + "/intel-last-sync.txt" }
 
-// loadIntelSet loads intel.txt into a set. A missing file yields an empty set,
-// which makes the intel jail ignore everyone (fail-safe: no false bans).
-func loadIntelSet(c *Config) map[string]struct{} {
-	set := map[string]struct{}{}
+// intelContains reports whether ip is on the threat-intel list.
+//
+// It streams the file and returns on the first match instead of loading all
+// ~90k entries into a map: this runs once per uncached candidate IP, straight
+// from fail2ban's ignorecommand, so the old map cost ~15MB of allocation and
+// 90k hash inserts just to answer one yes/no. That spike hit hardest exactly
+// when it matters least affordable -- a scan burst, where every fresh IP misses
+// the ignorecache. Streaming keeps it O(1) in memory.
+//
+// A missing or unreadable file reports false, which makes the intel jail ignore
+// everyone (fail-safe: no bans before the first successful sync).
+func intelContains(c *Config, ip string) bool {
 	f, err := os.Open(intelTxtPath(c))
 	if err != nil {
-		return set
+		return false
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -41,9 +49,11 @@ func loadIntelSet(c *Config) map[string]struct{} {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		set[line] = struct{}{}
+		if line == ip {
+			return true
+		}
 	}
-	return set
+	return false
 }
 
 func httpGet(url, token string) ([]byte, error) {

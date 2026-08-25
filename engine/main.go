@@ -96,8 +96,7 @@ func runIntelIgnore(args []string) {
 	if loadAllowlist(c.AllowlistFile).Contains(*ip) {
 		os.Exit(0) // whitelisted => ignore
 	}
-	set := loadIntelSet(c)
-	if _, ok := set[*ip]; ok {
+	if intelContains(c, *ip) {
 		os.Exit(1) // on threat list => do NOT ignore (ban)
 	}
 	os.Exit(0) // not on threat list => ignore
