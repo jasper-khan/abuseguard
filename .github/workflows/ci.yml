@@ -66,4 +66,4 @@ jobs:
           chmod +x /tmp/caddy
           /tmp/caddy version
       - name: Verify log <-> filter contract
-        run: ./scripts/verify-log-contract.sh /tmp/caddy
+        run: bash ./scripts/verify-log-contract.sh /tmp/caddy

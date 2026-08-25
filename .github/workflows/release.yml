@@ -55,7 +55,7 @@ jobs:
         run: |
           set -eu
           chmod +x dist/caddy-linux-amd64
-          ./scripts/verify-log-contract.sh "$PWD/dist/caddy-linux-amd64"
+          bash ./scripts/verify-log-contract.sh "$PWD/dist/caddy-linux-amd64"
 
       - name: Checksums
         run: ( cd dist && sha256sum caddy-abuseguard-linux-* caddy-linux-* > SHA256SUMS.txt )
