@@ -127,7 +127,7 @@ The intel jail bans nothing until the list is synced. The engine pulls a public 
 
 ## AbuseIPDB reporting (optional)
 
-Reporting is enabled in the config by default but does nothing until you set an API key (panel → 6). Reports are privacy-safe (no host/path/headers), deduped (15m), and capped (1000/day). A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue instead of being erased with the old batch. The flush runs every 10m. Turn it off entirely with panel → 8.
+Reporting is enabled in the config by default but does nothing until you set an API key (panel → 9). Reports are privacy-safe (no host/path/headers), deduped (15m), and capped (1000/day). A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue instead of being erased with the old batch. The flush runs every 10m. Turn it off entirely with panel → 11.
 
 ## Add your sites
 
@@ -165,7 +165,7 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 ## Update / uninstall
 
 ```bash
-abuseguard                       # panel: [11] update, [12] uninstall
+abuseguard                       # panel: [13] update, [14] uninstall
 sudo ./uninstall.sh              # interactive: conservative / thorough
 sudo ./uninstall.sh --conservative   # conservative: remove AbuseGuard, keep Caddy + your sites
 sudo ./uninstall.sh --purge          # thorough: also remove what AbuseGuard installed
