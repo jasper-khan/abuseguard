@@ -26,6 +26,7 @@ CADDYFILE=/etc/caddy/Caddyfile
 SNIPPET=/etc/caddy/abuseguard.caddy
 SITES_DIR=/etc/caddy/sites
 CADDY_ENV=/etc/caddy/.env
+CADDY_LIB=/var/lib/caddy
 MANIFEST="$STATE_DIR/install-manifest"
 
 MODE=""; KEEP_SITES=""; YES=0; DRY=0
@@ -43,6 +44,39 @@ log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 run()  { if [ "$DRY" = 1 ]; then echo "  would: $*"; else eval "$*"; fi; }
 have_tty() { { exec 3</dev/tty; } 2>/dev/null; }
+
+remove_file() {
+	local path="$1"
+	if [ "$DRY" = 1 ]; then
+		echo "  would: rm -f -- $path"
+	else
+		rm -f -- "$path"
+	fi
+}
+
+# Recursively clear only directories owned by this installer. Every entry is
+# removed individually and each directory is removed only after it is empty.
+remove_owned_tree() {
+	local root="$1" path
+	case "$root" in
+		"$CONF_DIR"|"$STATE_DIR"|"$LOG_DIR"|"$SITES_DIR"|"$CADDY_LIB") : ;;
+		*) warn "拒绝清理非 AbuseGuard 目录：$root"; return 1 ;;
+	esac
+	[ -e "$root" ] || return 0
+	[ ! -L "$root" ] || { warn "拒绝清理符号链接：$root"; return 1; }
+	if [ "$DRY" = 1 ]; then
+		echo "  would: 逐项清空并删除 $root"
+		return 0
+	fi
+	while IFS= read -r -d '' path; do
+		if [ -d "$path" ] && [ ! -L "$path" ]; then
+			rmdir -- "$path" || return 1
+		else
+			rm -f -- "$path" || return 1
+		fi
+	done < <(find "$root" -xdev -depth -mindepth 1 -print0)
+	rmdir -- "$root"
+}
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
 
@@ -139,7 +173,7 @@ clean_caddyfile() {
 		/^[[:space:]]*import[[:space:]]+abuseguard[[:space:]]*$/ { next }
 		{ print }
 	' "$CADDYFILE" > "$tmp" && cat "$tmp" > "$CADDYFILE"
-	rm -f "$tmp"
+	remove_file "$tmp"
 }
 
 # strip `import abuseguard` from each panel site file, keeping the reverse proxy
@@ -160,18 +194,24 @@ for u in caddy-abuseguard-report.timer caddy-abuseguard-report.service \
          caddy-abuseguard-sync.timer caddy-abuseguard-sync.service; do
 	run "systemctl disable --now $u >/dev/null 2>&1 || true"
 done
-run "rm -f /etc/systemd/system/caddy-abuseguard-report.service /etc/systemd/system/caddy-abuseguard-report.timer"
-run "rm -f /etc/systemd/system/caddy-abuseguard-sync.service /etc/systemd/system/caddy-abuseguard-sync.timer"
-run "rm -f /etc/fail2ban/jail.d/caddy-abuseguard.local"
-run "rm -f /etc/fail2ban/filter.d/caddy-abuseguard-any.conf /etc/fail2ban/filter.d/caddy-abuseguard-probe-h1.conf /etc/fail2ban/filter.d/caddy-abuseguard-probe-h2.conf"
-run "rm -f /etc/fail2ban/action.d/caddy-abuseguard-queue.conf"
-run "rm -f '$ENGINE_BIN' '$PANEL_BIN' '$SNIPPET'"
+remove_file /etc/systemd/system/caddy-abuseguard-report.service
+remove_file /etc/systemd/system/caddy-abuseguard-report.timer
+remove_file /etc/systemd/system/caddy-abuseguard-sync.service
+remove_file /etc/systemd/system/caddy-abuseguard-sync.timer
+remove_file /etc/fail2ban/jail.d/caddy-abuseguard.local
+remove_file /etc/fail2ban/filter.d/caddy-abuseguard-any.conf
+remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h1.conf
+remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h2.conf
+remove_file /etc/fail2ban/action.d/caddy-abuseguard-queue.conf
+remove_file "$ENGINE_BIN"
+remove_file "$PANEL_BIN"
+remove_file "$SNIPPET"
 
 # --- 2) sites + Caddyfile ----------------------------------------------------
 if [ "$KEEP_SITES" = keep ]; then
 	clean_sites_keep            # de-protect panel sites, keep the reverse proxy
 else
-	run "rm -rf -- '$SITES_DIR'" # drop panel sites entirely
+	remove_owned_tree "$SITES_DIR" || exit 1
 fi
 clean_caddyfile                 # strip AbuseGuard's imports / self-test block
 
@@ -179,31 +219,35 @@ clean_caddyfile                 # strip AbuseGuard's imports / self-test block
 if [ "$MODE" = thorough ]; then
 	if [ "$m_caddy_svc" = 0 ]; then
 		run "systemctl disable --now caddy >/dev/null 2>&1 || true"
-		run "rm -f /etc/systemd/system/caddy.service"
+		remove_file /etc/systemd/system/caddy.service
 	fi
-	[ "$m_caddy_bin" = 0 ]  && run "rm -f '$CADDY_BIN'"
+	[ "$m_caddy_bin" = 0 ]  && remove_file "$CADDY_BIN"
 	# only delete the Caddyfile if AbuseGuard created it (else we kept the user's, just cleaned)
-	[ "$m_caddyfile" = 0 ]  && run "rm -f '$CADDYFILE' '$CADDY_ETC/Caddyfile.pre-abuseguard'"
+	if [ "$m_caddyfile" = 0 ]; then
+		remove_file "$CADDYFILE"
+		remove_file "$CADDY_ETC/Caddyfile.pre-abuseguard"
+	fi
 	[ "$m_ag_user" = 0 ]    && run "userdel abuseguard >/dev/null 2>&1 || true"
-	# userdel -r removes the home dir (/var/lib/caddy, where Caddy keeps certs).
-	# Only safe when AbuseGuard created both the account AND that directory.
 	if [ "$m_caddy_user" = 0 ]; then
+		run "userdel caddy >/dev/null 2>&1 || true"
 		if [ "$m_caddy_lib" = 0 ]; then
-			run "userdel -r caddy >/dev/null 2>&1 || true"
+			remove_owned_tree "$CADDY_LIB" || exit 1
 		else
-			run "userdel caddy >/dev/null 2>&1 || true"
 			log "已保留 /var/lib/caddy（你原有的 Caddy 数据/证书目录）"
 		fi
 	fi
-	[ -n "$CONF_DIR" ]  && run "rm -rf -- '$CONF_DIR'"
-	[ -n "$STATE_DIR" ] && run "rm -rf -- '$STATE_DIR'"
+	remove_owned_tree "$CONF_DIR" || exit 1
+	remove_owned_tree "$STATE_DIR" || exit 1
 	# Only remove the log dir if AbuseGuard created it. A pre-existing
 	# /var/log/caddy is almost certainly the user's own Caddy logs (it is the
 	# packaged default), so there we delete only our own log files.
 	if [ "$m_log_dir" = 0 ]; then
-		[ -n "$LOG_DIR" ] && run "rm -rf -- '$LOG_DIR'"
+		remove_owned_tree "$LOG_DIR" || exit 1
 	else
-		run "rm -f -- '$LOG_DIR'/abuseguard-access.json '$LOG_DIR'/abuseguard-access*.json"
+		for f in "$LOG_DIR"/abuseguard-access*.json; do
+			[ -e "$f" ] || continue
+			remove_file "$f"
+		done
 		log "已保留你原有的 $LOG_DIR（仅删除 AbuseGuard 自己的日志文件）"
 	fi
 	# remove /etc/caddy only if AbuseGuard created it and it's now empty
@@ -211,11 +255,11 @@ if [ "$MODE" = thorough ]; then
 	# actually be removed. Keep .env if it holds a token the user configured.
 	if [ "$m_caddy_etc" = 0 ]; then
 		if [ -f "$CADDY_ENV" ] && ! grep -qE '^CF_API_TOKEN=.+' "$CADDY_ENV" 2>/dev/null; then
-			run "rm -f -- '$CADDY_ENV'"
+			remove_file "$CADDY_ENV"
 		elif [ -f "$CADDY_ENV" ]; then
 			warn "保留 $CADDY_ENV（内含你设置的 CF_API_TOKEN）"
 		fi
-		[ -f "$SITES_DIR/_placeholder.caddy" ] && run "rm -f -- '$SITES_DIR/_placeholder.caddy'"
+		[ -f "$SITES_DIR/_placeholder.caddy" ] && remove_file "$SITES_DIR/_placeholder.caddy"
 		run "rmdir '$SITES_DIR' 2>/dev/null || true"
 		if [ "$DRY" != 1 ]; then
 			if rmdir "$CADDY_ETC" 2>/dev/null; then

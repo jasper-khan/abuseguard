@@ -82,6 +82,26 @@ log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Remove only a mktemp-created checkout, one entry at a time. Refuse symlinks
+# and any path outside the exact temporary-directory shapes used by mktemp.
+cleanup_temp_tree() {
+	local root="$1" path
+	case "$root" in
+		/tmp/tmp.*|/var/tmp/tmp.*) : ;;
+		*) warn "拒绝清理非临时目录：$root"; return 1 ;;
+	esac
+	[ -e "$root" ] || return 0
+	[ ! -L "$root" ] || { warn "拒绝清理符号链接：$root"; return 1; }
+	while IFS= read -r -d '' path; do
+		if [ -d "$path" ] && [ ! -L "$path" ]; then
+			rmdir -- "$path" || return 1
+		else
+			rm -f -- "$path" || return 1
+		fi
+	done < <(find "$root" -xdev -depth -mindepth 1 -print0)
+	rmdir -- "$root"
+}
+
 [ "$(id -u)" = "0" ] || die "请以 root 运行（sudo）。"
 
 # --- self-bootstrap ----------------------------------------------------------
@@ -92,7 +112,7 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	command -v tar >/dev/null 2>&1 || die "自举需要 tar 命令。"
 	AG_REF="${ABUSEGUARD_REF:-main}"
 	AG_TMP="$(mktemp -d)"
-	trap 'rm -rf "$AG_TMP"' EXIT
+	trap 'cleanup_temp_tree "$AG_TMP" || true' EXIT
 	log "正在获取仓库 $ABUSEGUARD_REPO@$AG_REF ..."
 	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz" "$AG_TMP/repo.tar.gz" \
 		|| die "自举下载失败（可设置 ABUSEGUARD_REPO / ABUSEGUARD_REF，或克隆仓库后运行 ./install.sh）。"
