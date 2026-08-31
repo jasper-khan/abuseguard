@@ -292,7 +292,7 @@ printf '%s\n' "$ABUSEGUARD_REPO" > "$CONF_DIR/repo"; chmod 0644 "$CONF_DIR/repo"
 # the same direct-then-mirror fallback as the engine. caddyserver.com's custom
 # build is not mirror-able (not github.com) and is throttled hard from CN.
 need_caddy=1
-if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q 'dns.providers.cloudflare'; then
+if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | awk '$0=="dns.providers.cloudflare" { found=1 } END { exit !found }'; then
 	need_caddy=0
 fi
 if [ "$need_caddy" = "1" ]; then
