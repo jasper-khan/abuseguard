@@ -156,7 +156,7 @@ func cmdReportSendAuto(c *Config) int {
 	hadError := malformed > 0
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	reportLoop:
+reportLoop:
 	for idx, it := range items {
 		if !isReportableIP(it.IP) {
 			logf("report: invalid or non-public IP %q discarded", it.IP)
