@@ -41,7 +41,7 @@ sudo ./install.sh                 # download the prebuilt engine from the latest
 sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
 ```
 
-The installer is idempotent: existing config, whitelist, key, and Caddyfile are never overwritten.
+The installer is idempotent: existing config, whitelist, key, and unrelated Caddy configuration are preserved. Protected AbuseGuard sites from an older release, or sites written directly in the main Caddyfile, are migrated to the canonical `/etc/caddy/sites/<domain>.caddy` layout with `import abuseguard`; the complete migrated configuration must validate before it takes effect.
 
 During install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; both can be set later from the panel. When it finishes, the terminal prominently shows how to open the panel:
 
@@ -131,7 +131,7 @@ Reporting is enabled in the config by default but does nothing until you set an 
 
 ## Add your sites
 
-Put `import abuseguard` inside each site block in `/etc/caddy/Caddyfile`:
+Use one `/etc/caddy/sites/<domain>.caddy` file per protected site and put `import abuseguard` inside its site block:
 
 ```caddyfile
 example.com {
@@ -143,7 +143,7 @@ example.com {
 }
 ```
 
-Then `sudo systemctl reload caddy`. Change the snippet once — every protected site follows.
+Then `sudo systemctl reload caddy`. The main `/etc/caddy/Caddyfile` keeps global settings and the imports for `abuseguard.caddy` and `sites/*.caddy`; change the shared snippet once and every protected site follows.
 
 The Cloudflare token in this example is only for DNS-01 certificate issuance.
 
@@ -153,8 +153,9 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 /usr/local/bin/caddy                          Caddy (with caddy-dns/cloudflare)
 /usr/local/bin/abuseguard                     control panel
 /usr/local/libexec/caddy-abuseguard           Go engine
-/etc/caddy/Caddyfile                          your sites
+/etc/caddy/Caddyfile                          global config + AbuseGuard imports
 /etc/caddy/abuseguard.caddy                   the (abuseguard) snippet
+/etc/caddy/sites/<domain>.caddy               one file per protected site
 /etc/caddy-abuseguard/config.json             engine config
 /etc/caddy-abuseguard/whitelist               never-ban list
 /etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key (optional)
@@ -182,7 +183,7 @@ AbuseGuard created vs. what you already had).
   installed — but **anything that pre-existed the install is left untouched**
   (if you already had Caddy, Caddy stays). Falls back to the safest path if the
   manifest is missing.
-- Panel-added reverse-proxy sites can be kept (de-protected) or deleted. Your
+- AbuseGuard-managed sites under `/etc/caddy/sites` can be kept (de-protected) or deleted. Your
   original Caddyfile is backed up at install time as `Caddyfile.pre-abuseguard`.
 
 ## Security notes

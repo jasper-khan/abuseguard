@@ -6,7 +6,7 @@
 #   --purge          thorough: also remove what AbuseGuard installed (Caddy /
 #                    accounts / config), guided by the install manifest so
 #                    anything that pre-existed the install is left untouched
-#   --keep-sites | --drop-sites   panel-added sites: keep (de-protect) / delete
+#   --keep-sites | --drop-sites   managed sites: keep (de-protect) / delete
 #   --yes            skip confirmation      --dry-run   print, change nothing
 #
 # Uninstall is symmetric to install: it reads /var/lib/caddy-abuseguard/
@@ -100,7 +100,7 @@ if [ "$MANIFEST_OK" = 0 ]; then
 	warn "未找到安装清单，无法确认哪些是 AbuseGuard 安装的；为安全起见将不动 Caddy/账户/配置。"
 fi
 
-# --- count panel-added sites -------------------------------------------------
+# --- count AbuseGuard-managed sites -----------------------------------------
 site_count=0
 if [ -d "$SITES_DIR" ]; then
 	for f in "$SITES_DIR"/*.caddy; do
@@ -124,12 +124,12 @@ if [ -z "$MODE" ]; then
 	fi
 fi
 
-# --- ask about panel-added sites (only if any exist) -------------------------
+# --- ask about AbuseGuard-managed sites (only if any exist) -----------------
 if [ "$site_count" -gt 0 ] && [ -z "$KEEP_SITES" ]; then
 	if [ "$YES" = 1 ] || ! have_tty; then
 		KEEP_SITES=keep
 	else
-		echo "检测到 $site_count 个用面板添加的反代站点："
+		echo "检测到 $site_count 个 AbuseGuard 管理的受保护站点："
 		for f in "$SITES_DIR"/*.caddy; do
 			[ -e "$f" ] || continue
 			[ "$(basename "$f")" = "_placeholder.caddy" ] && continue
@@ -176,7 +176,7 @@ clean_caddyfile() {
 	remove_file "$tmp"
 }
 
-# strip `import abuseguard` from each panel site file, keeping the reverse proxy
+# strip `import abuseguard` from each managed site file, keeping the reverse proxy
 clean_sites_keep() {
 	[ -d "$SITES_DIR" ] || return 0
 	local f

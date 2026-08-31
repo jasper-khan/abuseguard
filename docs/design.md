@@ -15,6 +15,12 @@
 - **systemd timers** — periodic intel refresh and report-queue flush.
 - **panel** (`abuseguard`) — a numbered bash TUI over the above.
 
+## Canonical Caddy layout
+
+The main `/etc/caddy/Caddyfile` contains global settings and imports the shared `/etc/caddy/abuseguard.caddy` snippet plus `/etc/caddy/sites/*.caddy`. Every protected site lives in its own `/etc/caddy/sites/<domain>.caddy` file and uses `import abuseguard`.
+
+During install or update, protected single-domain site blocks found in the main Caddyfile are moved to that canonical layout. Legacy inline AbuseGuard log/probe directives are replaced by the shared import while the rest of each site block (TLS, matchers, routes, and upstreams) is preserved. The candidate main file and migrated site files are installed only if the complete Caddy configuration validates; an ambiguous protected block or an existing target filename aborts the migration instead of leaving two configuration layouts active.
+
 ## Request → ban flow
 
 1. A request hits a site with `import abuseguard`. Caddy appends `caddy_abuseguard_site=protected`, and if the path looks like a scan, `caddy_abuseguard_probe=web-probe`, then logs `{ts, client_ip, proto, ...tags}`.

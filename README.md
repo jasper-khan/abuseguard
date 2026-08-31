@@ -41,7 +41,7 @@ sudo ./install.sh                 # 从最新 release 下载预编译引擎
 sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go）
 ```
 
-安装器是幂等的：已有的 config、whitelist、key 和 Caddyfile 都不会被覆盖。
+安装器是幂等的：已有的 config、whitelist、key 和无关 Caddy 配置都会保留。旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；迁移后的完整配置必须校验通过才会生效。
 
 安装过程中会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，两者都能之后随时在面板里设置。装完终端会醒目显示进面板的命令：
 
@@ -105,7 +105,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 ## 接入你的站点
 
-在 `/etc/caddy/Caddyfile` 的每个站点块里加入 `import abuseguard`：
+每个受保护站点使用独立文件 `/etc/caddy/sites/<域名>.caddy`，并在站点块里加入 `import abuseguard`：
 
 ```caddyfile
 example.com {
@@ -117,7 +117,7 @@ example.com {
 }
 ```
 
-然后 `sudo systemctl reload caddy`。片段只需改一处 —— 每个受保护站点都会跟随生效。
+然后 `sudo systemctl reload caddy`。主 `/etc/caddy/Caddyfile` 只保留全局配置及对 `abuseguard.caddy`、`sites/*.caddy` 的导入；片段只需改一处，每个受保护站点都会跟随生效。
 
 示例里的 Cloudflare token 只用于 DNS-01 证书签发。
 
@@ -127,8 +127,9 @@ example.com {
 /usr/local/bin/caddy                          Caddy（内置 caddy-dns/cloudflare）
 /usr/local/bin/abuseguard                     控制面板
 /usr/local/libexec/caddy-abuseguard           Go 引擎
-/etc/caddy/Caddyfile                          你的站点
+/etc/caddy/Caddyfile                          全局配置 + AbuseGuard 导入
 /etc/caddy/abuseguard.caddy                   (abuseguard) 片段
+/etc/caddy/sites/<域名>.caddy                 每个受保护站点一个文件
 /etc/caddy-abuseguard/config.json             引擎配置
 /etc/caddy-abuseguard/whitelist               永不封禁名单
 /etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key（可选）
@@ -150,7 +151,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 
 - **保守卸载**：只删 AbuseGuard 组件，并从 Caddyfile 摘掉 AbuseGuard 的引入（`import abuseguard`、snippet、自检站点），**保留你原有的 Caddy、账户和反代配置**。
 - **彻底卸载**：再按清单删 AbuseGuard 安装的 Caddy/账户/配置 —— 但**装之前你已有的一律不动**（原本就有 Caddy 就不会删 Caddy）。清单丢失时自动降级为最保守处理。
-- 用面板加过的反代站点，卸载时可选「保留反代、只去防护」或「一起删」。原有 Caddyfile 在安装时已备份为 `Caddyfile.pre-abuseguard`。
+- `/etc/caddy/sites` 中由 AbuseGuard 管理的站点，卸载时可选「保留反代、只去防护」或「一起删」。原有 Caddyfile 在安装时已备份为 `Caddyfile.pre-abuseguard`。
 
 ## 安全须知
 

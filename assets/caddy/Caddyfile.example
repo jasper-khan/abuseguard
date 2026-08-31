@@ -16,14 +16,18 @@
 # Load the AbuseGuard snippet once.
 import /etc/caddy/abuseguard.caddy
 
-# Protect a site by importing the snippet inside its block.
-example.com {
-	import abuseguard
+# Load protected sites, one file per domain.
+import /etc/caddy/sites/*.caddy
 
-	# Cloudflare DNS-01 challenge (token from /etc/caddy/.env -> CF_API_TOKEN):
-	tls {
-		dns cloudflare {env.CF_API_TOKEN}
-	}
-
-	reverse_proxy localhost:8080
-}
+# Example /etc/caddy/sites/example.com.caddy:
+#
+# example.com {
+# 	import abuseguard
+#
+# 	# Cloudflare DNS-01 challenge (token from /etc/caddy/.env -> CF_API_TOKEN):
+# 	tls {
+# 		dns cloudflare {env.CF_API_TOKEN}
+# 	}
+#
+# 	reverse_proxy localhost:8080
+# }

@@ -82,6 +82,12 @@ log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 1; }
 
+validate_caddyfile() {
+	local config="$1" cf_token=""
+	[ ! -f "$CADDY_ENV" ] || cf_token="$(sed -n 's/^CF_API_TOKEN=//p' "$CADDY_ENV" | head -n 1)"
+	CF_API_TOKEN="$cf_token" "$CADDY_BIN" validate --config "$config" --adapter caddyfile
+}
+
 # Remove only a mktemp-created checkout, one entry at a time. Refuse symlinks
 # and any path outside the exact temporary-directory shapes used by mktemp.
 cleanup_temp_tree() {
@@ -305,14 +311,14 @@ setcap 'cap_net_bind_service=+ep' "$CADDY_BIN" || warn "setcap 失败；Caddy �
 
 # --- Caddy snippet + env + systemd unit --------------------------------------
 install -m 0644 "$SRC_DIR/assets/caddy/abuseguard.caddy" "$SNIPPET"
-# Panel-managed reverse-proxy sites live here, one <domain>.caddy each. The
+# Protected sites live here, one <domain>.caddy each. The
 # placeholder keeps `import sites/*.caddy` matching at least one file (an empty
 # glob would fail Caddyfile adaptation).
 install -d -m 0755 "$SITES_DIR"
 if [ ! -e "$SITES_DIR/_placeholder.caddy" ]; then
 	cat > "$SITES_DIR/_placeholder.caddy" <<'PH'
-# AbuseGuard 站点目录：由面板（abuseguard → 站点/反代管理）自动管理。
-# 每个反代站点一个 <域名>.caddy 文件；本占位文件请勿删除。
+# AbuseGuard 受保护站点目录。
+# 每个站点一个 <域名>.caddy 文件，并在站点块中 import abuseguard。
 PH
 	chmod 0644 "$SITES_DIR/_placeholder.caddy"
 fi
@@ -335,6 +341,7 @@ if [ "$PRE_CADDYFILE" = 1 ] && [ ! -e "$CADDY_ETC/Caddyfile.pre-abuseguard" ]; t
 	cp -a "$CADDYFILE" "$CADDY_ETC/Caddyfile.pre-abuseguard"
 	log "已备份原 Caddyfile 到 $CADDY_ETC/Caddyfile.pre-abuseguard"
 fi
+caddy_migration_source="$CADDYFILE"
 if [ ! -f "$CADDYFILE" ]; then
 	log "正在获取 Cloudflare IP 段用于 trusted_proxies..."
 	CF_V4="$(curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v4 2>/dev/null || true)"
@@ -364,7 +371,7 @@ if [ ! -f "$CADDYFILE" ]; then
 # 引入一次 AbuseGuard 的日志/探测片段。
 import ${SNIPPET}
 
-# 由面板管理的反代站点（每个域名一个文件）。
+# AbuseGuard 受保护站点（每个域名一个文件）。
 import ${SITES_DIR}/*.caddy
 
 # 安装器创建的仅回环自检站点，可安全删除。
@@ -375,23 +382,18 @@ http://127.0.0.1:8080 {
 	respond "abuseguard test ok"
 }
 
-# --- 在下面添加你的真实站点，例如： ------------------------------------------
-# example.com {
-# 	import abuseguard
-# 	tls {
-# 		dns cloudflare {env.CF_API_TOKEN}
-# 	}
-# 	reverse_proxy localhost:3000
-# }
+# 在 ${SITES_DIR}/<域名>.caddy 中添加受保护站点。
 EOF
 	log "已写入 $CADDYFILE"
 else
 	log "保留已有的 $CADDYFILE"
+	caddy_migration_source="$(mktemp)"
+	install -m 0644 "$CADDYFILE" "$caddy_migration_source"
 	site_import="$SITES_DIR/*.caddy"
-	# A pre-existing Caddyfile needs the named snippet before any panel-managed
+	# A pre-existing Caddyfile needs the named snippet before any protected
 	# site can `import abuseguard`. Insert it before an existing sites import;
 	# otherwise append it now and append the sites import immediately after.
-	if ! awk -v snippet="$SNIPPET" '$1=="import" && $2==snippet { found=1 } END { exit !found }' "$CADDYFILE"; then
+	if ! awk -v snippet="$SNIPPET" '$1=="import" && $2==snippet { found=1 } END { exit !found }' "$caddy_migration_source"; then
 		tmp="$(mktemp)"
 		awk -v snippet="$SNIPPET" -v sites="$site_import" '
 			!inserted && $1=="import" && $2==sites {
@@ -408,15 +410,86 @@ else
 					print "import " snippet
 				}
 			}
-		' "$CADDYFILE" > "$tmp" && cat "$tmp" > "$CADDYFILE"
+		' "$caddy_migration_source" > "$tmp" && cat "$tmp" > "$caddy_migration_source"
 		rm -f "$tmp"
 		log "已在现有 Caddyfile 中加入 import abuseguard.caddy"
 	fi
-	if ! awk -v sites="$site_import" '$1=="import" && $2==sites { found=1 } END { exit !found }' "$CADDYFILE"; then
-		printf '\n# 由面板管理的反代站点\nimport %s/*.caddy\n' "$SITES_DIR" >> "$CADDYFILE"
+	if ! awk -v sites="$site_import" '$1=="import" && $2==sites { found=1 } END { exit !found }' "$caddy_migration_source"; then
+		printf '\n# AbuseGuard 受保护站点\nimport %s/*.caddy\n' "$SITES_DIR" >> "$caddy_migration_source"
 		log "已在 Caddyfile 中加入 import sites/*.caddy"
 	fi
 fi
+
+# --- normalize protected sites into /etc/caddy/sites ------------------------
+# Old AbuseGuard releases wrote the protection directives directly inside the
+# main Caddyfile. The canonical layout is one protected site per
+# /etc/caddy/sites/<domain>.caddy, using the shared `import abuseguard` snippet.
+# Generate the candidate layout in a temp dir, install the new site files, and
+# atomically replace the main Caddyfile only after the full config validates.
+migrate_protected_sites() {
+	local source="$1"
+	local migrator="$SRC_DIR/scripts/migrate-caddy-sites.sh"
+	local root out_main out_sites domains candidate validation domain target failed=0 count=0
+	local -a installed=()
+	if [ ! -f "$migrator" ]; then
+		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
+		die "缺少站点迁移器：$migrator"
+	fi
+
+	root="$(mktemp -d)"
+	out_main="$root/Caddyfile"
+	out_sites="$root/sites"
+	domains="$root/domains"
+	install -d -m 0700 "$out_sites"
+	if ! bash "$migrator" "$source" "$out_main" "$out_sites" "$SITES_DIR" > "$domains"; then
+		cleanup_temp_tree "$root" || true
+		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
+		die "受保护站点无法按 AbuseGuard 标准结构迁移；原 Caddyfile 未改动。"
+	fi
+
+	candidate="$(mktemp "$CADDY_ETC/.Caddyfile.abuseguard-migrate.XXXXXX")"
+	validation="$(mktemp "$CADDY_ETC/.Caddyfile.abuseguard-validate.XXXXXX")"
+	install -m 0644 "$out_main" "$candidate"
+	install -m 0644 "$out_main" "$validation"
+	if [ -s "$domains" ]; then
+		printf '\nimport %s/*.caddy\n' "$out_sites" >> "$validation"
+	fi
+	if ! validate_caddyfile "$validation" >/dev/null; then
+		rm -f -- "$validation"
+		rm -f -- "$candidate"
+		cleanup_temp_tree "$root" || true
+		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
+		die "迁移后的 Caddy 配置校验失败；原 Caddyfile 未改动。"
+	fi
+	rm -f -- "$validation"
+
+	while IFS= read -r domain; do
+		[ -n "$domain" ] || continue
+		target="$SITES_DIR/$domain.caddy"
+		if [ -e "$target" ] || ! install -m 0644 "$out_sites/$domain.caddy" "$target"; then
+			failed=1
+			break
+		fi
+		installed+=("$target")
+		count=$((count + 1))
+	done < "$domains"
+
+	if [ "$failed" = 0 ]; then
+		mv -f -- "$candidate" "$CADDYFILE"
+		for target in "${installed[@]}"; do log "已迁移受保护站点：$target"; done
+		[ "$count" = 0 ] || log "已按 AbuseGuard 标准结构迁移 $count 个站点"
+		cleanup_temp_tree "$root" || true
+		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
+		return 0
+	fi
+
+	for target in "${installed[@]}"; do rm -f -- "$target"; done
+	rm -f -- "$candidate"
+	cleanup_temp_tree "$root" || true
+	[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
+	die "无法写入迁移后的站点文件；已撤销本次站点迁移。"
+}
+migrate_protected_sites "$caddy_migration_source"
 
 # ensure the access log exists and is caddy-writable before fail2ban starts
 [ -e "$LOG_DIR/abuseguard-access.json" ] || install -m 0640 -o caddy -g caddy /dev/null "$LOG_DIR/abuseguard-access.json"
@@ -479,7 +552,7 @@ fi
 
 # --- validate + enable -------------------------------------------------------
 log "正在校验 Caddyfile"
-"$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null || die "Caddyfile 校验失败。"
+validate_caddyfile "$CADDYFILE" >/dev/null || die "Caddyfile 校验失败。"
 
 systemctl daemon-reload
 log "正在启用并启动服务"
@@ -500,7 +573,7 @@ cat <<EOF
     配置:         $CONF_DIR/config.json
     访问日志:     $LOG_DIR/abuseguard-access.json
 
-  在 $CADDYFILE 里添加你的站点（每个站点块内放
+  在 $SITES_DIR/<域名>.caddy 中添加受保护站点（站点块内放
   'import abuseguard'），然后执行：sudo systemctl reload caddy
 
 安全提示：Caddy 本身不提供鉴权。凡是你对外暴露的站点，除非自行加鉴权，
