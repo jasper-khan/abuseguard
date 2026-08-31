@@ -1,8 +1,7 @@
 name: ci
 
 # Runs on every push/PR. Two gates:
-#   1. the Go engine must compile and vet clean (a non-compiling engine must
-#      never reach main -- it has happened);
+#   1. the Go engine tests must pass and it must compile/vet clean;
 #   2. the Caddy-log <-> fail2ban-filter contract must hold, checked against
 #      upstream-latest Caddy. Because release.yml deliberately tracks Caddy
 #      latest, this is what turns "upstream silently changed the log schema and
@@ -24,10 +23,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
-      - name: Build + vet engine
+      - name: Test + build + vet engine
         working-directory: engine
         run: |
           set -eu
+          unformatted="$(gofmt -l .)"
+          [ -z "$unformatted" ] || { echo "gofmt required:"; echo "$unformatted"; exit 1; }
+          go test ./...
           go build ./...
           go vet ./...
       - name: Cross-compile the release targets
@@ -37,6 +39,13 @@ jobs:
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "/tmp/engine-$arch" .
           done
+      - name: Upload amd64 test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: caddy-abuseguard-linux-amd64-${{ github.sha }}
+          path: /tmp/engine-amd64
+          if-no-files-found: error
+          retention-days: 1
 
   shell:
     runs-on: ubuntu-latest

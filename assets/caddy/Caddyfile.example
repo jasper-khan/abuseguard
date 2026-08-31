@@ -1,8 +1,10 @@
 # Example production Caddyfile using AbuseGuard.
 #
 # The global block MUST trust your edge/reverse-proxy layer (e.g. Cloudflare)
-# so that `client_ip` is the real visitor and not the proxy. AbuseGuard bans
-# and reports client_ip, so getting this right is essential.
+# so that `client_ip` is the real visitor and not the proxy. This is required
+# for detection/reporting, but it does not change the TCP source seen by the
+# origin firewall: Cloudflare orange-cloud traffic still comes from a
+# Cloudflare edge, so local nftables cannot block the restored visitor IP.
 #
 # `install.sh` can pre-fill the Cloudflare ranges for you when it generates a
 # fresh Caddyfile. If you manage your own Caddyfile, copy the block below.

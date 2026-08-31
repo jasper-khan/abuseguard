@@ -333,7 +333,9 @@ if [ ! -f "$CADDYFILE" ]; then
 	cat > "$CADDYFILE" <<EOF
 # 由 AbuseGuard install.sh 生成，可自由编辑。
 #
-# 全局块信任你的边缘代理，使 client_ip 为真实访客 IP。
+# 全局块信任你的边缘代理，使 client_ip 为真实访客 IP（用于检测/上报）。
+# 注意：Cloudflare 橙云流量的 TCP 来源仍是 Cloudflare 节点，本机 nftables
+# 无法按这里恢复出的访客 IP 拦截它；橙云站点需另配 Cloudflare 边缘封禁。
 {
 	servers {
 		trusted_proxies static 127.0.0.1/8 ::1 ${CF_RANGES}
@@ -367,7 +369,32 @@ EOF
 	log "已写入 $CADDYFILE"
 else
 	log "保留已有的 $CADDYFILE"
-	if ! grep -q "$SITES_DIR" "$CADDYFILE" 2>/dev/null; then
+	site_import="$SITES_DIR/*.caddy"
+	# A pre-existing Caddyfile needs the named snippet before any panel-managed
+	# site can `import abuseguard`. Insert it before an existing sites import;
+	# otherwise append it now and append the sites import immediately after.
+	if ! awk -v snippet="$SNIPPET" '$1=="import" && $2==snippet { found=1 } END { exit !found }' "$CADDYFILE"; then
+		tmp="$(mktemp)"
+		awk -v snippet="$SNIPPET" -v sites="$site_import" '
+			!inserted && $1=="import" && $2==sites {
+				print "# 引入一次 AbuseGuard 的日志/探测片段。"
+				print "import " snippet
+				print ""
+				inserted=1
+			}
+			{ print }
+			END {
+				if (!inserted) {
+					print ""
+					print "# 引入一次 AbuseGuard 的日志/探测片段。"
+					print "import " snippet
+				}
+			}
+		' "$CADDYFILE" > "$tmp" && cat "$tmp" > "$CADDYFILE"
+		rm -f "$tmp"
+		log "已在现有 Caddyfile 中加入 import abuseguard.caddy"
+	fi
+	if ! awk -v sites="$site_import" '$1=="import" && $2==sites { found=1 } END { exit !found }' "$CADDYFILE"; then
 		printf '\n# 由面板管理的反代站点\nimport %s/*.caddy\n' "$SITES_DIR" >> "$CADDYFILE"
 		log "已在 Caddyfile 中加入 import sites/*.caddy"
 	fi
@@ -460,6 +487,10 @@ cat <<EOF
 
 安全提示：Caddy 本身不提供鉴权。凡是你对外暴露的站点，除非自行加鉴权，
 否则都是公开的。安装器自带的自检站点只绑定 127.0.0.1。
+
+Cloudflare 橙云提示：trusted_proxies 只负责恢复真实 IP 供检测和上报；
+源站 nftables 看见的仍是 Cloudflare 节点 IP，不能据此拦截真实访客。
+橙云站点需要另行配置 Cloudflare 边缘封禁；DNS-only/直连源站不受此限制。
 EOF
 
 # On an interactive terminal, drop straight into the control panel; otherwise

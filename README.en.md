@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.md)
 
-AbuseGuard is a drop-in abuse-mitigation layer for a [Caddy](https://caddyserver.com/) reverse proxy on Debian/Ubuntu. It bans abusive and known-malicious IPs at the firewall (nftables) and can optionally auto-report them to [AbuseIPDB](https://www.abuseipdb.com/) — driven by fail2ban plus a small Go engine.
+AbuseGuard is a drop-in abuse-mitigation layer for a [Caddy](https://caddyserver.com/) reverse proxy on Debian/Ubuntu. For connections that reach the origin directly, it bans abusive and known-malicious IPs at the firewall (nftables) and can optionally auto-report them to [AbuseIPDB](https://www.abuseipdb.com/) — driven by fail2ban plus a small Go engine.
 
 One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS module), the fail2ban jails, a threat-intel sync, the optional reporter, and an interactive `abuseguard` panel.
 
@@ -12,19 +12,20 @@ One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS modul
 visitor ─▶ Caddy (protected site: `import abuseguard`)
              │  writes a privacy-trimmed JSON access log
              ▼
-         fail2ban ──(matches)──▶ nftables DROP :80/:443   ← the ban
+         fail2ban ──(matches)──▶ nftables DROP :80/:443   ← direct-origin ban
              │
              └─(rate/probe)─▶ engine enqueue ─▶ report queue ──(timer)──▶ AbuseIPDB
 ```
 
 - Caddy tags each request to a protected site and logs only what fail2ban needs (client IP, protocol, tags) — no paths, hosts, headers, or query strings.
-- fail2ban runs four jails against that log; bans are enforced with nftables (drop on tcp/80+443).
+- fail2ban runs four jails against that log; direct-origin bans are enforced with nftables (drop on tcp/80+443).
 - A Go engine (stdlib only, single static binary) makes the ban/ignore decisions, keeps the threat-intel list fresh, and flushes queued reports.
 
 ## Requirements
 
 - Debian 11/12 or Ubuntu 20.04+ (amd64 or arm64), with root (sudo).
-- Intended for a public server behind an edge proxy (e.g. Cloudflare). AbuseGuard bans/reports the **real client IP**, so `trusted_proxies` must be correct.
+- nftables banning applies when clients connect directly to the origin, including Cloudflare DNS-only records.
+- Behind Cloudflare's proxied (orange-cloud) mode, `trusted_proxies` restores the real IP for detection and reporting, but the origin TCP connection still comes from a Cloudflare edge. Local nftables therefore cannot block that restored visitor IP; configure a Cloudflare edge-side ban separately.
 
 ## Install
 
@@ -121,13 +122,15 @@ Just run `abuseguard` (the panel needs root; a normal user is transparently re-r
 
 Ban time is 90 days. Whitelisted IPs (`/etc/caddy-abuseguard/whitelist`) are never banned and never reported. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
 
+> In Cloudflare orange-cloud mode, detection and reporting still work, but nftables rules only match packets that actually reach the origin with the visitor IP as their source. They cannot block requests forwarded by a Cloudflare edge.
+
 ## Threat intel
 
 The intel jail bans nothing until the list is synced. The engine pulls a public AbuseIPDB-derived blocklist and refuses a list that is implausibly small (<90k) or large (>120k); on any failure it keeps the previous list. Refresh runs every 6h (and via the panel).
 
 ## AbuseIPDB reporting (optional)
 
-Reporting is enabled in the config by default but does nothing until you set an API key (panel → 6). Reports are privacy-safe (no host/path/headers), deduped (15m), and capped (1000/day). The flush runs every 10m. Turn it off entirely with panel → 8.
+Reporting is enabled in the config by default but does nothing until you set an API key (panel → 6). Reports are privacy-safe (no host/path/headers), deduped (15m), and capped (1000/day). A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue instead of being erased with the old batch. The flush runs every 10m. Turn it off entirely with panel → 8.
 
 ## Add your sites
 
@@ -144,6 +147,8 @@ example.com {
 ```
 
 Then `sudo systemctl reload caddy`. Change the snippet once — every protected site follows.
+
+The Cloudflare token in this example is only for DNS-01 certificate issuance; it does not configure Cloudflare edge banning. Add an edge-side ban separately when the DNS record is proxied.
 
 ## Files
 
@@ -187,6 +192,7 @@ AbuseGuard created vs. what you already had).
 
 - Caddy adds no authentication. Anything you expose is public unless you add auth yourself.
 - The installer's self-test site binds `127.0.0.1:8080` only.
+- Cloudflare orange-cloud exposes the visitor IP through HTTP headers, while origin TCP connections still come from Cloudflare edges; local nftables is not a substitute for edge-side blocking.
 - Secrets (`*.key`, `.env`) are mode 0640 and git-ignored; never commit them.
 - Downloaded binaries are verified against `SHA256SUMS.txt` (see the integrity check under "Slow network / China mirror").
 - Caddy runs under a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, restricted capability set, syscall filtering); the two engine timers are hardened too.
@@ -195,6 +201,7 @@ AbuseGuard created vs. what you already had).
 
 - `engine/` is a single Go module, stdlib only, `go 1.21`.
 - Tagging `vX.Y.Z` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `caddy-abuseguard-linux-{amd64,arm64}` and attaches them to the release. `install.sh` downloads these by default.
+- Versioned engine assets remain immutable after release. Weekly/manual refreshes replace only the upstream-tracking Caddy assets and regenerate checksums plus build metadata for the complete asset set.
 
 See [docs/design.md](docs/design.md) for the architecture and the fail-safe rules.
 

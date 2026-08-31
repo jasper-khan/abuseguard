@@ -70,12 +70,35 @@ func cmdReportSendAuto(c *Config) int {
 		logf("report: no API key configured; skipping (queue kept)")
 		return 0
 	}
-	items, raw, err := readQueue(c)
+	if err := os.MkdirAll(c.Paths.ReportsDir, 0750); err != nil {
+		logf("report: mkdir reports dir: %v", err)
+		return 1
+	}
+	reportLock, err := acquireFileLock(reportLockPath(c))
+	if err != nil {
+		logf("report: lock reporter: %v", err)
+		return 1
+	}
+	defer reportLock.Close()
+
+	batch, err := rotateQueue(c)
+	if err != nil {
+		logf("report: rotate queue: %v", err)
+		return 1
+	}
+	if batch == "" {
+		return 0
+	}
+	items, raw, err := readQueueFile(batch)
 	if err != nil {
 		logf("report: read queue: %v", err)
 		return 1
 	}
 	if len(items) == 0 {
+		if err := writeQueueFile(batch, nil); err != nil {
+			logf("report: remove empty queue batch: %v", err)
+			return 1
+		}
 		return 0
 	}
 	allow := loadAllowlist(c.AllowlistFile)
@@ -133,7 +156,10 @@ func cmdReportSendAuto(c *Config) int {
 		}
 	}
 
-	writeQueue(c, remaining)
+	if err := writeQueueFile(batch, remaining); err != nil {
+		logf("report: save queue batch: %v", err)
+		return 1
+	}
 	saveJSON(dedupePath(c), dedupe, 0640)
 	saveJSON(dailyPath(c), daily, 0640)
 	logf("report: sent=%d skipped=%d requeued=%d (daily=%d/%d)", sent, skipped, len(remaining), daily.Attempts, dailyCap)

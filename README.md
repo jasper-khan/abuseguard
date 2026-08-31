@@ -2,7 +2,7 @@
 
 [English](README.en.md) | **简体中文**
 
-AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 反向代理的即插即用滥用缓解层。它在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
+AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
 
 一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `abuseguard` 控制面板。
 
@@ -12,19 +12,20 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
 访客 ─▶ Caddy（受保护站点：`import abuseguard`）
              │  写入隐私精简的 JSON 访问日志
              ▼
-         fail2ban ──(命中)──▶ nftables DROP :80/:443   ← 封禁
+         fail2ban ──(命中)──▶ nftables DROP :80/:443   ← 直连源站封禁
              │
              └─(限速/探测)─▶ 引擎入队 ─▶ 上报队列 ──(定时器)──▶ AbuseIPDB
 ```
 
 - Caddy 为每个到受保护站点的请求打标签，只记录 fail2ban 所需的字段（客户端 IP、协议、标签）——不记录路径、主机名、请求头或查询串。
-- fail2ban 针对该日志运行四个 jail；封禁由 nftables 执行（对 tcp/80+443 丢弃）。
+- fail2ban 针对该日志运行四个 jail；直连源站的封禁由 nftables 执行（对 tcp/80+443 丢弃）。
 - 一个 Go 引擎（仅用标准库、单个静态二进制）负责封禁/放行判定、保持威胁情报名单新鲜、并冲刷上报队列。
 
 ## 环境要求
 
 - Debian 11/12 或 Ubuntu 20.04+（amd64 或 arm64），需 root（sudo）。
-- 适用于位于边缘代理（如 Cloudflare）之后的公网服务器。AbuseGuard 封禁/上报的是**真实客户端 IP**，因此 `trusted_proxies` 必须配置正确。
+- nftables 封禁适用于客户端直接连接源站（包括 Cloudflare DNS-only）的站点。
+- 位于 Cloudflare 橙云之后时，`trusted_proxies` 能恢复真实 IP 供检测和上报，但源站收到的 TCP 连接来自 Cloudflare 节点，因此本机 nftables 不能按真实访客 IP 拦截；橙云站点需要另配 Cloudflare 边缘封禁。
 
 ## 安装
 
@@ -95,13 +96,15 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 封禁时长为 90 天。白名单 IP（`/etc/caddy-abuseguard/whitelist`）永不封禁、永不上报。「敏感路径」= `/.env`、`/.git`、`/phpmyadmin`、`/vendor/phpunit`、`/cgi-bin`（及其子路径）。
 
+> Cloudflare 橙云下，表中的检测和上报仍可工作，但 nftables 规则只会匹配真正以该访客 IP 直连源站的数据包，不能拦截由 Cloudflare 节点转发的请求。
+
 ## 威胁情报
 
 在名单同步之前，intel jail 不封禁任何人。引擎会拉取一份公开的、源自 AbuseIPDB 的封禁名单，并拒绝加载明显异常偏小（<9 万）或偏大（>12 万）的名单；任何失败都会保留上一次的名单。刷新每 6 小时执行一次（也可通过面板手动触发）。
 
 ## AbuseIPDB 上报（可选）
 
-配置里上报默认开启，但在你设置 API key（面板 → 6）之前不会做任何事。上报是隐私安全的（不含主机名/路径/请求头）、按 IP 去重（15 分钟窗口）、并有上限（每天 1000 条）。冲刷每 10 分钟执行一次。要彻底关闭，用面板 → 8。
+配置里上报默认开启，但在你设置 API key（面板 → 6）之前不会做任何事。上报是隐私安全的（不含主机名/路径/请求头）、按 IP 去重（15 分钟窗口）、并有上限（每天 1000 条）。冲刷时会先把当前队列原子轮转为独立批次，因此发送期间新入队的记录会留在新队列，不会被旧批次清掉。冲刷每 10 分钟执行一次。要彻底关闭，用面板 → 8。
 
 ## 接入你的站点
 
@@ -118,6 +121,8 @@ example.com {
 ```
 
 然后 `sudo systemctl reload caddy`。片段只需改一处 —— 每个受保护站点都会跟随生效。
+
+示例里的 Cloudflare token 只用于 DNS-01 证书签发，并不自动配置 Cloudflare 边缘封禁。若 DNS 记录开启橙云，请另外在 Cloudflare 侧配置封禁机制。
 
 ## 文件位置
 
@@ -154,6 +159,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 
 - Caddy 本身不提供任何鉴权。凡是你对外暴露的站点，除非你自己加了鉴权，否则都是公开的。
 - 安装器的自检站点只绑定 `127.0.0.1:8080`。
+- Cloudflare 橙云只会把真实访客 IP 放进 HTTP 头；源站 nftables 看到的连接来源仍是 Cloudflare 节点，不能代替 Cloudflare 边缘封禁。
 - 密钥（`*.key`、`.env`）权限为 0640 且已被 git 忽略；切勿提交。
 - 下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络慢 / 大陆镜像」的完整性校验说明）。
 - Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务同样加固。
@@ -162,6 +168,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 
 - `engine/` 是单个 Go module，仅用标准库，`go 1.21`。
 - 打 `vX.Y.Z` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，它构建 `caddy-abuseguard-linux-{amd64,arm64}` 并附加到 release。`install.sh` 默认下载这些产物。
+- 版本化的引擎产物发布后保持不变；每周/手动刷新只更新跟随上游的 Caddy，并重新生成覆盖全部现有产物的校验和与构建元数据。
 
 架构与「失败即安全」规则详见 [docs/design.md](docs/design.md)。
 
