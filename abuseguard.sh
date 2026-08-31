@@ -161,7 +161,7 @@ act_ban() {
 	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
 	# 各 jail 共用同一条 nftables 封禁（drop 80/443），封任一 jail 即全局生效。
 	# 用 caddy-intel：它只做防火墙 drop、不挂上报动作，手动封禁不会被自动上报到
-	# AbuseIPDB（其余 jail 带 queue 动作，手动封会误报一个管理员本地拉黑的 IP）。
+	# AbuseIPDB（probe jail 带 queue 动作，手动封会误报一个管理员本地拉黑的 IP）。
 	if fail2ban-client set caddy-intel banip "$ip" >/dev/null 2>&1; then
 		echo "  已封禁 $ip。"
 	else
@@ -347,7 +347,8 @@ act_sync()  { runuser -u abuseguard -- "$ENGINE" sync-intel; pause; }
 act_flush() { runuser -u abuseguard -- "$ENGINE" report send-auto; pause; }
 
 act_key() {
-	read -r -p "AbuseIPDB API key（留空=保持当前）: " k
+	read -r -s -p "AbuseIPDB API key（留空=保持当前）: " k
+	echo
 	if [ -n "$k" ]; then
 		printf '%s\n' "$k" > "$KEYFILE"; chown root:abuseguard "$KEYFILE"; chmod 0640 "$KEYFILE"
 		echo "已保存 key。"

@@ -64,10 +64,19 @@ func ignoreSafeConfig() *Config {
 	return c
 }
 
+func ignoreSafeAllowlist(c *Config) *Allowlist {
+	allow, err := loadAllowlist(c.AllowlistFile)
+	if err != nil {
+		logf("ignore: load allowlist failed (%v); ignoring this candidate to avoid a false ban", err)
+		os.Exit(0)
+	}
+	return allow
+}
+
 func runEnqueue(args []string) {
 	fs := flag.NewFlagSet("enqueue", flag.ExitOnError)
 	ip := fs.String("ip", "", "offending IP")
-	profile := fs.String("profile", "web-rate", "profile (web-rate|web-probe)")
+	profile := fs.String("profile", "", "profile (web-probe)")
 	failures := fs.Int("failures", 0, "failure count")
 	window := fs.String("window", "", "detection window")
 	transport := fs.String("transport", "", "transport")
@@ -93,7 +102,7 @@ func runIntelIgnore(args []string) {
 		os.Exit(0)
 	}
 	c := ignoreSafeConfig()
-	if loadAllowlist(c.AllowlistFile).Contains(*ip) {
+	if ignoreSafeAllowlist(c).Contains(*ip) {
 		os.Exit(0) // whitelisted => ignore
 	}
 	if intelContains(c, *ip) {
@@ -112,7 +121,7 @@ func runUnknownIgnore(args []string) {
 		os.Exit(0)
 	}
 	c := ignoreSafeConfig()
-	if loadAllowlist(c.AllowlistFile).Contains(*ip) {
+	if ignoreSafeAllowlist(c).Contains(*ip) {
 		os.Exit(0) // whitelisted => ignore
 	}
 	os.Exit(1) // not whitelisted => proceed to ban

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -13,17 +14,19 @@ type Allowlist struct {
 	ips  []net.IP
 }
 
-// loadAllowlist parses the whitelist file. On any error it returns an empty
-// allowlist (fail-safe: nothing is treated as whitelisted).
-func loadAllowlist(path string) *Allowlist {
+// loadAllowlist parses the whitelist file. Callers decide how to fail safe:
+// ignore commands skip a ban, while the reporter stops without sending.
+func loadAllowlist(path string) (*Allowlist, error) {
 	a := &Allowlist{}
 	f, err := os.Open(path)
 	if err != nil {
-		return a
+		return nil, err
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
+	lineNo := 0
 	for sc.Scan() {
+		lineNo++
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -36,16 +39,23 @@ func loadAllowlist(path string) *Allowlist {
 			continue
 		}
 		if strings.Contains(line, "/") {
-			if _, n, err := net.ParseCIDR(line); err == nil {
-				a.nets = append(a.nets, n)
+			_, n, err := net.ParseCIDR(line)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: invalid CIDR %q", lineNo, line)
 			}
+			a.nets = append(a.nets, n)
 			continue
 		}
-		if ip := net.ParseIP(line); ip != nil {
-			a.ips = append(a.ips, ip)
+		ip := net.ParseIP(line)
+		if ip == nil {
+			return nil, fmt.Errorf("line %d: invalid IP %q", lineNo, line)
 		}
+		a.ips = append(a.ips, ip)
 	}
-	return a
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // Contains reports whether ipStr is covered by the allowlist.

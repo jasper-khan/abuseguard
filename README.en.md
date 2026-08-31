@@ -14,7 +14,7 @@ visitor ─▶ Caddy (protected site: `import abuseguard`)
              ▼
          fail2ban ──(matches)──▶ nftables DROP :80/:443   ← direct-origin ban
              │
-             └─(rate/probe)─▶ engine enqueue ─▶ report queue ──(timer)──▶ AbuseIPDB
+             └─(sensitive-path probe)─▶ engine enqueue ─▶ report queue ──(timer)──▶ AbuseIPDB
 ```
 
 - Caddy tags each request to a protected site and logs only what fail2ban needs (client IP, protocol, tags) — no paths, hosts, headers, or query strings.
@@ -43,7 +43,7 @@ sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
 
 The installer is idempotent: existing config, whitelist, key, and unrelated Caddy configuration are preserved. Protected AbuseGuard sites from an older release, or sites written directly in the main Caddyfile, are migrated to the canonical `/etc/caddy/sites/<domain>.caddy` layout with `import abuseguard`; the complete migrated configuration must validate before it takes effect.
 
-During install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; both can be set later from the panel. When it finishes, the terminal prominently shows how to open the panel:
+During install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; the AbuseIPDB key is not echoed while you type. Both can be set later from the panel. When it finishes, the terminal prominently shows how to open the panel:
 
 ```bash
 abuseguard
@@ -115,7 +115,7 @@ Just run `abuseguard` (the panel needs root; a normal user is transparently re-r
 | Jail | Trigger | Threshold | Who gets banned |
 | --- | --- | --- | --- |
 | `caddy-intel` | any request to a protected site | 1 hit | only IPs on the threat-intel list |
-| `caddy-rate-local` | any request to a protected site | 120 in 60s | any non-whitelisted IP + queued for report |
+| `caddy-rate-local` | any request to a protected site | 120 in 60s | any non-whitelisted IP (local ban only) |
 | `caddy-probe-h1` | HTTP/1.1 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
 | `caddy-probe-h2` | HTTP/2 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
 
@@ -127,7 +127,7 @@ The intel jail bans nothing until the list is synced. The engine pulls a public 
 
 ## AbuseIPDB reporting (optional)
 
-Reporting is enabled in the config by default but does nothing until you set an API key (panel → 9). Reports are privacy-safe (no host/path/headers), deduped (15m), and capped (1000/day). A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue instead of being erased with the old batch. The flush runs every 10m. Turn it off entirely with panel → 11.
+Reporting is enabled in the config by default, but only sensitive-path probe events are queued after an API key is set; they are reported as AbuseIPDB category 21. Request-rate events remain local bans only. Disabling reporting or leaving the key unset stops new queue entries without affecting Fail2Ban/nftables bans or threat-intel sync. Each privacy-safe reason contains only the observed count, detection window, and HTTP protocol—never the host, path, or headers. Reports are deduped per IP for 15 minutes and capped at 1000/day. A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue. An unreadable allowlist or corrupt state stops the flush; temporary API failures keep records for retry. The flush runs every 10m. Toggle external reporting with panel → 11.
 
 ## Add your sites
 

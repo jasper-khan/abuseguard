@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +29,22 @@ func reportLockPath(c *Config) string { return c.Paths.ReportsDir + "/.report.lo
 
 // cmdEnqueue appends one offender to the report queue (called by the fail2ban action).
 func cmdEnqueue(c *Config, it reportItem) int {
+	if !c.AbuseIPDB.Enabled {
+		logf("enqueue: reporting disabled; skipped")
+		return 0
+	}
+	if readKeyFile(c.AbuseIPDB.ReportKeyFile) == "" {
+		logf("enqueue: no API key configured; skipped")
+		return 0
+	}
+	if !isReportableIP(it.IP) {
+		logf("enqueue: invalid or non-public IP %q", it.IP)
+		return 1
+	}
+	if _, _, err := reportDetails(it); err != nil {
+		logf("enqueue: %v", err)
+		return 1
+	}
 	if it.TS == "" {
 		it.TS = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -35,7 +52,11 @@ func cmdEnqueue(c *Config, it reportItem) int {
 		logf("enqueue: mkdir reports dir: %v", err)
 		return 1
 	}
-	line, _ := json.Marshal(it)
+	line, err := json.Marshal(it)
+	if err != nil {
+		logf("enqueue: encode item: %v", err)
+		return 1
+	}
 	line = append(line, '\n')
 	lock, err := acquireFileLock(queueLockPath(c))
 	if err != nil {
@@ -58,6 +79,11 @@ func cmdEnqueue(c *Config, it reportItem) int {
 		return 1
 	}
 	return 0
+}
+
+func isReportableIP(s string) bool {
+	ip, err := netip.ParseAddr(strings.TrimSpace(s))
+	return err == nil && ip.IsGlobalUnicast() && !ip.IsPrivate()
 }
 
 // rotateQueue atomically detaches the current queue for one reporter. New
@@ -86,29 +112,33 @@ func rotateQueue(c *Config) (string, error) {
 }
 
 // readQueueFile returns parsed items plus raw JSONL lines (index-aligned).
-func readQueueFile(path string) ([]reportItem, []string, error) {
+// Malformed lines are logged and discarded so they cannot block later records.
+func readQueueFile(path string) ([]reportItem, []string, int, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil, nil
+			return nil, nil, 0, nil
 		}
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	var items []reportItem
 	var raw []string
-	for _, line := range strings.Split(string(b), "\n") {
+	malformed := 0
+	for lineNo, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		var it reportItem
 		if err := json.Unmarshal([]byte(line), &it); err != nil {
-			continue // skip malformed lines
+			malformed++
+			logf("report: malformed queue line %d discarded: %v", lineNo+1, err)
+			continue
 		}
 		items = append(items, it)
 		raw = append(raw, line)
 	}
-	return items, raw, nil
+	return items, raw, malformed, nil
 }
 
 // writeQueueFile replaces path with rawLines (or removes it when empty).

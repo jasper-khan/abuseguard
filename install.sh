@@ -535,7 +535,8 @@ if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; 
 	case "$ans" in
 		[yY]|[yY][eE][sS])
 			printf '    请粘贴 AbuseIPDB API key（回车确认）: '
-			IFS= read -r aipdb_key <&3 || aipdb_key=""
+			IFS= read -r -s aipdb_key <&3 || aipdb_key=""
+			printf '\n'
 			if [ -n "$aipdb_key" ]; then
 				printf '%s\n' "$aipdb_key" > "$CONF_DIR/abuseipdb-report.key"
 				chown root:abuseguard "$CONF_DIR/abuseipdb-report.key"; chmod 0640 "$CONF_DIR/abuseipdb-report.key"

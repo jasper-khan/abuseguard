@@ -25,28 +25,53 @@ type dailyUsage struct {
 func dedupePath(c *Config) string { return c.Paths.ReportsDir + "/.dedupe.json" }
 func dailyPath(c *Config) string  { return c.Paths.ReportsDir + "/.daily-usage.json" }
 
-func loadDedupe(c *Config) *dedupeStore {
+func loadDedupe(c *Config) (*dedupeStore, error) {
 	d := &dedupeStore{Entries: map[string]string{}}
-	if b, err := os.ReadFile(dedupePath(c)); err == nil {
-		json.Unmarshal(b, d)
-		if d.Entries == nil {
-			d.Entries = map[string]string{}
+	b, err := os.ReadFile(dedupePath(c))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return d, nil
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(b, d); err != nil {
+		return nil, err
+	}
+	if d.Entries == nil {
+		d.Entries = map[string]string{}
+	}
+	for _, ts := range d.Entries {
+		if _, err := time.Parse(time.RFC3339, ts); err != nil {
+			return nil, fmt.Errorf("invalid dedupe timestamp %q", ts)
 		}
 	}
-	return d
+	return d, nil
 }
 
-func loadDaily(c *Config) *dailyUsage {
+func loadDaily(c *Config) (*dailyUsage, error) {
 	u := &dailyUsage{}
-	if b, err := os.ReadFile(dailyPath(c)); err == nil {
-		json.Unmarshal(b, u)
+	b, err := os.ReadFile(dailyPath(c))
+	if err == nil {
+		if err := json.Unmarshal(b, u); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if u.Day != "" {
+		if _, err := time.Parse("2006-01-02", u.Day); err != nil {
+			return nil, fmt.Errorf("invalid daily usage day %q", u.Day)
+		}
+	}
+	if u.Attempts < 0 {
+		return nil, fmt.Errorf("invalid daily usage attempts %d", u.Attempts)
 	}
 	today := time.Now().UTC().Format("2006-01-02")
 	if u.Day != today {
 		u.Day = today
 		u.Attempts = 0
 	}
-	return u
+	return u, nil
 }
 
 func parseDurationDefault(s string, def time.Duration) time.Duration {
@@ -89,7 +114,7 @@ func cmdReportSendAuto(c *Config) int {
 	if batch == "" {
 		return 0
 	}
-	items, raw, err := readQueueFile(batch)
+	items, raw, malformed, err := readQueueFile(batch)
 	if err != nil {
 		logf("report: read queue: %v", err)
 		return 1
@@ -99,11 +124,26 @@ func cmdReportSendAuto(c *Config) int {
 			logf("report: remove empty queue batch: %v", err)
 			return 1
 		}
+		if malformed > 0 {
+			return 1
+		}
 		return 0
 	}
-	allow := loadAllowlist(c.AllowlistFile)
-	dedupe := loadDedupe(c)
-	daily := loadDaily(c)
+	allow, err := loadAllowlist(c.AllowlistFile)
+	if err != nil {
+		logf("report: load allowlist: %v; nothing sent", err)
+		return 1
+	}
+	dedupe, err := loadDedupe(c)
+	if err != nil {
+		logf("report: load dedupe state: %v; nothing sent", err)
+		return 1
+	}
+	daily, err := loadDaily(c)
+	if err != nil {
+		logf("report: load daily usage: %v; nothing sent", err)
+		return 1
+	}
 	window := parseDurationDefault(c.AbuseIPDB.DedupeWindow, 15*time.Minute)
 	dailyCap := c.AbuseIPDB.DailyReportCap
 	if dailyCap <= 0 {
@@ -112,11 +152,23 @@ func cmdReportSendAuto(c *Config) int {
 	now := time.Now().UTC()
 
 	var remaining []string
-	sent, skipped := 0, 0
+	sent, skipped, dropped := 0, 0, 0
+	hadError := malformed > 0
 	client := &http.Client{Timeout: 30 * time.Second}
 
+	reportLoop:
 	for idx, it := range items {
-		if it.IP == "" {
+		if !isReportableIP(it.IP) {
+			logf("report: invalid or non-public IP %q discarded", it.IP)
+			dropped++
+			hadError = true
+			continue
+		}
+		cats, comment, err := reportDetails(it)
+		if err != nil {
+			logf("report: invalid queued item for %s discarded: %v", it.IP, err)
+			dropped++
+			hadError = true
 			continue
 		}
 		if allow.Contains(it.IP) {
@@ -133,16 +185,26 @@ func cmdReportSendAuto(c *Config) int {
 		if daily.Attempts >= dailyCap {
 			remaining = append(remaining, raw[idx:]...)
 			logf("report: daily cap %d reached; %d item(s) requeued", dailyCap, len(raw[idx:]))
-			break
+			break reportLoop
 		}
-		cats := c.AbuseIPDB.Categories[it.Profile]
-		if cats == "" {
-			cats = "21"
-		}
-		if err := sendReport(client, c.AbuseIPDB.ReportURL, key, it.IP, cats, buildComment(it), it.TS); err != nil {
+		status, err := sendReport(client, c.AbuseIPDB.ReportURL, key, it.IP, cats, comment, it.TS)
+		if err != nil {
 			remaining = append(remaining, raw[idx:]...)
 			logf("report: send failed for %s: %v; %d item(s) requeued", it.IP, err, len(raw[idx:]))
-			break
+			hadError = true
+			break reportLoop
+		}
+		if status == http.StatusBadRequest || status == http.StatusUnprocessableEntity {
+			logf("report: AbuseIPDB rejected %s with HTTP %d; record discarded", it.IP, status)
+			dropped++
+			hadError = true
+			continue
+		}
+		if status < 200 || status >= 300 {
+			remaining = append(remaining, raw[idx:]...)
+			logf("report: AbuseIPDB returned HTTP %d for %s; %d item(s) requeued", status, it.IP, len(raw[idx:]))
+			hadError = true
+			break reportLoop
 		}
 		dedupe.Entries[k] = now.Format(time.RFC3339)
 		daily.Attempts++
@@ -160,9 +222,18 @@ func cmdReportSendAuto(c *Config) int {
 		logf("report: save queue batch: %v", err)
 		return 1
 	}
-	saveJSON(dedupePath(c), dedupe, 0640)
-	saveJSON(dailyPath(c), daily, 0640)
-	logf("report: sent=%d skipped=%d requeued=%d (daily=%d/%d)", sent, skipped, len(remaining), daily.Attempts, dailyCap)
+	if err := saveJSON(dedupePath(c), dedupe, 0640); err != nil {
+		logf("report: save dedupe state: %v", err)
+		return 1
+	}
+	if err := saveJSON(dailyPath(c), daily, 0640); err != nil {
+		logf("report: save daily usage: %v", err)
+		return 1
+	}
+	logf("report: sent=%d skipped=%d dropped=%d requeued=%d (daily=%d/%d)", sent, skipped, dropped, len(remaining), daily.Attempts, dailyCap)
+	if hadError {
+		return 1
+	}
 	return 0
 }
 
@@ -171,19 +242,30 @@ func hashKey(ip string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// buildComment is privacy-safe: it never includes host, path, or headers.
-func buildComment(it reportItem) string {
-	switch it.Profile {
-	case "web-probe":
-		return "AbuseGuard: automated web probing / scanning for sensitive paths, detected behind a reverse proxy."
-	case "web-rate":
-		return "AbuseGuard: abusive HTTP request rate, detected behind a reverse proxy."
-	default:
-		return "AbuseGuard: abusive HTTP behaviour, detected behind a reverse proxy."
+// reportDetails keeps the category and privacy-safe reason in one closed map.
+func reportDetails(it reportItem) (string, string, error) {
+	if it.Profile != "web-probe" {
+		return "", "", fmt.Errorf("unsupported profile %q", it.Profile)
 	}
+	if it.Failures <= 0 {
+		return "", "", fmt.Errorf("invalid failure count %d", it.Failures)
+	}
+	window := strings.TrimSpace(it.Window)
+	if _, err := time.ParseDuration(window); err != nil {
+		return "", "", fmt.Errorf("invalid detection window %q", it.Window)
+	}
+	transport := strings.TrimSpace(it.Transport)
+	if transport != "HTTP/1.1" && transport != "HTTP/2.0" {
+		return "", "", fmt.Errorf("unsupported transport %q", it.Transport)
+	}
+	comment := fmt.Sprintf(
+		"AbuseGuard observed %d %s requests within %s to common sensitive web-application paths.",
+		it.Failures, transport, window,
+	)
+	return "21", comment, nil
 }
 
-func sendReport(client *http.Client, reportURL, key, ip, cats, comment, ts string) error {
+func sendReport(client *http.Client, reportURL, key, ip, cats, comment, ts string) (int, error) {
 	form := url.Values{}
 	form.Set("ip", ip)
 	form.Set("categories", cats)
@@ -193,22 +275,16 @@ func sendReport(client *http.Client, reportURL, key, ip, cats, comment, ts strin
 	}
 	req, err := http.NewRequest("POST", reportURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Key", key)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("rate limited (HTTP 429)")
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	return nil
+	return resp.StatusCode, nil
 }

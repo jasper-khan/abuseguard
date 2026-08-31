@@ -33,7 +33,6 @@ logpath       = /var/log/caddy/abuseguard-access.json
 maxretry      = 120
 findtime      = 60s
 action        = nftables[type=multiport, port="80,443", protocol=tcp, blocktype=drop]
-                caddy-abuseguard-queue[profile=web-rate, transport=HTTP, target_port=443, window=60s]
 ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>
 ignorecache   = key="<ip>", max-count=50000, max-time=10m
 

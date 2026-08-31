@@ -14,7 +14,7 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
              ▼
          fail2ban ──(命中)──▶ nftables DROP :80/:443   ← 直连源站封禁
              │
-             └─(限速/探测)─▶ 引擎入队 ─▶ 上报队列 ──(定时器)──▶ AbuseIPDB
+             └─(敏感路径探测)─▶ 引擎入队 ─▶ 上报队列 ──(定时器)──▶ AbuseIPDB
 ```
 
 - Caddy 为每个到受保护站点的请求打标签，只记录 fail2ban 所需的字段（客户端 IP、协议、标签）——不记录路径、主机名、请求头或查询串。
@@ -43,7 +43,7 @@ sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go�
 
 安装器是幂等的：已有的 config、whitelist、key 和无关 Caddy 配置都会保留。旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；迁移后的完整配置必须校验通过才会生效。
 
-安装过程中会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，两者都能之后随时在面板里设置。装完终端会醒目显示进面板的命令：
+安装过程中会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，AbuseIPDB key 输入时不会回显；两者都能之后随时在面板里设置。装完终端会醒目显示进面板的命令：
 
 ```bash
 abuseguard
@@ -89,7 +89,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 | Jail | 触发条件 | 阈值 | 封禁对象 |
 | --- | --- | --- | --- |
 | `caddy-intel` | 对受保护站点的任意请求 | 命中 1 次 | 仅威胁情报名单上的 IP |
-| `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 120 次 | 任意非白名单 IP + 加入上报队列 |
+| `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 120 次 | 任意非白名单 IP（仅本地封禁） |
 | `caddy-probe-h1` | 用 HTTP/1.1 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 | `caddy-probe-h2` | 用 HTTP/2 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 
@@ -101,7 +101,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 ## AbuseIPDB 上报（可选）
 
-配置里上报默认开启，但在你设置 API key（面板 → 9）之前不会做任何事。上报是隐私安全的（不含主机名/路径/请求头）、按 IP 去重（15 分钟窗口）、并有上限（每天 1000 条）。冲刷时会先把当前队列原子轮转为独立批次，因此发送期间新入队的记录会留在新队列，不会被旧批次清掉。冲刷每 10 分钟执行一次。要彻底关闭，用面板 → 11。
+配置里上报默认开启，但只有设置 API key 后，敏感路径探测事件才会入队并以 AbuseIPDB 类别 21 上报；普通请求速率只触发本地封禁。上报关闭或没有 key 时不会新增队列记录，且不影响 Fail2Ban/nftables 本地封禁和威胁情报同步。上报原因只包含实际次数、检测窗口和 HTTP 协议，不含主机名、路径或请求头；报告按 IP 去重（15 分钟窗口），每天最多 1000 条。冲刷时会先把当前队列原子轮转为独立批次，因此发送期间新入队的记录会留在新队列。白名单无法可靠读取或状态文件损坏时，冲刷会停止并返回失败；临时 API 故障保留记录重试。冲刷每 10 分钟执行一次。要关闭外部举报，用面板 → 11。
 
 ## 接入你的站点
 

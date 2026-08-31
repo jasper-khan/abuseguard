@@ -24,12 +24,11 @@ type Config struct {
 		MaxAge     string `json:"max_age"` // advisory; reserved
 	} `json:"intel"`
 	AbuseIPDB struct {
-		Enabled        bool              `json:"enabled"`
-		ReportURL      string            `json:"report_url"`
-		ReportKeyFile  string            `json:"report_key_file"`
-		DailyReportCap int               `json:"daily_report_cap"`
-		DedupeWindow   string            `json:"dedupe_window"`
-		Categories     map[string]string `json:"categories"`
+		Enabled        bool   `json:"enabled"`
+		ReportURL      string `json:"report_url"`
+		ReportKeyFile  string `json:"report_key_file"`
+		DailyReportCap int    `json:"daily_report_cap"`
+		DedupeWindow   string `json:"dedupe_window"`
 	} `json:"abuseipdb"`
 }
 

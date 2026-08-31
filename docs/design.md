@@ -26,7 +26,7 @@ During install or update, protected single-domain site blocks found in the main 
 1. A request hits a site with `import abuseguard`. Caddy appends `caddy_abuseguard_site=protected`, and if the path looks like a scan, `caddy_abuseguard_probe=web-probe`, then logs `{ts, client_ip, proto, ...tags}`.
 2. fail2ban filters match on those tags (order-independent JSON lookaheads).
 3. On enough hits within the window, the jail's `nftables` action drops direct-origin traffic from that IP on tcp/80+443 for 90 days.
-4. The rate/probe jails additionally run `enqueue`, appending the offender to the report queue.
+4. The probe jails additionally run `enqueue`, appending the offender to the report queue. The rate jail remains a local firewall ban only.
 
 ## Ignore-command contract (engine ↔ fail2ban)
 
@@ -35,7 +35,7 @@ fail2ban decides "should I skip this candidate?" via `ignorecommand`. The exit c
 - `intel-ignore --ip X`: exit **1 = ban** (X is on the intel list and not whitelisted), exit **0 = ignore**. This makes the intel jail ban *only* known-bad IPs even though its filter matches every request to a protected site.
 - `unknown-ignore --ip X`: exit **1 = ban** (not whitelisted), exit **0 = ignore** (whitelisted). Used by the rate/probe jails.
 
-The whitelist is a single file of IPs/CIDRs (`#` comments, inline annotations tolerated). A parse error yields an *empty* allowlist — fail-safe, so a broken file never silently whitelists everyone.
+The whitelist is a single file of IPs/CIDRs (`#` comments and inline annotations are tolerated). A read or parse error makes an ignore command skip the candidate rather than risk a false ban; the reporter likewise stops without sending rather than risk reporting a whitelisted IP.
 
 ## Threat intel
 
@@ -43,11 +43,11 @@ The whitelist is a single file of IPs/CIDRs (`#` comments, inline annotations to
 
 ## Reporting
 
-`report send-auto` flushes the queue to AbuseIPDB only when reporting is enabled **and** a key is present. One short filesystem lock atomically rotates `queue.jsonl` into a processing batch; new `enqueue` calls then write a fresh queue while the batch is sent. A separate reporter lock prevents two flushers from processing the same batch. It skips whitelisted IPs, dedupes per IP within `dedupe_window`, honors `daily_report_cap`, and keeps the unprocessed batch on a send failure or when the cap is hit. Comments are generic (never host/path/headers); categories are per-profile.
+`enqueue` writes only when reporting is enabled, a key is present, the IP is public, and the profile is the supported `web-probe`. `report send-auto` validates those conditions again for old queued data. Web probes use the fixed AbuseIPDB category 21; the same function produces an objective comment from the observed failure count, detection window, and HTTP protocol. One short filesystem lock atomically rotates `queue.jsonl` into a processing batch; new `enqueue` calls then write a fresh queue while the batch is sent. A separate reporter lock prevents two flushers from processing the same batch. The reporter strictly loads the whitelist and its dedupe/daily state before sending, skips whitelisted IPs, dedupes per IP within `dedupe_window`, and honors `daily_report_cap`. Network failures, 401/403, 429, 5xx, and unexpected statuses keep the unprocessed batch and return failure. Record-specific 400/422 responses and malformed queue lines are logged and discarded so later valid records can proceed; the run still returns failure so systemd exposes the problem.
 
 ## Privacy
 
-The access log deletes headers, TLS, host, remote_ip/port, method, uri and resp_headers — keeping essentially `ts`, `client_ip`, `proto`, and the abuseguard tags. Reports carry only the IP, a category, and a generic comment.
+The access log deletes headers, TLS, host, remote_ip/port, method, uri and resp_headers — keeping essentially `ts`, `client_ip`, `proto`, and the abuseguard tags. Reports carry only the IP, category 21, and an objective count/window/protocol comment.
 
 ## Trust boundary
 

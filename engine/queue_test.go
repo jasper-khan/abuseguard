@@ -38,9 +38,10 @@ func TestConcurrentEnqueueSurvivesReportFlush(t *testing.T) {
 	c.AbuseIPDB.ReportKeyFile = keyFile
 	c.AbuseIPDB.DailyReportCap = 1000
 	c.AbuseIPDB.DedupeWindow = "15m"
-	c.AbuseIPDB.Categories = map[string]string{"web-rate": "4,21"}
 
-	if rc := cmdEnqueue(c, reportItem{IP: "192.0.2.1", Profile: "web-rate"}); rc != 0 {
+	if rc := cmdEnqueue(c, reportItem{
+		IP: "192.0.2.1", Profile: "web-probe", Failures: 5, Window: "10m", Transport: "HTTP/1.1",
+	}); rc != 0 {
 		t.Fatalf("first enqueue returned %d", rc)
 	}
 	reportDone := make(chan int, 1)
@@ -51,7 +52,9 @@ func TestConcurrentEnqueueSurvivesReportFlush(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("report did not reach test endpoint")
 	}
-	if rc := cmdEnqueue(c, reportItem{IP: "192.0.2.2", Profile: "web-rate"}); rc != 0 {
+	if rc := cmdEnqueue(c, reportItem{
+		IP: "192.0.2.2", Profile: "web-probe", Failures: 5, Window: "10m", Transport: "HTTP/1.1",
+	}); rc != 0 {
 		close(releaseRequest)
 		t.Fatalf("concurrent enqueue returned %d", rc)
 	}
@@ -66,9 +69,12 @@ func TestConcurrentEnqueueSurvivesReportFlush(t *testing.T) {
 		t.Fatal("report did not finish")
 	}
 
-	items, _, err := readQueueFile(queuePath(c))
+	items, _, malformed, err := readQueueFile(queuePath(c))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if malformed != 0 {
+		t.Fatalf("malformed lines = %d; want 0", malformed)
 	}
 	if len(items) != 1 || items[0].IP != "192.0.2.2" {
 		t.Fatalf("new queue = %#v; want only concurrent item", items)

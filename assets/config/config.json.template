@@ -17,10 +17,6 @@
     "report_url": "https://api.abuseipdb.com/api/v2/report",
     "report_key_file": "/etc/caddy-abuseguard/abuseipdb-report.key",
     "daily_report_cap": 1000,
-    "dedupe_window": "15m",
-    "categories": {
-      "web-probe": "21",
-      "web-rate": "4,21"
-    }
+    "dedupe_window": "15m"
   }
 }
