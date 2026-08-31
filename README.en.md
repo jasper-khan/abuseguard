@@ -25,7 +25,6 @@ visitor ─▶ Caddy (protected site: `import abuseguard`)
 
 - Debian 11/12 or Ubuntu 20.04+ (amd64 or arm64), with root (sudo).
 - nftables banning applies when clients connect directly to the origin, including Cloudflare DNS-only records.
-- Behind Cloudflare's proxied (orange-cloud) mode, `trusted_proxies` restores the real IP for detection and reporting, but the origin TCP connection still comes from a Cloudflare edge. Local nftables therefore cannot block that restored visitor IP; configure a Cloudflare edge-side ban separately.
 
 ## Install
 
@@ -122,8 +121,6 @@ Just run `abuseguard` (the panel needs root; a normal user is transparently re-r
 
 Ban time is 90 days. Whitelisted IPs (`/etc/caddy-abuseguard/whitelist`) are never banned and never reported. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
 
-> In Cloudflare orange-cloud mode, detection and reporting still work, but nftables rules only match packets that actually reach the origin with the visitor IP as their source. They cannot block requests forwarded by a Cloudflare edge.
-
 ## Threat intel
 
 The intel jail bans nothing until the list is synced. The engine pulls a public AbuseIPDB-derived blocklist and refuses a list that is implausibly small (<90k) or large (>120k); on any failure it keeps the previous list. Refresh runs every 6h (and via the panel).
@@ -148,7 +145,7 @@ example.com {
 
 Then `sudo systemctl reload caddy`. Change the snippet once — every protected site follows.
 
-The Cloudflare token in this example is only for DNS-01 certificate issuance; it does not configure Cloudflare edge banning. Add an edge-side ban separately when the DNS record is proxied.
+The Cloudflare token in this example is only for DNS-01 certificate issuance.
 
 ## Files
 
@@ -192,7 +189,6 @@ AbuseGuard created vs. what you already had).
 
 - Caddy adds no authentication. Anything you expose is public unless you add auth yourself.
 - The installer's self-test site binds `127.0.0.1:8080` only.
-- Cloudflare orange-cloud exposes the visitor IP through HTTP headers, while origin TCP connections still come from Cloudflare edges; local nftables is not a substitute for edge-side blocking.
 - Secrets (`*.key`, `.env`) are mode 0640 and git-ignored; never commit them.
 - Downloaded binaries are verified against `SHA256SUMS.txt` (see the integrity check under "Slow network / China mirror").
 - Caddy runs under a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, restricted capability set, syscall filtering); the two engine timers are hardened too.

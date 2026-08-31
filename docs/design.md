@@ -47,8 +47,6 @@ The access log deletes headers, TLS, host, remote_ip/port, method, uri and resp_
 
 Bans/reports target Caddy's `client_ip`, so Caddy must trust the edge proxy (`trusted_proxies` + `trusted_proxies_strict`) to log and report the correct visitor. The installer pre-fills the current Cloudflare ranges plus loopback when it generates a Caddyfile. Get this wrong and fail2ban acts on the proxy IP instead of the visitor. If the live Cloudflare-range fetch fails, the installer falls back to a bundled snapshot (`assets/caddy/cloudflare-ips.fallback`).
 
-This restored HTTP-layer identity does not change the packet source seen by the origin firewall. In Cloudflare orange-cloud mode, the TCP source is a Cloudflare edge, so an nftables rule keyed by the restored visitor IP cannot block that proxied request. AbuseGuard can still detect and report the visitor, but edge-side blocking is a separate deployment requirement. DNS-only/direct-origin traffic is enforceable locally.
-
 ## Users & permissions
 
 - `caddy` runs the proxy and owns the log dir.
@@ -67,5 +65,4 @@ An engine is built only for a version tag and remains immutable under that relea
 
 - No web UI, no daemon, no database.
 - No IPv6 threat intel (the list is IPv4); IPv6 clients can still be rate/probe banned.
-- No Cloudflare edge-rule management; orange-cloud deployments must provide edge-side blocking separately.
 - No authentication for your sites — that is your application's job.
