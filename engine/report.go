@@ -152,7 +152,7 @@ func cmdReportSendAuto(c *Config) int {
 	now := time.Now().UTC()
 
 	var remaining []string
-	sent, skipped, dropped := 0, 0, 0
+	sent, skipped, deferred, dropped := 0, 0, 0, 0
 	hadError := malformed > 0
 	client := &http.Client{Timeout: 30 * time.Second}
 
@@ -178,8 +178,9 @@ reportLoop:
 		k := hashKey(it.IP)
 		if ts, ok := dedupe.Entries[k]; ok {
 			if t, err := time.Parse(time.RFC3339, ts); err == nil && now.Sub(t) < window {
-				skipped++
-				continue // within dedupe window
+				remaining = append(remaining, raw[idx])
+				deferred++
+				continue // AbuseIPDB accepts the same IP again after the window
 			}
 		}
 		if daily.Attempts >= dailyCap {
@@ -230,7 +231,7 @@ reportLoop:
 		logf("report: save daily usage: %v", err)
 		return 1
 	}
-	logf("report: sent=%d skipped=%d dropped=%d requeued=%d (daily=%d/%d)", sent, skipped, dropped, len(remaining), daily.Attempts, dailyCap)
+	logf("report: sent=%d skipped=%d deferred=%d dropped=%d requeued=%d (daily=%d/%d)", sent, skipped, deferred, dropped, len(remaining), daily.Attempts, dailyCap)
 	if hadError {
 		return 1
 	}
@@ -242,27 +243,75 @@ func hashKey(ip string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// reportDetails keeps the category and privacy-safe reason in one closed map.
+func reportWindowLabel(raw string) (string, error) {
+	window := strings.TrimSpace(raw)
+	d, err := time.ParseDuration(window)
+	if err != nil {
+		// Fail2Ban also accepts plain integer seconds for findtime.
+		d, err = time.ParseDuration(window + "s")
+	}
+	if err != nil || d <= 0 {
+		return "", fmt.Errorf("invalid detection window %q", raw)
+	}
+	for _, unit := range []struct {
+		duration time.Duration
+		name     string
+	}{
+		{time.Hour, "hour"},
+		{time.Minute, "minute"},
+		{time.Second, "second"},
+	} {
+		if d%unit.duration == 0 {
+			n := int64(d / unit.duration)
+			name := unit.name
+			if n != 1 {
+				name += "s"
+			}
+			return fmt.Sprintf("%d %s", n, name), nil
+		}
+	}
+	return d.String(), nil
+}
+
+// reportDetails keeps each supported profile, category, and privacy-safe
+// reason in one closed map. Categories and comments are never caller supplied.
 func reportDetails(it reportItem) (string, string, error) {
-	if it.Profile != "web-probe" {
+	if it.Profile != "web-probe" && it.Profile != "ssh-bruteforce" {
 		return "", "", fmt.Errorf("unsupported profile %q", it.Profile)
 	}
 	if it.Failures <= 0 {
 		return "", "", fmt.Errorf("invalid failure count %d", it.Failures)
 	}
-	window := strings.TrimSpace(it.Window)
-	if _, err := time.ParseDuration(window); err != nil {
-		return "", "", fmt.Errorf("invalid detection window %q", it.Window)
+	window, err := reportWindowLabel(it.Window)
+	if err != nil {
+		return "", "", err
 	}
 	transport := strings.TrimSpace(it.Transport)
-	if transport != "HTTP/1.1" && transport != "HTTP/2.0" {
-		return "", "", fmt.Errorf("unsupported transport %q", it.Transport)
+	switch it.Profile {
+	case "web-probe":
+		switch transport {
+		case "HTTP/1.1":
+		case "HTTP/2", "HTTP/2.0":
+			transport = "HTTP/2"
+		default:
+			return "", "", fmt.Errorf("unsupported transport %q for profile %q", it.Transport, it.Profile)
+		}
+		comment := fmt.Sprintf(
+			"Repeated probing of common sensitive web application paths: %d requests within %s over %s.",
+			it.Failures, window, transport,
+		)
+		return "21", comment, nil
+	case "ssh-bruteforce":
+		if transport != "SSH" {
+			return "", "", fmt.Errorf("unsupported transport %q for profile %q", it.Transport, it.Profile)
+		}
+		comment := fmt.Sprintf(
+			"Repeated SSH authentication failures: %d failed attempts within %s.",
+			it.Failures, window,
+		)
+		return "18,22", comment, nil
 	}
-	comment := fmt.Sprintf(
-		"AbuseGuard observed %d %s requests within %s to common sensitive web-application paths.",
-		it.Failures, transport, window,
-	)
-	return "21", comment, nil
+	return "", "", fmt.Errorf("unsupported profile %q", it.Profile)
 }
 
 func sendReport(client *http.Client, reportURL, key, ip, cats, comment, ts string) (int, error) {

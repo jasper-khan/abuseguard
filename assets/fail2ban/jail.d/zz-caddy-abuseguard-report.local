@@ -1,0 +1,6 @@
+# Add privacy-safe AbuseIPDB queuing to the existing SSH jail without
+# replacing its firewall action or changing its thresholds, ports, or state.
+# If the administrator disabled [sshd], this drop-in does not re-enable it.
+[sshd]
+action = %(known/action)s
+         caddy-abuseguard-queue[profile=ssh-bruteforce, transport=SSH, target_port=22, window="%(findtime)s"]

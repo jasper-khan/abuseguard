@@ -533,6 +533,7 @@ log "正在安装 fail2ban 的 filter / action / jail"
 install -m 0644 "$SRC_DIR"/assets/fail2ban/filter.d/*.conf /etc/fail2ban/filter.d/
 install -m 0644 "$SRC_DIR"/assets/fail2ban/action.d/*.conf /etc/fail2ban/action.d/
 install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/caddy-abuseguard.local" /etc/fail2ban/jail.d/caddy-abuseguard.local
+install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/zz-caddy-abuseguard-report.local" /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
 
 # --- systemd timers + panel --------------------------------------------------
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/systemd/system/
@@ -591,6 +592,8 @@ fi
 # --- validate + enable -------------------------------------------------------
 log "正在校验 Caddyfile"
 validate_caddyfile "$CADDYFILE" >/dev/null || die "Caddyfile 校验失败。"
+log "正在校验 fail2ban 配置"
+fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
 
 systemctl daemon-reload
 log "正在启用并启动服务"

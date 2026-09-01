@@ -199,6 +199,7 @@ remove_file /etc/systemd/system/caddy-abuseguard-report.timer
 remove_file /etc/systemd/system/caddy-abuseguard-sync.service
 remove_file /etc/systemd/system/caddy-abuseguard-sync.timer
 remove_file /etc/fail2ban/jail.d/caddy-abuseguard.local
+remove_file /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-any.conf
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h1.conf
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h2.conf

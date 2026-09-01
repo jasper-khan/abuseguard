@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "0.2.2"
+const version = "0.2.3"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -76,7 +76,7 @@ func ignoreSafeAllowlist(c *Config) *Allowlist {
 func runEnqueue(args []string) {
 	fs := flag.NewFlagSet("enqueue", flag.ExitOnError)
 	ip := fs.String("ip", "", "offending IP")
-	profile := fs.String("profile", "", "profile (web-probe)")
+	profile := fs.String("profile", "", "profile (web-probe or ssh-bruteforce)")
 	failures := fs.Int("failures", 0, "failure count")
 	window := fs.String("window", "", "detection window")
 	transport := fs.String("transport", "", "transport")
