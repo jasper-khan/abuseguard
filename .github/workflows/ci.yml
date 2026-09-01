@@ -57,6 +57,7 @@ jobs:
           for f in install.sh uninstall.sh abuseguard.sh scripts/*.sh; do
             bash -n "$f" && echo "ok: $f"
           done
+          bash ./scripts/test-panel-refresh.sh
           bash ./scripts/test-site-migration.sh
 
   log-contract:

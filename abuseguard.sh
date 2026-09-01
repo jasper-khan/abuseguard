@@ -14,6 +14,7 @@ SITES_DIR=/etc/caddy/sites
 STATE_DIR=/var/lib/caddy-abuseguard
 INTEL="$STATE_DIR/intel.txt"
 JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2"
+PANEL_REFRESH_SECONDS=10
 REPO_FILE="$CONF_DIR/repo"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" || echo jasper-khan/abuseguard )}"
 
@@ -417,6 +418,7 @@ act_uninstall() {
 }
 
 menu() {
+	local choice read_status
 	header
 	cat <<'MENU'
    [1]  状态（服务、受保护站点、jail、定时器）
@@ -436,7 +438,14 @@ menu() {
    [0]  退出
 MENU
 	echo
-	read -r -p "请选择: " choice
+	read -r -t "$PANEL_REFRESH_SECONDS" -p "请选择（每 ${PANEL_REFRESH_SECONDS} 秒自动刷新）: " choice
+	read_status=$?
+	case "$read_status" in
+		0) ;;
+		1) exit 0 ;; # stdin closed
+		142) return ;; # read timeout: redraw the header and current ban count
+		*) exit "$read_status" ;;
+	esac
 	case "$choice" in
 		1) act_status ;;
 		2) act_sites ;;

@@ -110,7 +110,7 @@ validation before it is applied.
 
 ## The panel
 
-Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version:
+Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 10 seconds without requiring a menu action:
 
 - status: services, **protected domains**, jails, timers, **threat-intel last-sync age**
 - **sites / reverse-proxy manager**: enter a domain + upstream (local port or remote IP:port) and it generates a protected reverse-proxy site (auto `import abuseguard` + TLS as needed); also list/delete
