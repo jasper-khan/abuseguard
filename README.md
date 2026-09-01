@@ -84,6 +84,8 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 - 开关 AbuseIPDB 上报
 - 查看近期日志、更新、卸载
 
+更新会在校验前用 `caddy fmt` 规范化主 Caddyfile 和 `/etc/caddy/sites/*.caddy`，并删除 Caddy 明确判定为冗余的精确指令 `header_up X-Forwarded-Host {host}`；其他反代配置和请求头均保留。
+
 ## 防护模型
 
 | Jail | 触发条件 | 阈值 | 封禁对象 |

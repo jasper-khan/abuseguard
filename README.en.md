@@ -110,6 +110,8 @@ Just run `abuseguard` (the panel needs root; a normal user is transparently re-r
 - toggle AbuseIPDB reporting on/off
 - view recent logs, update, uninstall
 
+Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/caddy/sites/*.caddy`, and removes only the exact `header_up X-Forwarded-Host {host}` directive that Caddy identifies as redundant. Other reverse-proxy settings and request headers are preserved.
+
 ## Protection model
 
 | Jail | Trigger | Threshold | Who gets banned |
