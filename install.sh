@@ -491,8 +491,11 @@ migrate_protected_sites() {
 }
 migrate_protected_sites "$caddy_migration_source"
 
-# ensure the access log exists and is caddy-writable before fail2ban starts
+# Root-side Caddy validation above may create the access log first.  Always
+# repair its ownership/mode here without truncating an existing log.
 [ -e "$LOG_DIR/abuseguard-access.json" ] || install -m 0640 -o caddy -g caddy /dev/null "$LOG_DIR/abuseguard-access.json"
+chown caddy:caddy "$LOG_DIR/abuseguard-access.json"
+chmod 0640 "$LOG_DIR/abuseguard-access.json"
 
 # --- fail2ban assets ---------------------------------------------------------
 log "正在安装 fail2ban 的 filter / action / jail"
