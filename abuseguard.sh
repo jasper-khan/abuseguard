@@ -390,8 +390,15 @@ act_update() {
 	echo "正在从 $ABUSEGUARD_REPO 重新运行安装器..."
 	local f=/tmp/abuseguard-install.sh
 	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh" "$f"; then
-		ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" ABUSEGUARD_NONINTERACTIVE=1 bash "$f" || echo "更新失败。"
-		rm -f "$f"
+		if ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
+			rm -f "$f"
+			echo "更新完成，正在重新加载控制面板..."
+			exec /usr/local/bin/abuseguard
+			echo "无法重新加载控制面板，请退出后重新运行 abuseguard。"
+		else
+			rm -f "$f"
+			echo "更新失败。"
+		fi
 	else
 		echo "无法获取 install.sh（直连与镜像均失败）。"
 	fi
