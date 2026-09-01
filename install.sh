@@ -441,7 +441,7 @@ fi
 normalize_caddy_file() {
 	local file="$1"
 	[ -f "$file" ] || return 0
-	sed -i -E '/^[[:space:]]*header_up[[:space:]]+X-Forwarded-Host[[:space:]]+\{host\}[[:space:]]*$/d' "$file"
+	sed -i -E '/^[[:space:]]*header_up[[:space:]]+X-Forwarded-Host[[:space:]]+\{(host|http\.request\.host)\}[[:space:]]*$/d' "$file"
 	"$CADDY_BIN" fmt --overwrite "$file" >/dev/null || die "无法格式化 Caddy 配置：$file"
 }
 
@@ -593,10 +593,10 @@ validate_caddyfile "$CADDYFILE" >/dev/null || die "Caddyfile 校验失败。"
 
 systemctl daemon-reload
 log "正在启用并启动服务"
-# reload-or-restart (not just enable --now) so a re-run reloads the freshly
-# written Caddyfile / fail2ban jails even when the service is already running.
+# Prefer a non-disruptive reload, but restart when the existing Caddy has its
+# admin API disabled and therefore cannot accept `caddy reload`.
 systemctl enable caddy >/dev/null 2>&1 || true
-systemctl reload-or-restart caddy || die "caddy 启动失败（查看：journalctl -u caddy）"
+systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy || die "caddy 启动失败（查看：journalctl -u caddy）"
 systemctl enable fail2ban >/dev/null 2>&1 || true
 systemctl reload-or-restart fail2ban || warn "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
