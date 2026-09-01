@@ -602,7 +602,8 @@ log "正在启用并启动服务"
 systemctl enable caddy >/dev/null 2>&1 || true
 systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy || die "caddy 启动失败（查看：journalctl -u caddy）"
 systemctl enable fail2ban >/dev/null 2>&1 || true
-systemctl reload-or-restart fail2ban || warn "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
+# A reload does not attach newly installed actions to already-running jails.
+systemctl restart fail2ban || warn "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"
