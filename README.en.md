@@ -43,7 +43,7 @@ sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
 
 The installer is idempotent: existing config, whitelist, key, and unrelated Caddy configuration are preserved. Protected AbuseGuard sites from an older release, or sites written directly in the main Caddyfile, are migrated to the canonical `/etc/caddy/sites/<domain>.caddy` layout with `import abuseguard`; the complete migrated configuration must validate before it takes effect.
 
-During install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; the AbuseIPDB key is not echoed while you type. Both can be set later from the panel. When it finishes, the terminal prominently shows how to open the panel:
+On the first install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; the AbuseIPDB key is not echoed while you type. Both can be set later from the panel. Updates preserve existing keys and skip these questions. When it finishes, the terminal prominently shows how to open the panel:
 
 ```bash
 abuseguard
@@ -98,7 +98,7 @@ a Cloudflare edge IP and ban Cloudflare itself, taking the whole site down.
 
 ## The panel
 
-Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed):
+Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version:
 
 - status: services, **protected domains**, jails, timers, **threat-intel last-sync age**
 - **sites / reverse-proxy manager**: enter a domain + upstream (local port or remote IP:port) and it generates a protected reverse-proxy site (auto `import abuseguard` + TLS as needed); also list/delete

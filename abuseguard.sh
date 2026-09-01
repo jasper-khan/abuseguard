@@ -69,28 +69,30 @@ intel_age_h() {
 
 header() {
 	clear 2>/dev/null || true
-	local caddy f2b intel banned rep age fresh keyst
+	local caddy f2b intel banned rep age fresh report_status version
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
+	version="$("$ENGINE" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+	[ -n "$version" ] || version="?"
 	age="$(intel_age_h)"
 	if [ -z "$age" ]; then fresh="（未同步）"
 	elif [ "$age" -gt 12 ]; then fresh="$(printf '（最后同步 %b%sh 前，建议检查%b）' "$C_Y" "$age" "$C_0")"
 	else fresh="（最后同步 ${age}h 前）"; fi
-	keyst=""
 	if [ "$rep" = on ]; then
-		[ -s "$KEYFILE" ] && keyst="（key 已配）" || keyst="$(printf '%b（未配 key，暂不上报）%b' "$C_Y" "$C_0")"
+		[ -s "$KEYFILE" ] && report_status="${C_G}开${C_0}" || report_status="${C_Y}未配置 API Key${C_0}"
+	else
+		report_status="${C_Y}关${C_0}"
 	fi
 	echo -e "${C_B}=======================================================${C_0}"
-	echo -e "                 ${C_G}AbuseGuard${C_0}  控制面板"
+	echo -e "              ${C_G}AbuseGuard v${version}${C_0}  控制面板"
 	echo -e "${C_B}=======================================================${C_0}"
 	printf "  caddy: %b    fail2ban: %b\n" \
 		"$( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )" \
 		"$( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	printf "  情报 IP: %s %b   当前封禁: %s   上报: %b %b\n" \
+	printf "  情报 IP: %s %b   当前封禁: %s   上报: %b\n" \
 		"$intel" "$fresh" "$banned" \
-		"$( [ "$rep" = on ] && echo "${C_G}开${C_0}" || echo "${C_Y}关${C_0}" )" \
-		"$keyst"
+		"$report_status"
 	echo -e "${C_B}-------------------------------------------------------${C_0}"
 }
 
@@ -388,7 +390,7 @@ act_update() {
 	echo "正在从 $ABUSEGUARD_REPO 重新运行安装器..."
 	local f=/tmp/abuseguard-install.sh
 	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh" "$f"; then
-		ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" bash "$f" || echo "更新失败。"
+		ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" ABUSEGUARD_NONINTERACTIVE=1 bash "$f" || echo "更新失败。"
 		rm -f "$f"
 	else
 		echo "无法获取 install.sh（直连与镜像均失败）。"

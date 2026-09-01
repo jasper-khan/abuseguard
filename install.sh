@@ -162,6 +162,8 @@ PRE_CADDYFILE=0;  [ -e "$CADDYFILE" ] && PRE_CADDYFILE=1 || :
 PRE_CADDY_ETC=0;  [ -e "$CADDY_ETC" ] && PRE_CADDY_ETC=1 || :
 PRE_LOG_DIR=0;    [ -e "$LOG_DIR" ] && PRE_LOG_DIR=1 || :
 PRE_CADDY_LIB=0;  [ -e /var/lib/caddy ] && PRE_CADDY_LIB=1 || :
+UPDATE_MODE=0
+if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ]; then UPDATE_MODE=1; fi
 
 # --- service accounts --------------------------------------------------------
 if ! id caddy >/dev/null 2>&1; then
@@ -528,8 +530,11 @@ install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 # Ask (y/N, default No) before prompting for each secret, so a plain Enter
 # means "don't configure now". Reads from an explicitly-opened /dev/tty so it
 # works under `bash <(curl ...)` and `curl | bash`; skips cleanly with no tty
-# or when ABUSEGUARD_NONINTERACTIVE=1.
-if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; then
+# or when ABUSEGUARD_NONINTERACTIVE=1. Updates always preserve existing keys
+# and skip these first-install questions.
+if [ "$UPDATE_MODE" = 1 ]; then
+	log "更新模式：保留现有 API 密钥，跳过密钥询问"
+elif [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; then
 	echo
 	log "可选配置（以下两项都可稍后随时用 abuseguard 面板设置）"
 	printf '  现在设置 Cloudflare API token 吗？（用于自动签发 TLS 证书）[y/N] '
@@ -601,7 +606,7 @@ EOF
 
 # On an interactive terminal, drop straight into the control panel; otherwise
 # just leave the summary above and tell the user how to open it.
-if [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
+if [ "$UPDATE_MODE" = 0 ] && [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
 	echo
 	log "即将进入控制面板（下次可随时运行：abuseguard）..."
 	sleep 1
