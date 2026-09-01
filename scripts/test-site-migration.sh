@@ -73,22 +73,34 @@ http://127.0.0.1:8080 {
 	import abuseguard
 	respond "ok"
 }
+
+:8788 {
+	reverse_proxy 127.0.0.1:8787
+}
+
+static.example.com {
+	respond "not a reverse proxy"
+}
 EOF
 
 bash "$MIGRATOR" "$TMP/Caddyfile" "$TMP/main.out" "$TMP/output-sites" "$TMP/existing" > "$TMP/domains"
 
-diff -u <(printf 'legacy.example.com\ncurrent.example.com\n') "$TMP/domains"
-grep -q '^admin\.example\.com {' "$TMP/main.out"
+diff -u <(printf 'admin.example.com\nlegacy.example.com\ncurrent.example.com\n') "$TMP/domains"
+! grep -q '^admin\.example\.com {' "$TMP/main.out"
 grep -q '^http://127\.0\.0\.1:8080 {' "$TMP/main.out"
+grep -q '^:8788 {' "$TMP/main.out"
+grep -q '^static\.example\.com {' "$TMP/main.out"
 ! grep -q '^legacy\.example\.com {' "$TMP/main.out"
 ! grep -q '^current\.example\.com {' "$TMP/main.out"
 
-for domain in legacy.example.com current.example.com; do
+for domain in admin.example.com legacy.example.com current.example.com; do
 	test -f "$TMP/output-sites/$domain.caddy"
 	grep -q '^[[:space:]]*import abuseguard$' "$TMP/output-sites/$domain.caddy"
 	! grep -q 'caddy_abuseguard_site' "$TMP/output-sites/$domain.caddy"
 	! grep -q 'log caddy_abuseguard' "$TMP/output-sites/$domain.caddy"
 done
+grep -q '@allowed remote_ip 192\.0\.2\.1' "$TMP/output-sites/admin.example.com.caddy"
+grep -q 'reverse_proxy 127\.0\.0\.1:8080' "$TMP/output-sites/admin.example.com.caddy"
 grep -q 'reverse_proxy 127\.0\.0\.1:2096' "$TMP/output-sites/legacy.example.com.caddy"
 grep -q 'reverse_proxy 127\.0\.0\.1:60022' "$TMP/output-sites/legacy.example.com.caddy"
 

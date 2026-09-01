@@ -72,6 +72,8 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 **Cloudflare IP 段兜底**：生成 Caddyfile 时会拉取 Cloudflare 的 IP 段填入 `trusted_proxies`；若网络受限拉取失败，会退回内置快照（`assets/caddy/cloudflare-ips.fallback`），避免 `trusted_proxies` 只剩回环——那会让 Caddy 把所有访客都当成 Cloudflare 边缘 IP，进而封禁 Cloudflare 自身、导致整站不可用。
 
+**已有 Caddy 迁移**：若安装前已有 Caddyfile，安装器会先备份原文件，再把其中可明确识别的“单一公网域名 + `reverse_proxy`”站点完整迁入 `/etc/caddy/sites/<域名>.caddy`，并加入 `import abuseguard`。站点原有的 TLS、路由、请求头和上游配置均保留；全局块、snippet、IP/端口监听及非反代站点仍留在主 Caddyfile。迁移后的完整配置必须通过 Caddy 校验才会生效。
+
 ## 控制面板
 
 直接运行 `abuseguard`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）。标题会显示当前 AbuseGuard 引擎版本：

@@ -98,6 +98,14 @@ restricted network it falls back to a bundled snapshot
 loopback-only behind Cloudflare — which would make Caddy treat every visitor as
 a Cloudflare edge IP and ban Cloudflare itself, taking the whole site down.
 
+**Existing Caddy migration**: if a Caddyfile already exists, the installer
+backs it up first, then moves each unambiguous single-public-domain
+`reverse_proxy` site into `/etc/caddy/sites/<domain>.caddy` and adds
+`import abuseguard`. Existing TLS, routing, headers, and upstream settings are
+preserved. Global blocks, snippets, IP/port listeners, and non-proxy sites stay
+in the main Caddyfile. The complete migrated configuration must pass Caddy
+validation before it is applied.
+
 ## The panel
 
 Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version:

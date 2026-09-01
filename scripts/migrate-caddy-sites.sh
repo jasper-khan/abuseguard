@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Normalize protected top-level Caddy site blocks into one file per domain.
+# Normalize top-level Caddy reverse-proxy site blocks into one file per domain.
 #
 # Usage:
 #   migrate-caddy-sites.sh INPUT OUTPUT_MAIN OUTPUT_SITES EXISTING_SITES
@@ -98,17 +98,20 @@ function write_site(domain, path, i, line, skip_log, skip_depth) {
 	print tolower(domain)
 }
 
-function process_block(    i, protected, header, domain, filename) {
+function process_block(    i, protected, reverse_proxy, header, domain, filename) {
 	protected = 0
+	reverse_proxy = 0
 	for (i = 1; i <= block_count; i++) {
 		if (is_protection_line(block[i])) protected = 1
+		if (block[i] ~ /^[[:space:]]*reverse_proxy([[:space:]]|$)/) reverse_proxy = 1
 	}
-	if (!protected) {
+
+	header = header_name(block[1])
+	if (!protected && !(reverse_proxy && is_domain(header))) {
 		write_original()
 		return
 	}
 
-	header = header_name(block[1])
 	if (keep_protected_block(header)) {
 		write_original()
 		return

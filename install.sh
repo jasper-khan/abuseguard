@@ -445,13 +445,14 @@ normalize_caddy_file() {
 	"$CADDY_BIN" fmt --overwrite "$file" >/dev/null || die "无法格式化 Caddy 配置：$file"
 }
 
-# --- normalize protected sites into /etc/caddy/sites ------------------------
-# Old AbuseGuard releases wrote the protection directives directly inside the
-# main Caddyfile. The canonical layout is one protected site per
-# /etc/caddy/sites/<domain>.caddy, using the shared `import abuseguard` snippet.
+# --- normalize sites into /etc/caddy/sites ----------------------------------
+# Existing Caddy installs may keep ordinary reverse-proxy sites in the main
+# Caddyfile, while old AbuseGuard releases wrote protection directives there.
+# The canonical layout is one protected site per /etc/caddy/sites/<domain>.caddy,
+# using the shared `import abuseguard` snippet.
 # Generate the candidate layout in a temp dir, install the new site files, and
 # atomically replace the main Caddyfile only after the full config validates.
-migrate_protected_sites() {
+migrate_caddy_sites() {
 	local source="$1"
 	local migrator="$SRC_DIR/scripts/migrate-caddy-sites.sh"
 	local root out_main out_sites domains candidate validation domain target failed=0 count=0
@@ -469,7 +470,7 @@ migrate_protected_sites() {
 	if ! bash "$migrator" "$source" "$out_main" "$out_sites" "$SITES_DIR" > "$domains"; then
 		cleanup_temp_tree "$root" || true
 		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
-		die "受保护站点无法按 AbuseGuard 标准结构迁移；原 Caddyfile 未改动。"
+		die "Caddy 站点无法按 AbuseGuard 标准结构迁移；原 Caddyfile 未改动。"
 	fi
 	normalize_caddy_file "$out_main"
 	for caddy_site in "$out_sites"/*.caddy; do normalize_caddy_file "$caddy_site"; done
@@ -519,7 +520,7 @@ migrate_protected_sites() {
 log "正在规范化 AbuseGuard Caddy 配置"
 normalize_caddy_file "$caddy_migration_source"
 for caddy_site in "$SITES_DIR"/*.caddy; do normalize_caddy_file "$caddy_site"; done
-migrate_protected_sites "$caddy_migration_source"
+migrate_caddy_sites "$caddy_migration_source"
 
 # Root-side Caddy validation above may create the access log first.  Always
 # repair its ownership/mode here without truncating an existing log.
