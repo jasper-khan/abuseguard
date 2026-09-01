@@ -43,6 +43,8 @@ sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
 
 The installer is idempotent: existing config, whitelist, key, and unrelated Caddy configuration are preserved. Protected AbuseGuard sites from an older release, or sites written directly in the main Caddyfile, are migrated to the canonical `/etc/caddy/sites/<domain>.caddy` layout with `import abuseguard`; the complete migrated configuration must validate before it takes effect.
 
+The installer supplies runtime dependencies such as `fail2ban`, `rsyslog`, and `nftables` automatically. `rsyslog` provides `/var/log/auth.log` for the Debian/Ubuntu default `sshd` jail; AbuseGuard's web protection continues to use its separate Caddy JSON log. A Cloudflare token already present in a running Caddy service is written safely to AbuseGuard's `/etc/caddy/.env` and is never printed.
+
 On the first install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; the AbuseIPDB key is not echoed while you type. Both can be set later from the panel. Updates preserve existing keys, skip these questions, and reload the panel automatically after success. When it finishes, the terminal prominently shows how to open the panel:
 
 ```bash

@@ -146,10 +146,12 @@ esac
 log "目标系统：${PRETTY_NAME:-Debian/Ubuntu}（$ARCH）"
 
 # --- dependencies ------------------------------------------------------------
-log "正在安装依赖（fail2ban、nftables、curl、jq、libcap2-bin）..."
+log "正在安装依赖（fail2ban、rsyslog、nftables、curl、jq、libcap2-bin）..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq fail2ban nftables curl jq ca-certificates libcap2-bin >/dev/null
+apt-get install -y -qq fail2ban rsyslog nftables curl jq ca-certificates libcap2-bin >/dev/null
+systemctl enable --now rsyslog >/dev/null 2>&1 || die "rsyslog 启动失败（查看：journalctl -u rsyslog）。"
+[ -e /var/log/auth.log ] || install -m 0640 -o root -g adm /dev/null /var/log/auth.log
 
 # --- record pre-install state (for symmetric uninstall) ----------------------
 # Snapshot what already exists BEFORE creating anything, so uninstall can tell
@@ -323,6 +325,18 @@ if [ ! -e "$SITES_DIR/_placeholder.caddy" ]; then
 # 每个站点一个 <域名>.caddy 文件，并在站点块中 import abuseguard。
 PH
 	chmod 0644 "$SITES_DIR/_placeholder.caddy"
+fi
+caddy_env_token="$(sed -n 's/^CF_API_TOKEN=//p' "$CADDY_ENV" 2>/dev/null | head -n 1)"
+if [ -z "$caddy_env_token" ]; then
+	caddy_pid="$(systemctl show -p MainPID --value caddy 2>/dev/null || true)"
+	if [[ "$caddy_pid" =~ ^[1-9][0-9]*$ ]] && [ -r "/proc/$caddy_pid/environ" ]; then
+		caddy_env_token="$(tr '\0' '\n' < "/proc/$caddy_pid/environ" | sed -n 's/^CF_API_TOKEN=//p' | head -n 1)"
+	fi
+	if [ -n "$caddy_env_token" ]; then
+		printf 'CF_API_TOKEN=%s\n' "$caddy_env_token" > "$CADDY_ENV"
+		chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
+		log "已将现有 Caddy 服务的 Cloudflare token 写入 $CADDY_ENV"
+	fi
 fi
 if [ ! -f "$CADDY_ENV" ]; then
 	printf 'CF_API_TOKEN=\n' > "$CADDY_ENV"; chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
