@@ -445,6 +445,32 @@ normalize_caddy_file() {
 	"$CADDY_BIN" fmt --overwrite "$file" >/dev/null || die "无法格式化 Caddy 配置：$file"
 }
 
+# A conservative uninstall keeps managed site files but removes this import.
+# Reinstalling must put those existing sites back under AbuseGuard protection.
+ensure_site_protected() {
+	local file="$1" tmp
+	[ "$(basename "$file")" != "_placeholder.caddy" ] || return 0
+	grep -qE '^[[:space:]]*import[[:space:]]+abuseguard[[:space:]]*$' "$file" && return 0
+	tmp="$(mktemp)"
+	if ! awk '
+		!inserted && /^[[:space:]]*[^#].*\{[[:space:]]*(#.*)?$/ {
+			print
+			match($0, /^[[:space:]]*/)
+			print substr($0, RSTART, RLENGTH) "\timport abuseguard"
+			inserted=1
+			next
+		}
+		{ print }
+		END { if (!inserted) exit 1 }
+	' "$file" > "$tmp"; then
+		rm -f "$tmp"
+		die "无法为现有站点恢复 AbuseGuard 防护：$file"
+	fi
+	install -m 0644 "$tmp" "$file"
+	rm -f "$tmp"
+	log "已恢复现有站点的 AbuseGuard 防护：$file"
+}
+
 # --- normalize sites into /etc/caddy/sites ----------------------------------
 # Existing Caddy installs may keep ordinary reverse-proxy sites in the main
 # Caddyfile, while old AbuseGuard releases wrote protection directives there.
@@ -519,7 +545,10 @@ migrate_caddy_sites() {
 }
 log "正在规范化 AbuseGuard Caddy 配置"
 normalize_caddy_file "$caddy_migration_source"
-for caddy_site in "$SITES_DIR"/*.caddy; do normalize_caddy_file "$caddy_site"; done
+for caddy_site in "$SITES_DIR"/*.caddy; do
+	ensure_site_protected "$caddy_site"
+	normalize_caddy_file "$caddy_site"
+done
 migrate_caddy_sites "$caddy_migration_source"
 
 # Root-side Caddy validation above may create the access log first.  Always

@@ -163,7 +163,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 
 - **保守卸载**：只删 AbuseGuard 组件，并从 Caddyfile 摘掉 AbuseGuard 的引入（`import abuseguard`、snippet、自检站点），**保留你原有的 Caddy、账户和反代配置**。
 - **彻底卸载**：再按清单删 AbuseGuard 安装的 Caddy/账户/配置 —— 但**装之前你已有的一律不动**（原本就有 Caddy 就不会删 Caddy）。清单丢失时自动降级为最保守处理。
-- `/etc/caddy/sites` 中由 AbuseGuard 管理的站点，卸载时可选「保留反代、只去防护」或「一起删」。原有 Caddyfile 在安装时已备份为 `Caddyfile.pre-abuseguard`。
+- `/etc/caddy/sites` 中由 AbuseGuard 管理的站点，卸载时可选「保留反代、只去防护」或「一起删」；以后重新安装时，保留的站点会自动恢复 `import abuseguard` 防护。原有 Caddyfile 在安装时已备份为 `Caddyfile.pre-abuseguard`。
 
 ## 安全须知
 

@@ -201,8 +201,9 @@ AbuseGuard created vs. what you already had).
   installed — but **anything that pre-existed the install is left untouched**
   (if you already had Caddy, Caddy stays). Falls back to the safest path if the
   manifest is missing.
-- AbuseGuard-managed sites under `/etc/caddy/sites` can be kept (de-protected) or deleted. Your
-  original Caddyfile is backed up at install time as `Caddyfile.pre-abuseguard`.
+- AbuseGuard-managed sites under `/etc/caddy/sites` can be kept (de-protected) or deleted. A later
+  reinstall automatically restores `import abuseguard` to kept sites without changing their reverse
+  proxy. Your original Caddyfile is backed up at install time as `Caddyfile.pre-abuseguard`.
 
 ## Security notes
 
