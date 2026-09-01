@@ -420,6 +420,15 @@ else
 	fi
 fi
 
+# Keep the canonical AbuseGuard Caddy layout warning-free after migrating old
+# configs.  Caddy already forwards X-Forwarded-Host with this exact value.
+normalize_caddy_file() {
+	local file="$1"
+	[ -f "$file" ] || return 0
+	sed -i -E '/^[[:space:]]*header_up[[:space:]]+X-Forwarded-Host[[:space:]]+\{host\}[[:space:]]*$/d' "$file"
+	"$CADDY_BIN" fmt --overwrite "$file" >/dev/null || die "无法格式化 Caddy 配置：$file"
+}
+
 # --- normalize protected sites into /etc/caddy/sites ------------------------
 # Old AbuseGuard releases wrote the protection directives directly inside the
 # main Caddyfile. The canonical layout is one protected site per
@@ -446,6 +455,8 @@ migrate_protected_sites() {
 		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
 		die "受保护站点无法按 AbuseGuard 标准结构迁移；原 Caddyfile 未改动。"
 	fi
+	normalize_caddy_file "$out_main"
+	for caddy_site in "$out_sites"/*.caddy; do normalize_caddy_file "$caddy_site"; done
 
 	candidate="$(mktemp "$CADDY_ETC/.Caddyfile.abuseguard-migrate.XXXXXX")"
 	validation="$(mktemp "$CADDY_ETC/.Caddyfile.abuseguard-validate.XXXXXX")"
@@ -489,6 +500,9 @@ migrate_protected_sites() {
 	[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
 	die "无法写入迁移后的站点文件；已撤销本次站点迁移。"
 }
+log "正在规范化 AbuseGuard Caddy 配置"
+normalize_caddy_file "$caddy_migration_source"
+for caddy_site in "$SITES_DIR"/*.caddy; do normalize_caddy_file "$caddy_site"; done
 migrate_protected_sites "$caddy_migration_source"
 
 # Root-side Caddy validation above may create the access log first.  Always
