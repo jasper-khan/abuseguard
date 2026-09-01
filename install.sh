@@ -326,7 +326,7 @@ if [ ! -e "$SITES_DIR/_placeholder.caddy" ]; then
 PH
 	chmod 0644 "$SITES_DIR/_placeholder.caddy"
 fi
-caddy_env_token="$(sed -n 's/^CF_API_TOKEN=//p' "$CADDY_ENV" 2>/dev/null | head -n 1)"
+caddy_env_token="$(sed -n 's/^CF_API_TOKEN=//p' "$CADDY_ENV" 2>/dev/null | head -n 1 || true)"
 if [ -z "$caddy_env_token" ]; then
 	caddy_pid="$(systemctl show -p MainPID --value caddy 2>/dev/null || true)"
 	if [[ "$caddy_pid" =~ ^[1-9][0-9]*$ ]] && [ -r "/proc/$caddy_pid/environ" ]; then
