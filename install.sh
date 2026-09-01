@@ -611,7 +611,7 @@ cat <<EOF
     访问日志:     $LOG_DIR/abuseguard-access.json
 
   在 $SITES_DIR/<域名>.caddy 中添加受保护站点（站点块内放
-  'import abuseguard'），然后执行：sudo systemctl reload caddy
+  'import abuseguard'），然后执行：sudo systemctl reload caddy || sudo systemctl restart caddy
 
 安全提示：Caddy 本身不提供鉴权。凡是你对外暴露的站点，除非自行加鉴权，
 否则都是公开的。安装器自带的自检站点只绑定 127.0.0.1。

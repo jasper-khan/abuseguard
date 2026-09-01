@@ -121,7 +121,7 @@ example.com {
 }
 ```
 
-然后 `sudo systemctl reload caddy`。主 `/etc/caddy/Caddyfile` 只保留全局配置及对 `abuseguard.caddy`、`sites/*.caddy` 的导入；片段只需改一处，每个受保护站点都会跟随生效。
+然后执行 `sudo systemctl reload caddy || sudo systemctl restart caddy`（关闭了 Caddy admin API 时会自动走重启）。主 `/etc/caddy/Caddyfile` 只保留全局配置及对 `abuseguard.caddy`、`sites/*.caddy` 的导入；片段只需改一处，每个受保护站点都会跟随生效。
 
 示例里的 Cloudflare token 只用于 DNS-01 证书签发。
 

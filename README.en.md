@@ -147,7 +147,7 @@ example.com {
 }
 ```
 
-Then `sudo systemctl reload caddy`. The main `/etc/caddy/Caddyfile` keeps global settings and the imports for `abuseguard.caddy` and `sites/*.caddy`; change the shared snippet once and every protected site follows.
+Then run `sudo systemctl reload caddy || sudo systemctl restart caddy` (the restart fallback is used when Caddy's admin API is disabled). The main `/etc/caddy/Caddyfile` keeps global settings and the imports for `abuseguard.caddy` and `sites/*.caddy`; change the shared snippet once and every protected site follows.
 
 The Cloudflare token in this example is only for DNS-01 certificate issuance.
 
