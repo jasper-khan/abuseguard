@@ -227,14 +227,43 @@ sums_require() {
 	rm -f "$f"
 	die "无法获取 SHA256SUMS.txt（直连与镜像均已重试）。为避免安装未经校验的二进制，安装已中止；请检查网络后重试，或用 --from-source 本地编译引擎。"
 }
-verify_sha256() {  # FILE BASENAME -- abort unless FILE matches the release checksum
+verify_sha256() {  # FILE BASENAME -- return failure unless the release checksum matches
 	local file="$1" fn="$2" want got
 	sums_require
 	want="$(awk -v f="$fn" '$2==f || $2=="*"f {print $1; exit}' "$SUMS_FILE")"
-	[ -n "$want" ] || die "SHA256SUMS.txt 里没有 $fn 的校验值，无法校验，安装已中止。"
+	[ -n "$want" ] || { warn "SHA256SUMS.txt 里没有 $fn 的校验值，无法校验。"; return 1; }
 	got="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
-	[ "$got" = "$want" ] || die "$fn 校验失败（期望 $want，实际 ${got:-空}）——可能被镜像篡改或下载损坏，已中止。"
+	[ "$got" = "$want" ] || { warn "$fn 校验失败（期望 $want，实际 ${got:-空}）——可能被镜像篡改或下载损坏。"; return 1; }
 	log "已校验 $fn（sha256 ✓）"
+}
+
+# Stage a release binary beside its destination, then verify and probe it before
+# an atomic rename. A failed download, checksum, or startup check leaves the
+# currently installed binary untouched.
+install_release_binary() {  # URL DEST BASENAME LABEL
+	local url="$1" dest="$2" fn="$3" label="$4" tmp
+	sums_require
+	tmp="$(mktemp "$(dirname "$dest")/.${fn}.tmp.XXXXXX")" \
+		|| { warn "$label：无法创建临时下载文件。"; return 1; }
+	if ! gh_fetch "$url" "$tmp" "$AG_CURL_BIG"; then
+		rm -f -- "$tmp"
+		warn "$label 下载失败（直连与镜像都失败）。"
+		return 1
+	fi
+	if ! verify_sha256 "$tmp" "$fn"; then
+		rm -f -- "$tmp"
+		return 1
+	fi
+	if ! chmod 0755 "$tmp" || ! "$tmp" version >/dev/null 2>&1; then
+		rm -f -- "$tmp"
+		warn "$label 启动检查失败，保留当前版本。"
+		return 1
+	fi
+	if ! mv -f -- "$tmp" "$dest"; then
+		rm -f -- "$tmp"
+		warn "$label 无法替换当前二进制。"
+		return 1
+	fi
 }
 
 # --- engine ------------------------------------------------------------------
@@ -255,10 +284,8 @@ install_engine() {
 	local fn="caddy-abuseguard-linux-$ARCH"
 	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/$fn"
 	log "正在下载引擎（linux-$ARCH，自动选择线路，稍候）..."
-	gh_fetch "$url" "$ENGINE_BIN" "$AG_CURL_BIG" \
-		|| die "引擎下载失败（直连与镜像都失败）。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
-	verify_sha256 "$ENGINE_BIN" "$fn"
-	chmod 0755 "$ENGINE_BIN"
+	install_release_binary "$url" "$ENGINE_BIN" "$fn" "引擎" \
+		|| die "引擎下载、校验或启动检查失败。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
 }
 install_engine
 log "引擎：$("$ENGINE_BIN" version 2>/dev/null || echo 已安装)"
@@ -302,10 +329,8 @@ fi
 if [ "$need_caddy" = "1" ]; then
 	caddy_fn="caddy-linux-$ARCH"
 	log "正在下载带 cloudflare 模块的 Caddy（linux-$ARCH，自动选择线路，稍候）..."
-	gh_fetch "https://github.com/$ABUSEGUARD_REPO/releases/latest/download/$caddy_fn" "$CADDY_BIN" "$AG_CURL_BIG" \
-		|| die "Caddy 下载失败（直连与镜像都失败）。可预置一个带 cloudflare 模块的 caddy 到 $CADDY_BIN 后重试。"
-	verify_sha256 "$CADDY_BIN" "$caddy_fn"
-	chmod 0755 "$CADDY_BIN"
+	install_release_binary "https://github.com/$ABUSEGUARD_REPO/releases/latest/download/$caddy_fn" "$CADDY_BIN" "$caddy_fn" "Caddy" \
+		|| die "Caddy 下载、校验或启动检查失败。可预置一个带 cloudflare 模块的 caddy 到 $CADDY_BIN 后重试。"
 else
 	log "已有的 Caddy 已包含 cloudflare 模块"
 fi

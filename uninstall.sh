@@ -42,6 +42,12 @@ esac; done
 
 log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
+
+validate_caddyfile() {
+	local config="$1" cf_token=""
+	[ ! -f "$CADDY_ENV" ] || cf_token="$(sed -n 's/^CF_API_TOKEN=//p' "$CADDY_ENV" | head -n 1)"
+	CF_API_TOKEN="$cf_token" "$CADDY_BIN" validate --config "$config" --adapter caddyfile
+}
 run()  { if [ "$DRY" = 1 ]; then echo "  would: $*"; else eval "$*"; fi; }
 have_tty() { { exec 3</dev/tty; } 2>/dev/null; }
 
@@ -279,7 +285,7 @@ fi
 run "systemctl daemon-reload"
 run "systemctl reload fail2ban >/dev/null 2>&1 || true"
 if [ "$DRY" != 1 ] && [ -x "$CADDY_BIN" ] && [ -f "$CADDYFILE" ]; then
-	if "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+	if validate_caddyfile "$CADDYFILE" >/dev/null 2>&1; then
 		systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
 		log "已重载 Caddy（清理后的配置校验通过）。"
 	else

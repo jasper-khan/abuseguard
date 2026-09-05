@@ -22,8 +22,44 @@ type dailyUsage struct {
 	Attempts int    `json:"attempts"`
 }
 
+const reportCheckpointVersion = 1
+
+type reportCheckpoint struct {
+	Version   int         `json:"version"`
+	Remaining []string    `json:"remaining"`
+	Dedupe    dedupeStore `json:"dedupe"`
+	Daily     dailyUsage  `json:"daily"`
+}
+
 func dedupePath(c *Config) string { return c.Paths.ReportsDir + "/.dedupe.json" }
 func dailyPath(c *Config) string  { return c.Paths.ReportsDir + "/.daily-usage.json" }
+func checkpointPath(c *Config) string {
+	return c.Paths.ReportsDir + "/.report-checkpoint.json"
+}
+
+func validateDedupe(d *dedupeStore) error {
+	if d.Entries == nil {
+		d.Entries = map[string]string{}
+	}
+	for _, ts := range d.Entries {
+		if _, err := time.Parse(time.RFC3339, ts); err != nil {
+			return fmt.Errorf("invalid dedupe timestamp %q", ts)
+		}
+	}
+	return nil
+}
+
+func validateDaily(u *dailyUsage) error {
+	if u.Day != "" {
+		if _, err := time.Parse("2006-01-02", u.Day); err != nil {
+			return fmt.Errorf("invalid daily usage day %q", u.Day)
+		}
+	}
+	if u.Attempts < 0 {
+		return fmt.Errorf("invalid daily usage attempts %d", u.Attempts)
+	}
+	return nil
+}
 
 func loadDedupe(c *Config) (*dedupeStore, error) {
 	d := &dedupeStore{Entries: map[string]string{}}
@@ -37,13 +73,8 @@ func loadDedupe(c *Config) (*dedupeStore, error) {
 	if err := json.Unmarshal(b, d); err != nil {
 		return nil, err
 	}
-	if d.Entries == nil {
-		d.Entries = map[string]string{}
-	}
-	for _, ts := range d.Entries {
-		if _, err := time.Parse(time.RFC3339, ts); err != nil {
-			return nil, fmt.Errorf("invalid dedupe timestamp %q", ts)
-		}
+	if err := validateDedupe(d); err != nil {
+		return nil, err
 	}
 	return d, nil
 }
@@ -58,13 +89,8 @@ func loadDaily(c *Config) (*dailyUsage, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	if u.Day != "" {
-		if _, err := time.Parse("2006-01-02", u.Day); err != nil {
-			return nil, fmt.Errorf("invalid daily usage day %q", u.Day)
-		}
-	}
-	if u.Attempts < 0 {
-		return nil, fmt.Errorf("invalid daily usage attempts %d", u.Attempts)
+	if err := validateDaily(u); err != nil {
+		return nil, err
 	}
 	today := time.Now().UTC().Format("2006-01-02")
 	if u.Day != today {
@@ -72,6 +98,64 @@ func loadDaily(c *Config) (*dailyUsage, error) {
 		u.Attempts = 0
 	}
 	return u, nil
+}
+
+// applyCheckpoint is idempotent. The checkpoint stays in place until the
+// queue, dedupe state, and daily usage have all reached the same snapshot.
+func applyCheckpoint(c *Config, checkpoint *reportCheckpoint) error {
+	if checkpoint.Version != reportCheckpointVersion {
+		return fmt.Errorf("unsupported checkpoint version %d", checkpoint.Version)
+	}
+	if checkpoint.Dedupe.Entries == nil || checkpoint.Daily.Day == "" {
+		return fmt.Errorf("incomplete checkpoint state")
+	}
+	if err := validateDedupe(&checkpoint.Dedupe); err != nil {
+		return err
+	}
+	if err := validateDaily(&checkpoint.Daily); err != nil {
+		return err
+	}
+	if err := writeQueueFile(processingQueuePath(c), checkpoint.Remaining); err != nil {
+		return fmt.Errorf("save queue batch: %w", err)
+	}
+	if err := saveJSON(dedupePath(c), &checkpoint.Dedupe, 0640); err != nil {
+		return fmt.Errorf("save dedupe state: %w", err)
+	}
+	if err := saveJSON(dailyPath(c), &checkpoint.Daily, 0640); err != nil {
+		return fmt.Errorf("save daily usage: %w", err)
+	}
+	if err := os.Remove(checkpointPath(c)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove checkpoint: %w", err)
+	}
+	return nil
+}
+
+func persistCheckpoint(c *Config, remaining []string, dedupe *dedupeStore, daily *dailyUsage) error {
+	checkpoint := &reportCheckpoint{
+		Version:   reportCheckpointVersion,
+		Remaining: append([]string(nil), remaining...),
+		Dedupe:    *dedupe,
+		Daily:     *daily,
+	}
+	if err := saveJSON(checkpointPath(c), checkpoint, 0640); err != nil {
+		return fmt.Errorf("save checkpoint: %w", err)
+	}
+	return applyCheckpoint(c, checkpoint)
+}
+
+func recoverCheckpoint(c *Config) error {
+	b, err := os.ReadFile(checkpointPath(c))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var checkpoint reportCheckpoint
+	if err := json.Unmarshal(b, &checkpoint); err != nil {
+		return fmt.Errorf("decode checkpoint: %w", err)
+	}
+	return applyCheckpoint(c, &checkpoint)
 }
 
 func parseDurationDefault(s string, def time.Duration) time.Duration {
@@ -105,6 +189,10 @@ func cmdReportSendAuto(c *Config) int {
 		return 1
 	}
 	defer reportLock.Close()
+	if err := recoverCheckpoint(c); err != nil {
+		logf("report: recover confirmed progress: %v", err)
+		return 1
+	}
 
 	batch, err := rotateQueue(c)
 	if err != nil {
@@ -210,6 +298,13 @@ reportLoop:
 		dedupe.Entries[k] = now.Format(time.RFC3339)
 		daily.Attempts++
 		sent++
+		checkpointRemaining := make([]string, 0, len(remaining)+len(raw)-idx-1)
+		checkpointRemaining = append(checkpointRemaining, remaining...)
+		checkpointRemaining = append(checkpointRemaining, raw[idx+1:]...)
+		if err := persistCheckpoint(c, checkpointRemaining, dedupe, daily); err != nil {
+			logf("report: persist confirmed report for %s: %v", it.IP, err)
+			return 1
+		}
 	}
 
 	// prune dedupe entries older than 48h

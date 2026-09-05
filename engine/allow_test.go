@@ -7,12 +7,21 @@ import (
 )
 
 func TestLoadAllowlistRejectsInvalidEntry(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "whitelist")
-	if err := os.WriteFile(path, []byte("192.0.2.1\nnot-an-ip\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadAllowlist(path); err == nil {
-		t.Fatal("invalid allowlist entry was accepted")
+	for _, entry := range []string{
+		"not-an-ip",
+		"999.1.2.3",
+		"192.0.2.1/33",
+		"2001:db8::/129",
+	} {
+		t.Run(entry, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "whitelist")
+			if err := os.WriteFile(path, []byte("192.0.2.1\n"+entry+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadAllowlist(path); err == nil {
+				t.Fatal("invalid allowlist entry was accepted")
+			}
+		})
 	}
 }
 

@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "0.2.4"
+const version = "0.2.5"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -28,6 +28,8 @@ func main() {
 		runIntelIgnore(args)
 	case "unknown-ignore":
 		runUnknownIgnore(args)
+	case "allowlist-validate":
+		runAllowlistValidate(args)
 	case "version", "-v", "--version":
 		fmt.Println("abuseguard-engine " + version)
 	default:
@@ -37,7 +39,7 @@ func main() {
 }
 
 func usage() {
-	logf("subcommands: enqueue | report send-auto | sync-intel | intel-ignore --ip <ip> | unknown-ignore --ip <ip> | version")
+	logf("subcommands: enqueue | report send-auto | sync-intel | intel-ignore --ip <ip> | unknown-ignore --ip <ip> | allowlist-validate (--entry <IP/CIDR> | --file <path>) | version")
 }
 
 func mustConfig() *Config {
@@ -125,4 +127,25 @@ func runUnknownIgnore(args []string) {
 		os.Exit(0) // whitelisted => ignore
 	}
 	os.Exit(1) // not whitelisted => proceed to ban
+}
+
+func runAllowlistValidate(args []string) {
+	fs := flag.NewFlagSet("allowlist-validate", flag.ExitOnError)
+	entry := fs.String("entry", "", "one IP or CIDR entry")
+	path := fs.String("file", "", "allowlist file")
+	fs.Parse(args)
+	if (*entry == "") == (*path == "") {
+		logf("allowlist-validate: specify exactly one of --entry or --file")
+		os.Exit(2)
+	}
+	var err error
+	if *entry != "" {
+		_, _, err = parseAllowlistEntry(*entry)
+	} else {
+		_, err = loadAllowlist(*path)
+	}
+	if err != nil {
+		logf("allowlist-validate: %v", err)
+		os.Exit(1)
+	}
 }

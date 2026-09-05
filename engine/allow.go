@@ -14,6 +14,21 @@ type Allowlist struct {
 	ips  []net.IP
 }
 
+func parseAllowlistEntry(value string) (net.IP, *net.IPNet, error) {
+	if strings.Contains(value, "/") {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid CIDR %q", value)
+		}
+		return nil, network, nil
+	}
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return nil, nil, fmt.Errorf("invalid IP %q", value)
+	}
+	return ip, nil, nil
+}
+
 // loadAllowlist parses the whitelist file. Callers decide how to fail safe:
 // ignore commands skip a ban, while the reporter stops without sending.
 func loadAllowlist(path string) (*Allowlist, error) {
@@ -38,19 +53,15 @@ func loadAllowlist(path string) (*Allowlist, error) {
 		if line == "" {
 			continue
 		}
-		if strings.Contains(line, "/") {
-			_, n, err := net.ParseCIDR(line)
-			if err != nil {
-				return nil, fmt.Errorf("line %d: invalid CIDR %q", lineNo, line)
-			}
-			a.nets = append(a.nets, n)
-			continue
+		ip, network, err := parseAllowlistEntry(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNo, err)
 		}
-		ip := net.ParseIP(line)
-		if ip == nil {
-			return nil, fmt.Errorf("line %d: invalid IP %q", lineNo, line)
+		if network != nil {
+			a.nets = append(a.nets, network)
+		} else {
+			a.ips = append(a.ips, ip)
 		}
-		a.ips = append(a.ips, ip)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
