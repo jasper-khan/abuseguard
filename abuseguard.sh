@@ -39,6 +39,12 @@ gh_fetch() {  # URL OUTFILE — direct then mirror chain, quietly
 	esac
 }
 
+validate_caddyfile() {
+	local config="$1" cf_token=""
+	[ ! -f "$CADDY_ENV" ] || cf_token="$(sed -n 's/^CF_API_TOKEN=//p' "$CADDY_ENV" | head -n 1)"
+	CF_API_TOKEN="$cf_token" "$CADDY" validate --config "$config" --adapter caddyfile
+}
+
 C_G='\033[1;32m'; C_Y='\033[1;33m'; C_R='\033[1;31m'; C_B='\033[1;34m'; C_0='\033[0m'
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
@@ -173,12 +179,28 @@ act_ban() {
 	pause
 }
 
-# 校验 IPv4/IPv6（可带 /前缀），宽松匹配，挡住明显错误输入
+# 使用引擎的同一解析器严格校验 IPv4/IPv6（可带 /前缀）。
 wl_valid() {
-	local x="$1"
-	printf '%s' "$x" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$' && return 0
-	printf '%s' "$x" | grep -qiE '^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(/[0-9]{1,3})?$' && return 0
-	return 1
+	"$ENGINE" allowlist-validate --entry "$1" >/dev/null 2>&1
+}
+
+# 候选文件与正式白名单同目录，校验和权限设置成功后再原子替换。
+wl_candidate() {
+	local tmp
+	tmp="$(mktemp "$CONF_DIR/.whitelist.XXXXXX")" || return 1
+	if ! cp -- "$WHITELIST" "$tmp"; then
+		rm -f -- "$tmp"
+		return 1
+	fi
+	printf '%s\n' "$tmp"
+}
+
+wl_commit() {
+	local candidate="$1"
+	"$ENGINE" allowlist-validate --file "$candidate" >/dev/null 2>&1 || return 1
+	chown root:abuseguard "$candidate" || return 1
+	chmod 0640 "$candidate" || return 1
+	mv -f -- "$candidate" "$WHITELIST"
 }
 
 # 重载 fail2ban 并清 ignore 缓存，让白名单改动立即生效
@@ -211,19 +233,27 @@ act_whitelist() {
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
 				local added=0 skipped=0 tok; local -a added_ips=()
+				tmp="$(wl_candidate)" || { echo "  无法创建白名单候选文件。"; sleep 1; continue; }
 				while IFS= read -r ip; do
 					[ -z "$ip" ] && break
 					ip="${ip//,/ }"
 					for tok in $ip; do
 						if ! wl_valid "$tok"; then echo "    跳过(格式无效)：$tok"; skipped=$((skipped+1)); continue; fi
-						if grep -qxF "$tok" "$WHITELIST" 2>/dev/null; then echo "    跳过(已存在)：$tok"; skipped=$((skipped+1)); continue; fi
-						printf '%s\n' "$tok" >> "$WHITELIST"; added=$((added+1)); added_ips+=("$tok"); echo "    已加：$tok"
+						if grep -qxF "$tok" "$tmp" 2>/dev/null; then echo "    跳过(已存在)：$tok"; skipped=$((skipped+1)); continue; fi
+						printf '%s\n' "$tok" >> "$tmp"; added=$((added+1)); added_ips+=("$tok"); echo "    待添加：$tok"
 					done
 				done
-				[ "$added" -gt 0 ] && wl_reload
-				# reload 只影响未来判定；正被封的 IP 需显式解封才能立即放行
-				[ "$added" -gt 0 ] && for tok in "${added_ips[@]}"; do fail2ban-client unban "$tok" >/dev/null 2>&1; done
-				echo "  完成：新增 $added，跳过 $skipped（加白的 IP 若在封禁中已一并解封）"; sleep 1 ;;
+				if [ "$added" -gt 0 ] && wl_commit "$tmp"; then
+					tmp=""; wl_reload
+					# reload 只影响未来判定；正被封的 IP 需显式解封才能立即放行
+					for tok in "${added_ips[@]}"; do fail2ban-client unban "$tok" >/dev/null 2>&1; done
+					echo "  完成：新增 $added，跳过 $skipped（加白的 IP 若在封禁中已一并解封）"
+				else
+					rm -f -- "$tmp"
+					[ "$added" -eq 0 ] && echo "  完成：新增 0，跳过 $skipped" \
+						|| echo "  候选白名单未通过完整校验，原文件保持不变。"
+				fi
+				sleep 1 ;;
 			2)
 				[ "${#items[@]}" -eq 0 ] && { echo "  没有可删除的条目"; sleep 1; continue; }
 				i=1; for line in "${items[@]}"; do printf "  [%d] %s\n" "$i" "$line"; i=$((i+1)); done
@@ -231,13 +261,23 @@ act_whitelist() {
 				case "$num" in ''|*[!0-9]*) continue ;; esac
 				if [ "$num" -lt 1 ] || [ "$num" -gt "${#items[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
 				target="${items[$((num-1))]}"
-				tmp="$(mktemp)"
+				tmp="$(wl_candidate)" || { echo "  无法创建白名单候选文件。"; sleep 1; continue; }
 				# 删掉“去注释去空格后 == target”的行，保留注释/空行/其它条目
-				awk -v t="$target" '{l=$0; sub(/#.*/,"",l); gsub(/[ \t]/,"",l); if (l!=t) print}' "$WHITELIST" > "$tmp" && cat "$tmp" > "$WHITELIST"
-				rm -f "$tmp"; wl_reload
-				echo "  已删除：$target"; sleep 1 ;;
+				if awk -v t="$target" '{l=$0; sub(/#.*/,"",l); gsub(/[ \t]/,"",l); if (l!=t) print}' "$WHITELIST" > "$tmp" \
+					&& wl_commit "$tmp"; then
+					tmp=""; wl_reload; echo "  已删除：$target"
+				else
+					rm -f -- "$tmp"; echo "  候选白名单无效，原文件保持不变。"
+				fi
+				sleep 1 ;;
 			3)
-				"${EDITOR:-nano}" "$WHITELIST"; wl_reload ;;
+				tmp="$(wl_candidate)" || { echo "  无法创建白名单候选文件。"; sleep 1; continue; }
+				if "${EDITOR:-nano}" "$tmp" && wl_commit "$tmp"; then
+					tmp=""; wl_reload; echo "  白名单已保存。"
+				else
+					rm -f -- "$tmp"; echo "  白名单格式无效或编辑失败，原文件保持不变。"
+				fi
+				sleep 1 ;;
 			0) wl_reload; return ;;
 			*) ;;
 		esac
@@ -321,7 +361,7 @@ act_sites() {
 					printf '\treverse_proxy %s\n}\n' "$up"
 				} > "$f"
 				chmod 0644 "$f"
-				out="$("$CADDY" validate --config "$CADDYFILE" --adapter caddyfile 2>&1)"
+				out="$(validate_caddyfile "$CADDYFILE" 2>&1)"
 				if [ $? -ne 0 ]; then
 					rm -f "$f"
 					echo "  配置校验失败，已回滚。错误："

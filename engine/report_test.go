@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -388,6 +389,189 @@ func TestReporterRequeuesRetryableErrors(t *testing.T) {
 				t.Fatalf("requeued items=%d malformed=%d; want 2,0", len(items), malformed)
 			}
 		})
+	}
+}
+
+func TestReporterPersistsConfirmedProgressBeforeNextRequest(t *testing.T) {
+	env := newReportTestEnv(t)
+	firstIP := "192.0.2.10"
+	secondIP := "192.0.2.11"
+	for _, ip := range []string{firstIP, secondIP} {
+		if rc := cmdEnqueue(env.c, validProbe(ip)); rc != 0 {
+			t.Fatalf("enqueue %s returned %d", ip, rc)
+		}
+	}
+
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseSecond) })
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusOK)
+		case 2:
+			close(secondStarted)
+			<-releaseSecond
+			panic(http.ErrAbortHandler)
+		default:
+			t.Error("unexpected extra request")
+		}
+	}))
+	defer server.Close()
+	env.c.AbuseIPDB.ReportURL = server.URL
+
+	reportDone := make(chan int, 1)
+	go func() { reportDone <- cmdReportSendAuto(env.c) }()
+	select {
+	case <-secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reporter did not start the second request")
+	}
+
+	items, _, malformed, err := readQueueFile(processingQueuePath(env.c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if malformed != 0 || len(items) != 1 || items[0].IP != secondIP {
+		t.Fatalf("durable queue=%v malformed=%d; want only %s", items, malformed, secondIP)
+	}
+	dedupe, err := loadDedupe(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dedupe.Entries[hashKey(firstIP)]; !ok {
+		t.Fatal("confirmed first report was not persisted in dedupe state")
+	}
+	daily, err := loadDaily(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if daily.Attempts != 1 {
+		t.Fatalf("daily attempts=%d; want 1", daily.Attempts)
+	}
+
+	releaseOnce.Do(func() { close(releaseSecond) })
+	select {
+	case rc := <-reportDone:
+		if rc == 0 {
+			t.Fatal("reporter hid the uncertain second response")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reporter did not stop after the uncertain response")
+	}
+
+	var retried []string
+	retryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse retry form: %v", err)
+		}
+		retried = append(retried, r.Form.Get("ip"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer retryServer.Close()
+	env.c.AbuseIPDB.ReportURL = retryServer.URL
+	if rc := cmdReportSendAuto(env.c); rc != 0 {
+		t.Fatalf("retry reporter returned %d", rc)
+	}
+	if len(retried) != 1 || retried[0] != secondIP {
+		t.Fatalf("retried IPs=%v; want only %s", retried, secondIP)
+	}
+}
+
+func TestReporterRecoversCheckpointBeforeSending(t *testing.T) {
+	env := newReportTestEnv(t)
+	firstIP := "192.0.2.10"
+	secondIP := "192.0.2.11"
+	for _, ip := range []string{firstIP, secondIP} {
+		if rc := cmdEnqueue(env.c, validProbe(ip)); rc != 0 {
+			t.Fatalf("enqueue %s returned %d", ip, rc)
+		}
+	}
+	batch, err := rotateQueue(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, raw, malformed, err := readQueueFile(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if malformed != 0 || len(raw) != 2 {
+		t.Fatalf("initial batch lines=%d malformed=%d; want 2,0", len(raw), malformed)
+	}
+	now := time.Now().UTC()
+	checkpoint := &reportCheckpoint{
+		Version:   reportCheckpointVersion,
+		Remaining: raw[1:],
+		Dedupe: dedupeStore{Entries: map[string]string{
+			hashKey(firstIP): now.Format(time.RFC3339),
+		}},
+		Daily: dailyUsage{Day: now.Format("2006-01-02"), Attempts: 1},
+	}
+	if err := saveJSON(checkpointPath(env.c), checkpoint, 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	var reported []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+		reported = append(reported, r.Form.Get("ip"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	env.c.AbuseIPDB.ReportURL = server.URL
+	if rc := cmdReportSendAuto(env.c); rc != 0 {
+		t.Fatalf("reporter returned %d", rc)
+	}
+	if len(reported) != 1 || reported[0] != secondIP {
+		t.Fatalf("reported IPs=%v; want only %s", reported, secondIP)
+	}
+	if _, err := os.Stat(checkpointPath(env.c)); !os.IsNotExist(err) {
+		t.Fatalf("checkpoint still exists: %v", err)
+	}
+	daily, err := loadDaily(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if daily.Attempts != 2 {
+		t.Fatalf("daily attempts=%d; want 2", daily.Attempts)
+	}
+}
+
+func TestReporterStopsOnInvalidCheckpoint(t *testing.T) {
+	env := newReportTestEnv(t)
+	if rc := cmdEnqueue(env.c, validProbe("192.0.2.10")); rc != 0 {
+		t.Fatalf("enqueue returned %d", rc)
+	}
+	if err := os.WriteFile(checkpointPath(env.c), []byte(`{"version":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	env.c.AbuseIPDB.ReportURL = server.URL
+
+	if rc := cmdReportSendAuto(env.c); rc == 0 {
+		t.Fatal("reporter accepted an invalid checkpoint")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("API calls=%d; want 0", calls.Load())
+	}
+	items, _, malformed, err := readQueueFile(queuePath(env.c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if malformed != 0 || len(items) != 1 {
+		t.Fatalf("original queue items=%d malformed=%d; want 1,0", len(items), malformed)
+	}
+	if _, err := os.Stat(checkpointPath(env.c)); err != nil {
+		t.Fatalf("invalid checkpoint was not retained: %v", err)
 	}
 }
 
