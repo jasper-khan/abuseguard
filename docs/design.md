@@ -36,7 +36,7 @@ fail2ban decides "should I skip this candidate?" via `ignorecommand`. The exit c
 
 - `intel-ignore --ip X`: exit **1 = ban** (X is on the intel list and not whitelisted), exit **0 = ignore**. This makes the intel jail ban *only* known-bad IPs even though its filter matches every request to a protected site.
 - `unknown-ignore --ip X`: exit **1 = ban** (not whitelisted), exit **0 = ignore** (whitelisted). Used by the Web rate/probe jails and `sshd`.
-- `allowlist-check --ip X`: exit **0 = intersects allowlist**, **1 = no intersection**, **2 = input/config/allowlist error**. The panel permits a manual IP/CIDR ban only for exit 1; even partial CIDR overlap is rejected.
+- `allowlist-check --ip X`: exit **0 = whitelisted**, **1 = not whitelisted**, **2 = input/config/allowlist error**. The panel permits a manual single-IP ban only for exit 1; CIDR ban targets are rejected while the allowlist continues to support CIDRs.
 
 The whitelist is a single file of IPs/CIDRs (`#` comments and inline annotations are tolerated). Panel changes use the engine's parser to validate the complete candidate file and atomically replace the whitelist only after it passes. A read or parse error makes an ignore command skip the candidate rather than risk a false ban; the reporter likewise stops without sending rather than risk reporting a whitelisted IP.
 

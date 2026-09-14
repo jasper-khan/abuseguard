@@ -167,11 +167,12 @@ act_ban() {
 	read -r -p "输入要立即封禁的 IP（留空取消）: " ip
 	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
 	[ -z "$ip" ] && return
+	case "$ip" in */*) echo "  手动封禁仅支持单个 IPv4/IPv6 地址，不支持网段。"; pause; return ;; esac
 	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
 	allow_status=0
 	"$ENGINE" allowlist-check --ip "$ip" >/dev/null 2>&1 || allow_status=$?
 	case "$allow_status" in
-		0) echo "  该 IP 或网段与白名单重叠，不能封禁。"; pause; return ;;
+		0) echo "  该 IP 已在白名单中，不能封禁。"; pause; return ;;
 		1) ;;
 		*) echo "  无法可靠检查白名单，已取消封禁。"; pause; return ;;
 	esac

@@ -87,28 +87,3 @@ func (a *Allowlist) Contains(ipStr string) bool {
 	}
 	return false
 }
-
-// Overlaps reports whether an IP or CIDR entry intersects any allowlist
-// entry. A CIDR target is considered covered when it overlaps even one
-// allowlisted address or network, because callers may reject banning the
-// entire target range safely.
-func (a *Allowlist) Overlaps(entry string) (bool, error) {
-	ip, network, err := parseAllowlistEntry(strings.TrimSpace(entry))
-	if err != nil {
-		return false, err
-	}
-	if network == nil {
-		return a.Contains(ip.String()), nil
-	}
-	for _, x := range a.ips {
-		if network.Contains(x) {
-			return true, nil
-		}
-	}
-	for _, n := range a.nets {
-		if n.Contains(network.IP) || network.Contains(n.IP) {
-			return true, nil
-		}
-	}
-	return false, nil
-}

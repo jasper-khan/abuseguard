@@ -42,7 +42,7 @@ func main() {
 }
 
 func usage() {
-	logf("subcommands: enqueue | report send-auto | sync-intel | intel-ignore --ip <ip> | unknown-ignore --ip <ip> | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP/CIDR> | version")
+	logf("subcommands: enqueue | report send-auto | sync-intel | intel-ignore --ip <ip> | unknown-ignore --ip <ip> | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | version")
 }
 
 func mustConfig() *Config {
@@ -156,14 +156,13 @@ func runAllowlistValidate(args []string) {
 // runAllowlistCheck is used by the root control panel before a manual ban.
 // Exit 0 means the IP is covered by the allowlist, 1 means it is not covered,
 // and 2 means the input or allowlist could not be read reliably. The command
-// accepts an IP or CIDR; a CIDR is covered when it overlaps any allowlist
-// address or network, so callers can reject the whole manual-ban target.
+// accepts a single IP; the allowlist itself may contain IPs and CIDRs.
 func runAllowlistCheck(args []string) {
 	fs := flag.NewFlagSet("allowlist-check", flag.ExitOnError)
 	ip := fs.String("ip", "", "IP address to check")
 	fs.Parse(args)
 	if *ip == "" || fs.NArg() != 0 {
-		logf("allowlist-check: specify exactly one --ip <IP/CIDR>")
+		logf("allowlist-check: specify exactly one --ip <IP>")
 		os.Exit(2)
 	}
 	c, err := loadConfig()
@@ -179,22 +178,16 @@ func runAllowlistCheck(args []string) {
 }
 
 // allowlistCheckCode maps the allowlist-check contract to process exit codes.
-// CIDR targets are checked for overlap rather than only testing their network
-// address, so a partial allowlist overlap is still treated as covered.
 func allowlistCheckCode(path, rawIP string) int {
-	ip := strings.TrimSpace(rawIP)
-	if ip == "" {
+	ip, network, err := parseAllowlistEntry(strings.TrimSpace(rawIP))
+	if err != nil || network != nil {
 		return 2
 	}
 	allow, err := loadAllowlist(path)
 	if err != nil {
 		return 2
 	}
-	overlaps, err := allow.Overlaps(ip)
-	if err != nil {
-		return 2
-	}
-	if overlaps {
+	if allow.Contains(ip.String()) {
 		return 0
 	}
 	return 1

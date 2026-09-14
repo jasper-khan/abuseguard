@@ -135,7 +135,7 @@ Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/ca
 | `sshd` (enabled on install) | SSH authentication failures | the jail's effective thresholds | any non-whitelisted IP + queued for report |
 | `sshd-intel` (enabled on install) | SSH authentication filter match | 1 hit | only IPs on the threat-intel list |
 
-All six jails ban for 90 days using the same all-port, all-protocol action. The `sshd` jail keeps the system's log source, backend, and detection thresholds (Fail2Ban defaults when not customized). IPs on `/etc/caddy-abuseguard/whitelist` are never banned or reported by AbuseGuard. Manual bans also check the allowlist and reject a CIDR if any part overlaps an allowlisted address or network. Each jail tracks bans independently, so one jail's unban cannot undo another jail's active ban; the panel unbans across all jails. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
+All six jails ban for 90 days using the same all-port, all-protocol action. The `sshd` jail keeps the system's log source, backend, and detection thresholds (Fail2Ban defaults when not customized). IPs on `/etc/caddy-abuseguard/whitelist` are never banned or reported by AbuseGuard. Manual bans also check the allowlist and accept only single IPv4/IPv6 addresses; allowlist entries still support CIDRs. Each jail tracks bans independently, so one jail's unban cannot undo another jail's active ban; the panel unbans across all jails. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
 
 Newly generated Caddy configurations enable only HTTP/1.1 and HTTP/2, leaving UDP/443 available for other services. Global source-IP bans do not occupy any port.
 

@@ -32,6 +32,9 @@ for ip in 192.0.2.10 192.0.2.0/24 2001:db8:1::1 2001:db8::/32; do
 	[ ! -s "$TMP/calls" ] || fail "whitelisted address/network reached banip: $ip"
 done
 : > "$TMP/calls"
+act_ban <<< '198.51.100.0/24' >/dev/null
+[ ! -s "$TMP/calls" ] || fail 'unsupported CIDR target reached banip'
+: > "$TMP/calls"
 act_ban <<< '198.51.100.10' >/dev/null
 grep -qx 'set caddy-intel banip 198.51.100.10' "$TMP/calls" || fail "non-whitelisted IP was not banned"
 printf 'invalid-whitelist\n' > "$TMP/whitelist"
