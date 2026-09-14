@@ -33,7 +33,9 @@ jobs:
           go build ./...
           go vet ./...
       - name: Verify review fixes
-        run: bash ./scripts/test-review-fixes.sh
+        run: |
+          bash ./scripts/test-review-fixes.sh
+          bash ./scripts/test-ban-policy.sh
       - name: Cross-compile the release targets
         working-directory: engine
         run: |

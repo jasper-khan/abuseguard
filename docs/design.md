@@ -25,17 +25,18 @@ During install or update, protected single-domain site blocks found in the main 
 
 1. A request hits a site with `import abuseguard`. Caddy appends `caddy_abuseguard_site=protected`, and if the path looks like a scan, `caddy_abuseguard_probe=web-probe`, then logs `{ts, client_ip, proto, ...tags}`.
 2. fail2ban filters match on those tags (order-independent JSON lookaheads).
-3. On enough hits within the window, the jail's `nftables` action drops direct-origin traffic from that IP on tcp/80+443 for 90 days.
+3. On enough hits within the window, the jail's `caddy-abuseguard-drop` action drops direct-origin traffic from that source IP on all ports and protocols for 90 days. It inherits Fail2Ban's nftables action with no protocol/port matcher. Independent per-jail address sets prevent an unban in one jail from undoing another jail's active ban.
 4. The probe jails additionally run `enqueue`, appending the offender to the report queue. The rate jail remains a local firewall ban only.
 
-The installer also extends the existing `[sshd]` jail with `%(known/action)s` plus the same queue action. This preserves that jail's effective action, enabled state, port, thresholds, and ban time. Caddy's JSON `datepattern` is scoped to the four Caddy jails so it cannot replace `sshd`'s system-log date detection. An SSH ban queues only the IP, failure count, effective find window, `ssh-bruteforce` profile, and timestamp; raw authentication matches and usernames never enter the report queue.
+The installer enables `[sshd]`, using the same global ban action and allowlist as the Web jails, plus the queue action. It keeps the system's SSH log/backend and detection thresholds, and sets the ban time to 90 days. A second `[sshd-intel]` jail uses the SSH filter with `maxretry=1` and the shared intel-ignore command; intel-only bans are not reported. Caddy's JSON `datepattern` is scoped to the four Caddy jails so it cannot replace SSH system-log date detection. A brute-force ban queues only the IP, failure count, effective find window, `ssh-bruteforce` profile, and timestamp; raw authentication matches and usernames never enter the report queue.
 
 ## Ignore-command contract (engine ↔ fail2ban)
 
 fail2ban decides "should I skip this candidate?" via `ignorecommand`. The exit code is the contract:
 
 - `intel-ignore --ip X`: exit **1 = ban** (X is on the intel list and not whitelisted), exit **0 = ignore**. This makes the intel jail ban *only* known-bad IPs even though its filter matches every request to a protected site.
-- `unknown-ignore --ip X`: exit **1 = ban** (not whitelisted), exit **0 = ignore** (whitelisted). Used by the rate/probe jails.
+- `unknown-ignore --ip X`: exit **1 = ban** (not whitelisted), exit **0 = ignore** (whitelisted). Used by the Web rate/probe jails and `sshd`.
+- `allowlist-check --ip X`: exit **0 = intersects allowlist**, **1 = no intersection**, **2 = input/config/allowlist error**. The panel permits a manual IP/CIDR ban only for exit 1; even partial CIDR overlap is rejected.
 
 The whitelist is a single file of IPs/CIDRs (`#` comments and inline annotations are tolerated). Panel changes use the engine's parser to validate the complete candidate file and atomically replace the whitelist only after it passes. A read or parse error makes an ignore command skip the candidate rather than risk a false ban; the reporter likewise stops without sending rather than risk reporting a whitelisted IP.
 
@@ -50,9 +51,13 @@ The whitelist is a single file of IPs/CIDRs (`#` comments and inline annotations
 | Profile | Evidence source | AbuseIPDB categories | Public comment fields |
 | --- | --- | --- | --- |
 | `web-probe` | five tagged sensitive-path requests within the Caddy probe jail window | `21` | standardized behavior, count, window, HTTP protocol |
-| `ssh-bruteforce` | a ban event from the existing fail2ban `sshd` jail | `18,22` | standardized behavior, count, window |
+| `ssh-bruteforce` | a ban event from the enabled fail2ban `sshd` jail | `18,22` | standardized behavior, count, window |
 
 Request-rate bans, threat-intel hits, and manual bans never enqueue reports. One short filesystem lock atomically rotates `queue.jsonl` into a processing batch; new `enqueue` calls then write a fresh queue while the batch is sent. A separate reporter lock prevents two flushers from processing the same batch. The reporter strictly loads the whitelist and its dedupe/daily state before sending, skips whitelisted IPs, and honors `daily_report_cap`. After each confirmed 2xx response, one atomic checkpoint records the remaining batch, dedupe state, and daily usage; an interrupted run replays that checkpoint before sending again, so a confirmed report is not repeated. AbuseIPDB's duplicate window is per IP rather than per category: a later queued event for the same IP is retained and retried after `dedupe_window` instead of being discarded. Network failures and responses that end before an HTTP status is known remain queued because the remote result is uncertain. 401/403, 429, 5xx, and unexpected statuses likewise keep the unprocessed batch and return failure. Record-specific 400/422 responses and malformed queue lines are logged and discarded so later valid records can proceed; the run still returns failure so systemd exposes the problem.
+
+Report deduplication records the time of each confirmed successful response,
+and checks the current time for each subsequent queued item. Daily accounting
+also rolls over at UTC midnight during a long-running batch.
 
 ## Privacy
 

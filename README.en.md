@@ -12,15 +12,15 @@ One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS modul
 visitor ─▶ Caddy (protected site: `import abuseguard`)
              │  writes a privacy-trimmed JSON access log
              ▼
-         fail2ban ──(matches)──▶ nftables DROP :80/:443   ← direct-origin ban
+         fail2ban ──(matches)──▶ nftables source-IP DROP on all ports/protocols
              │
              └─(sensitive-path probe)─▶ engine enqueue ─▶ report queue ──(timer)──▶ AbuseIPDB
 
-sshd/auth.log ─▶ existing fail2ban sshd jail ──(authentication brute force)───────┘
+sshd/auth.log ─▶ sshd / sshd-intel ──(brute force / intel hit)──▶ same global source-IP ban
 ```
 
 - Caddy tags each request to a protected site and logs only what fail2ban needs (client IP, protocol, tags) — no paths, hosts, headers, or query strings.
-- fail2ban runs four jails against the Caddy log; direct-origin bans are enforced with nftables (drop on tcp/80+443). AbuseGuard only appends a privacy-safe reporting action to the existing `sshd` jail; it does not replace that jail's ban settings.
+- Installation enables four Web jails and two SSH jails sharing the same allowlist and threat-intel list. A ban from any jail drops that source IP on every port and protocol at the origin, including SSH.
 - A Go engine (stdlib only, single static binary) makes the ban/ignore decisions, keeps the threat-intel list fresh, and flushes queued reports.
 
 ## Requirements
@@ -43,7 +43,7 @@ sudo ./install.sh                 # download the prebuilt engine from the latest
 sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
 ```
 
-The installer is idempotent: existing config, whitelist, key, and unrelated Caddy configuration are preserved. Protected AbuseGuard sites from an older release, or sites written directly in the main Caddyfile, are migrated to the canonical `/etc/caddy/sites/<domain>.caddy` layout with `import abuseguard`; the complete migrated configuration must validate before it takes effect.
+The installer is idempotent: existing config, whitelist, key, and unrelated Caddy configuration are preserved. Protected AbuseGuard sites from an older release, or sites written directly in the main Caddyfile, are migrated to the canonical `/etc/caddy/sites/<domain>.caddy` layout with `import abuseguard`. The main config, existing sites, and protection snippet are prepared in candidate copies and validated together before replacement; a failed replacement rolls back the originals.
 
 The installer supplies runtime dependencies such as `fail2ban`, `rsyslog`, and `nftables` automatically. `rsyslog` provides `/var/log/auth.log` for the Debian/Ubuntu default `sshd` jail; AbuseGuard's web protection continues to use its separate Caddy JSON log. A Cloudflare token already present in a running Caddy service is written safely to AbuseGuard's `/etc/caddy/.env` and is never printed.
 
@@ -132,9 +132,12 @@ Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/ca
 | `caddy-rate-local` | any request to a protected site | 120 in 60s | any non-whitelisted IP (local ban only) |
 | `caddy-probe-h1` | HTTP/1.1 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
 | `caddy-probe-h2` | HTTP/2 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
-| existing system `sshd` | SSH authentication failures | the jail's effective settings | existing ban action unchanged + queued for report |
+| `sshd` (enabled on install) | SSH authentication failures | the jail's effective thresholds | any non-whitelisted IP + queued for report |
+| `sshd-intel` (enabled on install) | SSH authentication filter match | 1 hit | only IPs on the threat-intel list |
 
-The four Caddy jails ban for 90 days. The `sshd` jail keeps the machine's existing port, thresholds, ban time, and action. IPs on `/etc/caddy-abuseguard/whitelist` are never banned or reported by AbuseGuard. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
+All six jails ban for 90 days using the same all-port, all-protocol action. The `sshd` jail keeps the system's log source, backend, and detection thresholds (Fail2Ban defaults when not customized). IPs on `/etc/caddy-abuseguard/whitelist` are never banned or reported by AbuseGuard. Manual bans also check the allowlist and reject a CIDR if any part overlaps an allowlisted address or network. Each jail tracks bans independently, so one jail's unban cannot undo another jail's active ban; the panel unbans across all jails. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
+
+Newly generated Caddy configurations enable only HTTP/1.1 and HTTP/2, leaving UDP/443 available for other services. Global source-IP bans do not occupy any port.
 
 ## Threat intel
 
@@ -142,7 +145,7 @@ The intel jail bans nothing until the list is synced. The engine pulls a public 
 
 ## AbuseIPDB reporting (optional)
 
-Reporting is enabled in the config by default, but events are queued only after an API key is set. Sensitive-path probes are fixed to category `21` (Web App Attack); authentication brute-force bans from the existing `sshd` jail are fixed to `18,22` (Brute-Force + SSH). Request-rate bans, threat-intel hits, and manual panel bans remain local only.
+Reporting is enabled in the config by default, but events are queued only after an API key is set. Sensitive-path probes are fixed to category `21` (Web App Attack); authentication brute-force bans from the `sshd` jail are fixed to `18,22` (Brute-Force + SSH). Request-rate bans, Web/SSH threat-intel hits, and manual panel bans remain local only.
 
 Public comments contain only a standardized behavior, the observed count and detection window, plus the HTTP protocol for web events. They never name AbuseGuard or include a host, exact path, query, headers, request body, user agent, SSH username, or raw log. Reports honor AbuseIPDB's per-IP 15-minute window; a later event for the same IP stays queued until eligible instead of being discarded. The daily cap remains 1000. A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue. An unreadable allowlist or corrupt state stops the flush; temporary API failures keep records for retry. The flush runs every 10m. Toggle external reporting with panel → 11; this never disables local bans.
 
@@ -176,7 +179,7 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 /etc/caddy-abuseguard/config.json             engine config
 /etc/caddy-abuseguard/whitelist               never-ban list
 /etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key (optional)
-/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  appends reporting to the existing sshd jail
+/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  enables SSH protection, intel detection, reporting
 /var/lib/caddy-abuseguard/                     intel list + report queue/state
 /var/log/caddy/abuseguard-access.json         privacy-trimmed access log
 ```

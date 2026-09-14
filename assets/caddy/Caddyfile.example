@@ -8,6 +8,7 @@
 # fresh Caddyfile. If you manage your own Caddyfile, copy the block below.
 {
 	servers {
+		protocols h1 h2
 		trusted_proxies static 127.0.0.1/8
 		trusted_proxies_strict
 	}

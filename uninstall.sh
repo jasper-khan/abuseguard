@@ -210,6 +210,7 @@ remove_file /etc/fail2ban/filter.d/caddy-abuseguard-any.conf
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h1.conf
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h2.conf
 remove_file /etc/fail2ban/action.d/caddy-abuseguard-queue.conf
+remove_file /etc/fail2ban/action.d/caddy-abuseguard-drop.conf
 remove_file "$ENGINE_BIN"
 remove_file "$PANEL_BIN"
 remove_file "$SNIPPET"

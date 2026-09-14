@@ -12,15 +12,15 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
 访客 ─▶ Caddy（受保护站点：`import abuseguard`）
              │  写入隐私精简的 JSON 访问日志
              ▼
-         fail2ban ──(命中)──▶ nftables DROP :80/:443   ← 直连源站封禁
+         fail2ban ──(命中)──▶ nftables 按源 IP DROP 全部端口/协议
              │
              └─(敏感路径探测)─▶ 引擎入队 ─▶ 上报队列 ──(定时器)──▶ AbuseIPDB
 
-sshd/auth.log ─▶ fail2ban 的现有 sshd jail ──(认证爆破)──────────────┘
+sshd/auth.log ─▶ sshd / sshd-intel ──(认证爆破 / 情报命中)──▶ 同样的全入口封禁
 ```
 
 - Caddy 为每个到受保护站点的请求打标签，只记录 fail2ban 所需的字段（客户端 IP、协议、标签）——不记录路径、主机名、请求头或查询串。
-- fail2ban 针对 Caddy 日志运行四个 jail；直连源站的封禁由 nftables 执行（对 tcp/80+443 丢弃）。AbuseGuard 只给系统现有的 `sshd` jail 追加脱敏上报动作，不改变其封禁配置。
+- 安装时启用四个 Web jail 和两个 SSH jail，共用白名单和威胁情报名单。任一 jail 封禁某个 IP 后，nftables 会拦截该源 IP 到本机所有端口、所有协议的流量，包括 SSH。
 - 一个 Go 引擎（仅用标准库、单个静态二进制）负责封禁/放行判定、保持威胁情报名单新鲜、并冲刷上报队列。
 
 ## 环境要求
@@ -43,7 +43,7 @@ sudo ./install.sh                 # 从最新 release 下载预编译引擎
 sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go）
 ```
 
-安装器是幂等的：已有的 config、whitelist、key 和无关 Caddy 配置都会保留。旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；迁移后的完整配置必须校验通过才会生效。
+安装器是幂等的：已有的 config、whitelist、key 和无关 Caddy 配置都会保留。旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；主配置、已有站点和防护片段先在候选副本上处理，完整配置通过校验后才替换正式文件，替换失败会回滚。
 
 安装器会自动补齐 `fail2ban`、`rsyslog`、`nftables` 等运行依赖；`rsyslog` 为 Debian/Ubuntu 默认的 `sshd` jail 提供 `/var/log/auth.log`，AbuseGuard 的网站防护仍使用独立的 Caddy JSON 日志。已有 Caddy 服务中的 Cloudflare token 会安全写入 AbuseGuard 的 `/etc/caddy/.env`，不会在终端显示。
 
@@ -100,9 +100,12 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 | `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 120 次 | 任意非白名单 IP（仅本地封禁） |
 | `caddy-probe-h1` | 用 HTTP/1.1 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 | `caddy-probe-h2` | 用 HTTP/2 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
-| 系统现有 `sshd` | SSH 认证失败 | 沿用该 jail 的实际配置 | 原封禁动作不变 + 加入上报队列 |
+| `sshd`（安装时启用） | SSH 认证失败 | 沿用该 jail 的实际阈值 | 任意非白名单 IP + 加入上报队列 |
+| `sshd-intel`（安装时启用） | 命中 SSH 认证失败过滤器 | 命中 1 次 | 仅威胁情报名单上的 IP |
 
-四个 Caddy jail 的封禁时长为 90 天；`sshd` 继续沿用机器原有的端口、阈值、封禁时长和 action。白名单 IP（`/etc/caddy-abuseguard/whitelist`）永不被 AbuseGuard 封禁或上报。「敏感路径」= `/.env`、`/.git`、`/phpmyadmin`、`/vendor/phpunit`、`/cgi-bin`（及其子路径）。
+六个 jail 的封禁时长均为 90 天，使用相同的全端口、全协议封禁动作；`sshd` 沿用系统原有的日志来源、后端和检测阈值，未自定义时采用 fail2ban 的默认值。白名单 IP（`/etc/caddy-abuseguard/whitelist`）永不被 AbuseGuard 封禁或上报；手动封禁也检查白名单，输入网段与白名单有任何重叠时拒绝封禁。各 jail 独立记录封禁，某个 jail 解封不会撤销其他 jail 仍有效的封禁；面板解封会遍历所有 jail。「敏感路径」= `/.env`、`/.git`、`/phpmyadmin`、`/vendor/phpunit`、`/cgi-bin`（及其子路径）。
+
+首次生成的 Caddy 配置只启用 HTTP/1.1 和 HTTP/2，不监听 HTTP/3，UDP/443 可供其他服务使用。全入口封禁只针对被封禁的源 IP，不占用任何端口。
 
 ## 威胁情报
 
@@ -110,7 +113,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 ## AbuseIPDB 上报（可选）
 
-配置里上报默认开启，但只有设置 API key 后事件才会入队。敏感路径探测固定上报为类别 `21`（Web App Attack）；现有 `sshd` jail 产生的认证爆破封禁固定上报为 `18,22`（Brute-Force + SSH）。普通请求速率、情报名单命中和面板手动封禁只在本地处理，不对外举报。
+配置里上报默认开启，但只有设置 API key 后事件才会入队。敏感路径探测固定上报为类别 `21`（Web App Attack）；`sshd` jail 产生的认证爆破封禁固定上报为 `18,22`（Brute-Force + SSH）。普通请求速率、Web/SSH 情报名单命中和面板手动封禁只在本地处理，不对外举报。
 
 公开原因只写标准化行为、实际次数、检测窗口，以及 Web 事件的 HTTP 协议；不会出现 AbuseGuard 名称，也不包含主机名、具体路径、查询参数、请求头、请求正文、UA、SSH 用户名或原始日志。上报按 IP 遵守 15 分钟窗口；同一 IP 的后续不同事件在窗口内会留在队列延后发送，而不是丢弃。每天最多 1000 条。冲刷时会先把当前队列原子轮转为独立批次，因此发送期间新入队的记录会留在新队列。白名单无法可靠读取或状态文件损坏时，冲刷会停止并返回失败；临时 API 故障保留记录重试。冲刷每 10 分钟执行一次。要关闭外部举报，用面板 → 11；关闭上报不影响任何本地封禁。
 
@@ -144,7 +147,7 @@ example.com {
 /etc/caddy-abuseguard/config.json             引擎配置
 /etc/caddy-abuseguard/whitelist               永不封禁名单
 /etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key（可选）
-/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  为现有 sshd jail 追加上报动作
+/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  启用 SSH 防护、情报检测和上报
 /var/lib/caddy-abuseguard/                     情报名单 + 上报队列/状态
 /var/log/caddy/abuseguard-access.json         隐私精简的访问日志
 ```

@@ -13,7 +13,7 @@ CADDYFILE=/etc/caddy/Caddyfile
 SITES_DIR=/etc/caddy/sites
 STATE_DIR=/var/lib/caddy-abuseguard
 INTEL="$STATE_DIR/intel.txt"
-JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2"
+JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
 PANEL_REFRESH_SECONDS=10
 REPO_FILE="$CONF_DIR/repo"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" || echo jasper-khan/abuseguard )}"
@@ -163,12 +163,19 @@ act_unban() {
 }
 
 act_ban() {
-	local ip
+	local ip allow_status
 	read -r -p "输入要立即封禁的 IP（留空取消）: " ip
 	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
 	[ -z "$ip" ] && return
 	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
-	# 各 jail 共用同一条 nftables 封禁（drop 80/443），封任一 jail 即全局生效。
+	allow_status=0
+	"$ENGINE" allowlist-check --ip "$ip" >/dev/null 2>&1 || allow_status=$?
+	case "$allow_status" in
+		0) echo "  该 IP 或网段与白名单重叠，不能封禁。"; pause; return ;;
+		1) ;;
+		*) echo "  无法可靠检查白名单，已取消封禁。"; pause; return ;;
+	esac
+	# 任一 AbuseGuard jail 都按源 IP 拦截所有端口和协议。
 	# 用 caddy-intel：它只做防火墙 drop、不挂上报动作，手动封禁不会被自动上报到
 	# AbuseIPDB（probe jail 带 queue 动作，手动封会误报一个管理员本地拉黑的 IP）。
 	if fail2ban-client set caddy-intel banip "$ip" >/dev/null 2>&1; then

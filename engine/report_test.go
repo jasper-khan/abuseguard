@@ -627,6 +627,122 @@ func TestReporterDefersSecondProfileForSameIP(t *testing.T) {
 	}
 }
 
+func TestReporterUsesCurrentTimeForEachDedupeDecision(t *testing.T) {
+	env := newReportTestEnv(t)
+	firstIP := "192.0.2.10"
+	secondIP := "192.0.2.11"
+	for _, ip := range []string{firstIP, secondIP, firstIP} {
+		if rc := cmdEnqueue(env.c, validProbe(ip)); rc != 0 {
+			t.Fatalf("enqueue %s returned %d", ip, rc)
+		}
+	}
+
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := saveJSON(dedupePath(env.c), &dedupeStore{Entries: map[string]string{
+		hashKey(firstIP): start.Add(-30 * time.Second).Format(time.RFC3339),
+	}}, 0640); err != nil {
+		t.Fatal(err)
+	}
+	env.c.AbuseIPDB.DedupeWindow = "1m"
+
+	clock := atomic.Int64{}
+	clock.Store(start.Unix())
+	previousNow := reportNow
+	reportNow = func() time.Time { return time.Unix(clock.Load(), 0).UTC() }
+	defer func() { reportNow = previousNow }()
+
+	var reported []string
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+		reported = append(reported, r.Form.Get("ip"))
+		if calls.Add(1) == 1 {
+			// The first request is deliberately slow. Its success timestamp
+			// must advance, and the later duplicate must be checked against it.
+			clock.Add(70)
+		} else {
+			clock.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	env.c.AbuseIPDB.ReportURL = server.URL
+
+	if rc := cmdReportSendAuto(env.c); rc != 0 {
+		t.Fatalf("reporter returned %d", rc)
+	}
+	if len(reported) != 2 || reported[0] != secondIP || reported[1] != firstIP {
+		t.Fatalf("reported IPs=%v; want [%s %s]", reported, secondIP, firstIP)
+	}
+
+	dedupe, err := loadDedupe(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dedupe.Entries[hashKey(secondIP)]; got != start.Add(70*time.Second).Format(time.RFC3339) {
+		t.Fatalf("second IP dedupe timestamp=%q; want %q", got, start.Add(70*time.Second).Format(time.RFC3339))
+	}
+	if got := dedupe.Entries[hashKey(firstIP)]; got != start.Add(71*time.Second).Format(time.RFC3339) {
+		t.Fatalf("first IP dedupe timestamp=%q; want %q", got, start.Add(71*time.Second).Format(time.RFC3339))
+	}
+	daily, err := loadDaily(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if daily.Attempts != 2 {
+		t.Fatalf("daily attempts=%d; want 2", daily.Attempts)
+	}
+}
+
+func TestReporterResetsDailyUsageAfterUtcMidnight(t *testing.T) {
+	env := newReportTestEnv(t)
+	ip := "192.0.2.10"
+	if rc := cmdEnqueue(env.c, validProbe(ip)); rc != 0 {
+		t.Fatalf("enqueue returned %d", rc)
+	}
+	start := time.Date(2026, 1, 1, 23, 59, 59, 0, time.UTC)
+	if err := saveJSON(dailyPath(env.c), &dailyUsage{
+		Day:      start.Format("2006-01-02"),
+		Attempts: 1,
+	}, 0640); err != nil {
+		t.Fatal(err)
+	}
+	clock := atomic.Int64{}
+	clock.Store(start.Unix())
+	previousNow := reportNow
+	reportNow = func() time.Time { return time.Unix(clock.Load(), 0).UTC() }
+	defer func() { reportNow = previousNow }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// The request starts on the old UTC day and succeeds after midnight.
+		clock.Add(2)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	env.c.AbuseIPDB.ReportURL = server.URL
+	env.c.AbuseIPDB.DailyReportCap = 2
+
+	if rc := cmdReportSendAuto(env.c); rc != 0 {
+		t.Fatalf("reporter returned %d", rc)
+	}
+	daily, err := loadDaily(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if daily.Day != "2026-01-02" || daily.Attempts != 1 {
+		t.Fatalf("daily usage=%+v; want day 2026-01-02 with one attempt", *daily)
+	}
+	dedupe, err := loadDedupe(env.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dedupe.Entries[hashKey(ip)]; got != start.Add(2*time.Second).Format(time.RFC3339) {
+		t.Fatalf("dedupe timestamp=%q; want %q", got, start.Add(2*time.Second).Format(time.RFC3339))
+	}
+}
+
 func TestReporterLogsAndDropsMalformedQueueLine(t *testing.T) {
 	env := newReportTestEnv(t)
 	if rc := cmdEnqueue(env.c, validProbe("192.0.2.10")); rc != 0 {

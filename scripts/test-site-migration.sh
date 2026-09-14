@@ -132,4 +132,103 @@ if bash "$MIGRATOR" "$TMP/conflict" "$TMP/conflict.out" "$TMP/conflict-sites" "$
 	exit 1
 fi
 
+# The installer must not modify existing Caddy files before the full candidate
+# validates, and a failure while installing the final Caddyfile must restore
+# every site file already touched by the commit loop.
+FUNCTIONS="$TMP/install-migration-functions.sh"
+extract_function() {
+	local name="$1"
+	awk -v signature="$name() {" '
+		index($0, signature) == 1 { printing = 1 }
+		printing { print }
+		printing && /^}$/ { exit }
+	' "$ROOT/install.sh"
+}
+for name in cleanup_temp_tree normalize_caddy_file ensure_site_protected migration_abort migrate_caddy_sites; do
+	extract_function "$name" >> "$FUNCTIONS"
+done
+
+mkdir -p "$TMP/transaction/etc/sites"
+cat > "$TMP/transaction/etc/Caddyfile" <<EOF
+import $TMP/transaction/etc/abuseguard.caddy
+import $TMP/transaction/etc/sites/*.caddy
+EOF
+cat > "$TMP/transaction/etc/sites/example.com.caddy" <<'EOF'
+example.com {
+	import ../common.conf
+	reverse_proxy 127.0.0.1:8080
+}
+EOF
+printf 'header X-Test "candidate-relative-import"\n' > "$TMP/transaction/etc/common.conf"
+printf 'original snippet\n' > "$TMP/transaction/etc/abuseguard.caddy"
+cat > "$TMP/caddy-mock" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = fmt ]
+EOF
+chmod 0755 "$TMP/caddy-mock"
+cp -- "$TMP/transaction/etc/Caddyfile" "$TMP/transaction/Caddyfile.original"
+cp -- "$TMP/transaction/etc/sites/example.com.caddy" "$TMP/transaction/site.original"
+cp -- "$TMP/transaction/etc/abuseguard.caddy" "$TMP/transaction/snippet.original"
+
+run_migration() {
+	local validation="$1" fail_target="${2:-}"
+	VALIDATE_RESULT="$validation" FAIL_TARGET="$fail_target" \
+	CADDYFILE="$TMP/transaction/etc/Caddyfile" \
+	CADDY_ETC="$TMP/transaction/etc" \
+		SITES_DIR="$TMP/transaction/etc/sites" \
+		CADDY_BIN="$TMP/caddy-mock" \
+		SRC_DIR="$ROOT" \
+		SNIPPET="$TMP/transaction/etc/abuseguard.caddy" \
+		bash --noprofile --norc -c '
+		set -uo pipefail
+		source "$1"
+		log() { :; }
+		warn() { :; }
+		die() { exit 1; }
+		validate_caddyfile() {
+			local candidate_import
+			[ "${VALIDATE_RESULT:-ok}" = ok ] || return 1
+			! grep -Fq "import $SNIPPET" "$1"
+			! grep -Fq "import $SITES_DIR" "$1"
+			candidate_import="$(grep -E "^import .*/sites/\\*\\.caddy\$" "$1" | head -n1 | cut -d" " -f2)"
+			[ -n "$candidate_import" ] && [ -f "${candidate_import%/*}/../common.conf" ]
+		}
+		install() {
+			if [ "${1:-}" = -d ]; then
+				shift
+				while [ "${1:-}" = -m ]; do shift 2; done
+				command mkdir -p "$@"
+				return
+			fi
+			local target="${!#}"
+			[ -z "${FAIL_TARGET:-}" ] || [ "$target" != "$FAIL_TARGET" ] || return 1
+			command install "$@"
+		}
+		migrate_caddy_sites "$CADDYFILE"
+	' _ "$FUNCTIONS"
+}
+
+if run_migration fail; then
+	echo "expected candidate validation to fail" >&2
+	exit 1
+fi
+cmp "$TMP/transaction/Caddyfile.original" "$TMP/transaction/etc/Caddyfile"
+cmp "$TMP/transaction/site.original" "$TMP/transaction/etc/sites/example.com.caddy"
+cmp "$TMP/transaction/snippet.original" "$TMP/transaction/etc/abuseguard.caddy"
+
+run_migration ok
+grep -q '^[[:space:]]*import abuseguard$' "$TMP/transaction/etc/sites/example.com.caddy"
+cmp "$ROOT/assets/caddy/abuseguard.caddy" "$TMP/transaction/etc/abuseguard.caddy"
+
+cp -- "$TMP/transaction/Caddyfile.original" "$TMP/transaction/etc/Caddyfile"
+cp -- "$TMP/transaction/site.original" "$TMP/transaction/etc/sites/example.com.caddy"
+cp -- "$TMP/transaction/snippet.original" "$TMP/transaction/etc/abuseguard.caddy"
+if run_migration ok "$TMP/transaction/etc/Caddyfile"; then
+	echo "expected final Caddyfile install to fail" >&2
+	exit 1
+fi
+cmp "$TMP/transaction/Caddyfile.original" "$TMP/transaction/etc/Caddyfile"
+cmp "$TMP/transaction/site.original" "$TMP/transaction/etc/sites/example.com.caddy"
+cmp "$TMP/transaction/snippet.original" "$TMP/transaction/etc/abuseguard.caddy"
+
 echo "site migration tests: pass"

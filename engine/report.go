@@ -31,6 +31,11 @@ type reportCheckpoint struct {
 	Daily     dailyUsage  `json:"daily"`
 }
 
+// reportNow is a small seam for deterministic tests. In production it always
+// returns the current UTC time; report decisions must not share one timestamp
+// across a slow batch.
+var reportNow = func() time.Time { return time.Now().UTC() }
+
 func dedupePath(c *Config) string { return c.Paths.ReportsDir + "/.dedupe.json" }
 func dailyPath(c *Config) string  { return c.Paths.ReportsDir + "/.daily-usage.json" }
 func checkpointPath(c *Config) string {
@@ -92,12 +97,16 @@ func loadDaily(c *Config) (*dailyUsage, error) {
 	if err := validateDaily(u); err != nil {
 		return nil, err
 	}
-	today := time.Now().UTC().Format("2006-01-02")
+	resetDailyFor(reportNow(), u)
+	return u, nil
+}
+
+func resetDailyFor(now time.Time, u *dailyUsage) {
+	today := now.UTC().Format("2006-01-02")
 	if u.Day != today {
 		u.Day = today
 		u.Attempts = 0
 	}
-	return u, nil
 }
 
 // applyCheckpoint is idempotent. The checkpoint stays in place until the
@@ -237,8 +246,6 @@ func cmdReportSendAuto(c *Config) int {
 	if dailyCap <= 0 {
 		dailyCap = 1000
 	}
-	now := time.Now().UTC()
-
 	var remaining []string
 	sent, skipped, deferred, dropped := 0, 0, 0, 0
 	hadError := malformed > 0
@@ -246,6 +253,8 @@ func cmdReportSendAuto(c *Config) int {
 
 reportLoop:
 	for idx, it := range items {
+		itemNow := reportNow()
+		resetDailyFor(itemNow, daily)
 		if !isReportableIP(it.IP) {
 			logf("report: invalid or non-public IP %q discarded", it.IP)
 			dropped++
@@ -265,7 +274,7 @@ reportLoop:
 		}
 		k := hashKey(it.IP)
 		if ts, ok := dedupe.Entries[k]; ok {
-			if t, err := time.Parse(time.RFC3339, ts); err == nil && now.Sub(t) < window {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil && itemNow.Sub(t) < window {
 				remaining = append(remaining, raw[idx])
 				deferred++
 				continue // AbuseIPDB accepts the same IP again after the window
@@ -295,7 +304,9 @@ reportLoop:
 			hadError = true
 			break reportLoop
 		}
-		dedupe.Entries[k] = now.Format(time.RFC3339)
+		reportedAt := reportNow()
+		resetDailyFor(reportedAt, daily)
+		dedupe.Entries[k] = reportedAt.Format(time.RFC3339)
 		daily.Attempts++
 		sent++
 		checkpointRemaining := make([]string, 0, len(remaining)+len(raw)-idx-1)
@@ -308,8 +319,9 @@ reportLoop:
 	}
 
 	// prune dedupe entries older than 48h
+	pruneNow := reportNow()
 	for k, ts := range dedupe.Entries {
-		if t, err := time.Parse(time.RFC3339, ts); err == nil && now.Sub(t) > 48*time.Hour {
+		if t, err := time.Parse(time.RFC3339, ts); err == nil && pruneNow.Sub(t) > 48*time.Hour {
 			delete(dedupe.Entries, k)
 		}
 	}

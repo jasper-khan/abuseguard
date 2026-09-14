@@ -339,7 +339,6 @@ if [ -n "$SUMS_FILE" ]; then rm -f "$SUMS_FILE"; SUMS_FILE=""; trap - EXIT; fi
 setcap 'cap_net_bind_service=+ep' "$CADDY_BIN" || warn "setcap 失败；Caddy 绑定 :80/:443 可能需要 root"
 
 # --- Caddy snippet + env + systemd unit --------------------------------------
-install -m 0644 "$SRC_DIR/assets/caddy/abuseguard.caddy" "$SNIPPET"
 # Protected sites live here, one <domain>.caddy each. The
 # placeholder keeps `import sites/*.caddy` matching at least one file (an empty
 # glob would fail Caddyfile adaptation).
@@ -404,6 +403,7 @@ if [ ! -f "$CADDYFILE" ]; then
 # 全局块信任你的边缘代理，使 client_ip 为真实访客 IP（用于检测/上报）。
 {
 	servers {
+		protocols h1 h2
 		trusted_proxies static 127.0.0.1/8 ::1 ${CF_RANGES}
 		trusted_proxies_strict
 	}
@@ -467,7 +467,7 @@ normalize_caddy_file() {
 	local file="$1"
 	[ -f "$file" ] || return 0
 	sed -i -E '/^[[:space:]]*header_up[[:space:]]+X-Forwarded-Host[[:space:]]+\{(host|http\.request\.host)\}[[:space:]]*$/d' "$file"
-	"$CADDY_BIN" fmt --overwrite "$file" >/dev/null || die "无法格式化 Caddy 配置：$file"
+	"$CADDY_BIN" fmt --overwrite "$file" >/dev/null || { warn "无法格式化 Caddy 配置：$file"; return 1; }
 }
 
 # A conservative uninstall keeps managed site files but removes this import.
@@ -489,7 +489,8 @@ ensure_site_protected() {
 		END { if (!inserted) exit 1 }
 	' "$file" > "$tmp"; then
 		rm -f "$tmp"
-		die "无法为现有站点恢复 AbuseGuard 防护：$file"
+		warn "无法为现有站点恢复 AbuseGuard 防护：$file"
+		return 1
 	fi
 	install -m 0644 "$tmp" "$file"
 	rm -f "$tmp"
@@ -501,79 +502,188 @@ ensure_site_protected() {
 # Caddyfile, while old AbuseGuard releases wrote protection directives there.
 # The canonical layout is one protected site per /etc/caddy/sites/<domain>.caddy,
 # using the shared `import abuseguard` snippet.
-# Generate the candidate layout in a temp dir, install the new site files, and
-# atomically replace the main Caddyfile only after the full config validates.
+#
+# All normalization and migration work happens in a private candidate tree.
+# The real Caddyfile and site files are changed only after the complete
+# candidate validates, and are restored if the final installation step fails.
+migration_abort() {
+	local root="$1" source="$2" message="$3"
+	cleanup_temp_tree "$root" || true
+	[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
+	die "$message"
+}
+
 migrate_caddy_sites() {
 	local source="$1"
 	local migrator="$SRC_DIR/scripts/migrate-caddy-sites.sh"
-	local root out_main out_sites domains candidate validation domain target failed=0 count=0
-	local -a installed=()
-	if [ ! -f "$migrator" ]; then
-		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
-		die "缺少站点迁移器：$migrator"
-	fi
-
+	local root candidate_etc candidate_source candidate_snippet candidate_sites out_root out_main out_sites domains
+	local validation candidate_site domain target name backup_dir site_backup_dir had_main=0 snippet_existed=0 failed=0 count=0
+	local -a site_candidates=() site_targets=() site_existed=()
 	root="$(mktemp -d)"
-	out_main="$root/Caddyfile"
-	out_sites="$root/sites"
-	domains="$root/domains"
-	install -d -m 0700 "$out_sites"
-	if ! bash "$migrator" "$source" "$out_main" "$out_sites" "$SITES_DIR" > "$domains"; then
-		cleanup_temp_tree "$root" || true
-		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
-		die "Caddy 站点无法按 AbuseGuard 标准结构迁移；原 Caddyfile 未改动。"
+	if [ ! -f "$migrator" ]; then
+		migration_abort "$root" "$source" "缺少站点迁移器：$migrator"
 	fi
-	normalize_caddy_file "$out_main"
-	for caddy_site in "$out_sites"/*.caddy; do normalize_caddy_file "$caddy_site"; done
 
-	candidate="$(mktemp "$CADDY_ETC/.Caddyfile.abuseguard-migrate.XXXXXX")"
-	validation="$(mktemp "$CADDY_ETC/.Caddyfile.abuseguard-validate.XXXXXX")"
-	install -m 0644 "$out_main" "$candidate"
-	install -m 0644 "$out_main" "$validation"
-	if [ -s "$domains" ]; then
-		printf '\nimport %s/*.caddy\n' "$out_sites" >> "$validation"
+	candidate_etc="$root/config"
+	candidate_source="$candidate_etc/Caddyfile"
+	candidate_snippet="$candidate_etc/abuseguard.caddy"
+	candidate_sites="$candidate_etc/sites"
+	out_root="$root/migrated"
+	out_main="$out_root/Caddyfile"
+	out_sites="$out_root/sites"
+	domains="$out_root/domains"
+	install -d -m 0700 "$candidate_etc" "$out_sites" || migration_abort "$root" "$source" "无法创建 Caddy 候选目录。"
+	# Keep the candidate under the same /etc/caddy layout.  This preserves
+	# relative imports such as `import ../common.conf` from a site file without
+	# rewriting or interpreting arbitrary import paths.
+	cp -aL -- "$CADDY_ETC/." "$candidate_etc/" || migration_abort "$root" "$source" "无法创建 Caddy 配置候选副本。"
+	install -m 0644 "$source" "$candidate_source" || migration_abort "$root" "$source" "无法创建 Caddyfile 候选副本。"
+	install -m 0644 "$SRC_DIR/assets/caddy/abuseguard.caddy" "$candidate_snippet" || migration_abort "$root" "$source" "无法创建 AbuseGuard 片段候选副本。"
+
+	log "正在规范化 AbuseGuard Caddy 配置"
+	if ! normalize_caddy_file "$candidate_source"; then
+		migration_abort "$root" "$source" "无法格式化 Caddyfile 候选；原 Caddyfile 和站点文件未改动。"
+	fi
+	for candidate_site in "$candidate_sites"/*.caddy; do
+		if ! ensure_site_protected "$candidate_site"; then
+			migration_abort "$root" "$source" "无法恢复站点候选的 AbuseGuard 防护；原 Caddyfile 和站点文件未改动。"
+		fi
+		if ! normalize_caddy_file "$candidate_site"; then
+			migration_abort "$root" "$source" "无法格式化站点候选；原 Caddyfile 和站点文件未改动。"
+		fi
+	done
+
+	if ! bash "$migrator" "$candidate_source" "$out_main" "$out_sites" "$candidate_sites" > "$domains"; then
+		migration_abort "$root" "$source" "Caddy 站点无法按 AbuseGuard 标准结构迁移；原 Caddyfile 和站点文件未改动。"
+	fi
+	if ! normalize_caddy_file "$out_main"; then
+		migration_abort "$root" "$source" "无法格式化迁移后的 Caddyfile 候选；原 Caddyfile 和站点文件未改动。"
+	fi
+	for candidate_site in "$out_sites"/*.caddy; do
+		if ! normalize_caddy_file "$candidate_site"; then
+			migration_abort "$root" "$source" "无法格式化迁移后的站点候选；原 Caddyfile 和站点文件未改动。"
+		fi
+	done
+
+	# Add generated sites to the candidate tree before validation, so the exact
+	# tree that will be installed is what Caddy validates.
+	while IFS= read -r domain; do
+		[ -n "$domain" ] || continue
+		target="$candidate_sites/$domain.caddy"
+		if [ -e "$target" ] || [ -L "$target" ] || ! install -m 0644 "$out_sites/$domain.caddy" "$target"; then
+			migration_abort "$root" "$source" "无法写入迁移后的候选站点文件；原 Caddyfile 和站点文件未改动。"
+		fi
+	done < "$domains"
+
+	# Keep imports such as `common.conf` relative to /etc/caddy while replacing
+	# only the canonical sites import with the candidate tree for validation.
+	validation="$(mktemp "$CADDY_ETC/.Caddyfile.abuseguard-validate.XXXXXX")" || migration_abort "$root" "$source" "无法创建 Caddy 配置校验文件。"
+	if ! awk -v snippet="$SNIPPET" -v staged_snippet="$candidate_snippet" \
+		-v canonical="$SITES_DIR/*.caddy" -v staged="$candidate_sites/*.caddy" '
+		$1 == "import" && $2 == snippet {
+			print "import " staged_snippet
+			snippet_replaced = 1
+			next
+		}
+		$1 == "import" && ($2 == canonical || $2 == "sites/*.caddy" || $2 == "./sites/*.caddy") {
+			print "import " staged
+			sites_replaced = 1
+			next
+		}
+		{ print }
+		END {
+			if (!sites_replaced) {
+				print ""
+				print "import " staged
+			}
+		}
+	' "$out_main" > "$validation"; then
+		rm -f -- "$validation"
+		migration_abort "$root" "$source" "无法生成 Caddy 配置校验候选；原 Caddyfile 和站点文件未改动。"
 	fi
 	if ! validate_caddyfile "$validation" >/dev/null; then
 		rm -f -- "$validation"
-		rm -f -- "$candidate"
-		cleanup_temp_tree "$root" || true
-		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
-		die "迁移后的 Caddy 配置校验失败；原 Caddyfile 未改动。"
+		migration_abort "$root" "$source" "迁移后的 Caddy 配置校验失败；原 Caddyfile 和站点文件未改动。"
 	fi
 	rm -f -- "$validation"
 
-	while IFS= read -r domain; do
-		[ -n "$domain" ] || continue
-		target="$SITES_DIR/$domain.caddy"
-		if [ -e "$target" ] || ! install -m 0644 "$out_sites/$domain.caddy" "$target"; then
-			failed=1
-			break
+	# Back up every file that the commit may replace.  Non-Caddy files in the
+	# sites directory are left in place and are never part of this transaction.
+	backup_dir="$root/backup"
+	local rollback_failed=0
+	install -d -m 0700 "$backup_dir" || migration_abort "$root" "$source" "无法创建 Caddy 回滚备份。"
+	site_backup_dir="$backup_dir/sites"
+	install -d -m 0700 "$site_backup_dir" || migration_abort "$root" "$source" "无法创建站点回滚备份。"
+	if [ -e "$SNIPPET" ] || [ -L "$SNIPPET" ]; then
+		snippet_existed=1
+		cp -a -- "$SNIPPET" "$backup_dir/abuseguard.caddy" || migration_abort "$root" "$source" "无法备份原 AbuseGuard 片段。"
+	fi
+	if [ -e "$CADDYFILE" ] || [ -L "$CADDYFILE" ]; then
+		cp -a -- "$CADDYFILE" "$backup_dir/Caddyfile" || migration_abort "$root" "$source" "无法备份原 Caddyfile。"
+		had_main=1
+	fi
+	while IFS= read -r -d '' candidate_site; do
+		name="$(basename "$candidate_site")"
+		target="$SITES_DIR/$name"
+		site_candidates+=("$candidate_site")
+		site_targets+=("$target")
+		if [ -L "$target" ]; then
+			migration_abort "$root" "$source" "站点文件是符号链接，无法安全提交迁移：$target"
 		fi
-		installed+=("$target")
-		count=$((count + 1))
-	done < "$domains"
+		if [ -e "$target" ] || [ -L "$target" ]; then
+			site_existed+=(1)
+			cp -a -- "$target" "$site_backup_dir/$name" || migration_abort "$root" "$source" "无法备份原站点文件：$target"
+		else
+			site_existed+=(0)
+		fi
+	done < <(find "$candidate_sites" -maxdepth 1 -type f -name '*.caddy' -print0)
 
 	if [ "$failed" = 0 ]; then
-		mv -f -- "$candidate" "$CADDYFILE"
-		for target in "${installed[@]}"; do log "已迁移受保护站点：$target"; done
-		[ "$count" = 0 ] || log "已按 AbuseGuard 标准结构迁移 $count 个站点"
-		cleanup_temp_tree "$root" || true
-		[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
-		return 0
+		if ! install -m 0644 "$candidate_snippet" "$SNIPPET"; then
+			failed=1
+		fi
+	fi
+	if [ "$failed" = 0 ]; then
+		for ((i = 0; i < ${#site_candidates[@]}; i++)); do
+			if ! install -m 0644 "${site_candidates[i]}" "${site_targets[i]}"; then
+				failed=1
+				break
+			fi
+		done
+	fi
+	if [ "$failed" = 0 ] && ! install -m 0644 "$out_main" "$CADDYFILE"; then
+		failed=1
 	fi
 
-	for target in "${installed[@]}"; do rm -f -- "$target"; done
-	rm -f -- "$candidate"
+	if [ "$failed" != 0 ]; then
+		# Restore the main file and every site touched above, including files
+		# from a partially completed site loop.
+		rm -f -- "$SNIPPET"
+		rm -f -- "$CADDYFILE"
+		if [ "$snippet_existed" = 1 ] && ! cp -a -- "$backup_dir/abuseguard.caddy" "$SNIPPET"; then rollback_failed=1; fi
+		if [ "$had_main" = 1 ] && ! cp -a -- "$backup_dir/Caddyfile" "$CADDYFILE"; then rollback_failed=1; fi
+		for ((i = 0; i < ${#site_targets[@]}; i++)); do
+			rm -f -- "${site_targets[i]}"
+			if [ "${site_existed[i]}" = 1 ]; then
+				if ! cp -a -- "$site_backup_dir/$(basename "${site_targets[i]}")" "${site_targets[i]}"; then rollback_failed=1; fi
+			fi
+		done
+		if [ "$rollback_failed" = 1 ]; then
+			[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
+			die "无法完整回滚迁移后的 Caddy 文件；回滚备份保留在 $root。"
+		fi
+		migration_abort "$root" "$source" "无法安装迁移后的 Caddy 文件；已回滚原 Caddyfile 和站点文件。"
+	fi
+
+	while IFS= read -r domain; do
+		[ -n "$domain" ] || continue
+		log "已迁移受保护站点：$SITES_DIR/$domain.caddy"
+		count=$((count + 1))
+	done < "$domains"
+	[ "$count" = 0 ] || log "已按 AbuseGuard 标准结构迁移 $count 个站点"
 	cleanup_temp_tree "$root" || true
 	[ "$source" = "$CADDYFILE" ] || rm -f -- "$source"
-	die "无法写入迁移后的站点文件；已撤销本次站点迁移。"
 }
-log "正在规范化 AbuseGuard Caddy 配置"
-normalize_caddy_file "$caddy_migration_source"
-for caddy_site in "$SITES_DIR"/*.caddy; do
-	ensure_site_protected "$caddy_site"
-	normalize_caddy_file "$caddy_site"
-done
 migrate_caddy_sites "$caddy_migration_source"
 
 # Root-side Caddy validation above may create the access log first.  Always
@@ -657,10 +767,11 @@ systemctl enable caddy >/dev/null 2>&1 || true
 systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy || die "caddy 启动失败（查看：journalctl -u caddy）"
 systemctl enable fail2ban >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
-systemctl restart fail2ban || warn "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
+systemctl restart fail2ban || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"
+log "已启用 SSH 防护；Web、SSH 和手动封禁共用白名单，并按源 IP 拦截所有端口。"
 cat <<EOF
 
   文件位置：
