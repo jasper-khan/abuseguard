@@ -70,6 +70,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install fail2ban (for fail2ban-regex)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq fail2ban
+      - name: Verify required jails and SSH configuration overrides
+        run: bash ./scripts/test-jail-readiness.sh
       - name: Fetch upstream-latest Caddy
         env:
           GH_TOKEN: ${{ github.token }}

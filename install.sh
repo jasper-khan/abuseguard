@@ -82,6 +82,30 @@ log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 1; }
 
+verify_fail2ban_jails() {
+	local mode="$1" jail dump missing attempt
+	local jails="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
+	if [ "$mode" = config ]; then
+		dump="$(fail2ban-client -d)" || die "无法读取 fail2ban 的有效配置。"
+		for jail in $jails; do
+			if ! grep -Fq "['add', '$jail', " <<< "$dump"; then
+				die "fail2ban 有效配置未启用 $jail。请检查 /etc/fail2ban/jail.local 和 jail.d/*.local 中的 enabled 覆盖（后加载的文件优先），解决冲突后重新安装。"
+			fi
+		done
+		return
+	fi
+	# systemd can report active before Fail2Ban finishes creating its jails.
+	for attempt in {1..10}; do
+		missing=""
+		for jail in $jails; do
+			fail2ban-client status "$jail" >/dev/null 2>&1 || missing="$missing $jail"
+		done
+		[ -n "$missing" ] || return 0
+		sleep 1
+	done
+	die "fail2ban 已启动，但以下防护未运行：$missing。请检查 fail2ban 日志；安装未完成。"
+}
+
 validate_caddyfile() {
 	local config="$1" cf_token=""
 	[ ! -f "$CADDY_ENV" ] || cf_token="$(sed -n 's/^CF_API_TOKEN=//p' "$CADDY_ENV" | head -n 1)"
@@ -758,6 +782,7 @@ log "正在校验 Caddyfile"
 validate_caddyfile "$CADDYFILE" >/dev/null || die "Caddyfile 校验失败。"
 log "正在校验 fail2ban 配置"
 fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
+verify_fail2ban_jails config
 
 systemctl daemon-reload
 log "正在启用并启动服务"
@@ -768,6 +793,7 @@ systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy || die "caddy 
 systemctl enable fail2ban >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
 systemctl restart fail2ban || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
+verify_fail2ban_jails running
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"

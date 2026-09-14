@@ -30,6 +30,8 @@ sshd/auth.log ─▶ sshd / sshd-intel ──(brute force / intel hit)──▶ 
 
 ## Install
 
+The installer checks both the effective configuration and running state of all six jails. If an existing `jail.local` or `jail.d/*.local` disables a required jail (for example, `[sshd] enabled = false`), installation fails with an error. Resolve that override and retry; the installer does not rewrite custom files automatically.
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jasper-khan/abuseguard/main/install.sh)
 ```

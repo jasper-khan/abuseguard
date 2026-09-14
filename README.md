@@ -30,6 +30,8 @@ sshd/auth.log ─▶ sshd / sshd-intel ──(认证爆破 / 情报命中)──
 
 ## 安装
 
+安装器会检查六个 jail 的有效配置和启动状态。若旧的 `jail.local` 或 `jail.d/*.local` 禁用了其中某个 jail（例如 `[sshd] enabled = false`），安装会报错；请解除禁用冲突后重试。安装器不会自动改写这些自定义文件。
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jasper-khan/abuseguard/main/install.sh)
 ```
