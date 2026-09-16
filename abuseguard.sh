@@ -45,6 +45,18 @@ validate_caddyfile() {
 	CF_API_TOKEN="$cf_token" "$CADDY" validate --config "$config" --adapter caddyfile
 }
 
+# 普通配置变更优先 reload；reload 不可用时回退 restart，并把真实结果返回给调用方。
+caddy_reload_or_restart() {
+	systemctl reload caddy >/dev/null 2>&1 && return 0
+	systemctl restart caddy >/dev/null 2>&1
+}
+
+# token 存在主进程环境里，必须重启并确认服务实际处于 active。
+caddy_restart_active() {
+	systemctl restart caddy >/dev/null 2>&1 || return 1
+	[ "$(systemctl is-active caddy 2>/dev/null)" = active ]
+}
+
 C_G='\033[1;32m'; C_Y='\033[1;33m'; C_R='\033[1;31m'; C_B='\033[1;34m'; C_0='\033[0m'
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
@@ -313,7 +325,7 @@ sites_lines() {
 }
 
 act_sites() {
-	local choice dom t port hp up tls f num target out d u
+	local choice dom t port hp up tls f backup num target out d u
 	local -a doms
 	while true; do
 		clear 2>/dev/null || true
@@ -376,8 +388,12 @@ act_sites() {
 					printf '%s\n' "$out" | grep -iE 'error|invalid' | head -3 | sed 's/^/    /'
 					sleep 2; continue
 				fi
-				systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
-				echo "  已添加 $dom → $up （caddy 已重载）"; sleep 1 ;;
+				if ! caddy_reload_or_restart; then
+					rm -f -- "$f"
+					echo "  Caddy 应用失败，新站点配置已移除。"
+					sleep 2; continue
+				fi
+				echo "  已添加 $dom → $up （caddy 已应用配置）"; sleep 1 ;;
 			2)
 				[ "${#doms[@]}" -eq 0 ] && { echo "  没有可删除的站点"; sleep 1; continue; }
 				i=1; for d in "${doms[@]}"; do printf "  [%d] %s\n" "$i" "$d"; i=$((i+1)); done
@@ -385,9 +401,23 @@ act_sites() {
 				case "$num" in ''|*[!0-9]*) continue ;; esac
 				if [ "$num" -lt 1 ] || [ "$num" -gt "${#doms[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
 				target="${doms[$((num-1))]}"
-				rm -f "$SITES_DIR/$target.caddy"
-				systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
-				echo "  已删除 $target （caddy 已重载）"; sleep 1 ;;
+				f="$SITES_DIR/$target.caddy"
+				backup="$(mktemp "$SITES_DIR/.site-backup.XXXXXX")" || { echo "  无法备份站点配置，未删除。"; sleep 1; continue; }
+				if ! mv -- "$f" "$backup"; then
+					rm -f -- "$backup"
+					echo "  无法备份站点配置，未删除。"
+					sleep 1; continue
+				fi
+				if ! caddy_reload_or_restart; then
+					if mv -f -- "$backup" "$f"; then
+						echo "  Caddy 应用失败，已恢复原站点配置。"
+					else
+						echo "  Caddy 应用失败，原站点配置恢复失败：$backup" >&2
+					fi
+					sleep 2; continue
+				fi
+				rm -f -- "$backup"
+				echo "  已删除 $target （caddy 已应用配置）"; sleep 1 ;;
 			0) return ;;
 			*) ;;
 		esac
@@ -410,9 +440,35 @@ act_key() {
 act_cftoken() {
 	read -r -p "Cloudflare API token（留空=保持当前）: " t
 	if [ -n "$t" ]; then
-		printf 'CF_API_TOKEN=%s\n' "$t" > "$CADDY_ENV"; chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
-		systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
-		echo "已保存 token，caddy 已重载。"
+		local backup had_env=0 restore_rc=0
+		backup="$(mktemp)" || { echo "无法备份旧 token，未修改。" >&2; pause; return 1; }
+		if [ -f "$CADDY_ENV" ]; then
+			cp -p -- "$CADDY_ENV" "$backup" || { rm -f -- "$backup"; echo "无法备份旧 token，未修改。" >&2; pause; return 1; }
+			had_env=1
+		fi
+		if printf 'CF_API_TOKEN=%s\n' "$t" > "$CADDY_ENV" \
+			&& chown root:caddy "$CADDY_ENV" \
+			&& chmod 0640 "$CADDY_ENV" \
+			&& validate_caddyfile "$CADDYFILE" >/dev/null 2>&1 \
+			&& caddy_restart_active; then
+			rm -f -- "$backup"
+			echo "已保存 token，caddy 已重启并生效。"
+			pause
+			return
+		fi
+		if [ "$had_env" -eq 1 ]; then
+			cp -p -- "$backup" "$CADDY_ENV" || restore_rc=$?
+		else
+			rm -f -- "$CADDY_ENV" || restore_rc=$?
+		fi
+		rm -f -- "$backup"
+		if [ "$restore_rc" -eq 0 ]; then
+			echo "token 保存失败，已恢复旧 .env。" >&2
+		else
+			echo "token 保存失败，旧 .env 恢复失败。" >&2
+		fi
+		pause
+		return 1
 	fi
 	pause
 }

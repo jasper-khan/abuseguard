@@ -62,10 +62,22 @@ func httpGet(url, token string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "abuseguard-intel/1.0")
-	if token != "" {
+	useToken := token != "" && req.URL.Scheme == "https"
+	if useToken {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
+	if useToken {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+				req.Header.Del("Authorization")
+			}
+			return nil
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -116,7 +128,7 @@ func cmdSyncIntel(c *Config) int {
 	if commit != "" {
 		src = strings.ReplaceAll(src, "{commit}", commit)
 	}
-	body, err := httpGet(src, token)
+	body, err := httpGet(src, "")
 	if err != nil {
 		logf("sync-intel: download failed: %v (keeping existing list)", err)
 		return 0
