@@ -156,6 +156,9 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	exit $?
 fi
 
+TARGET_VERSION="$(tr -d '[:space:]' < "$SRC_DIR/VERSION" 2>/dev/null || true)"
+[ -n "$TARGET_VERSION" ] || TARGET_VERSION=dev
+
 # --- OS + arch guard ---------------------------------------------------------
 . /etc/os-release 2>/dev/null || die "无法读取 /etc/os-release。"
 case " ${ID:-} ${ID_LIKE:-} " in
@@ -301,7 +304,7 @@ install_engine() {
 	if [ "$FROM_SOURCE" = "1" ]; then
 		command -v go >/dev/null 2>&1 || die "--from-source 需要 Go 工具链（请先安装 go）。"
 		log "从源码编译引擎（$SRC_DIR/engine）"
-		( cd "$SRC_DIR/engine" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$ENGINE_BIN" . )
+		( cd "$SRC_DIR/engine" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$TARGET_VERSION" -o "$ENGINE_BIN" . )
 		chmod 0755 "$ENGINE_BIN"
 		return
 	fi
@@ -312,7 +315,10 @@ install_engine() {
 		|| die "引擎下载、校验或启动检查失败。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
 }
 install_engine
-log "引擎：$("$ENGINE_BIN" version 2>/dev/null || echo 已安装)"
+INSTALLED_VERSION="$("$ENGINE_BIN" version 2>/dev/null | awk 'NR == 1 { print $2 }' || true)"
+[ "$INSTALLED_VERSION" = "$TARGET_VERSION" ] \
+	|| die "引擎版本不匹配：需要 $TARGET_VERSION，实际 ${INSTALLED_VERSION:-未知}。"
+log "引擎：$("$ENGINE_BIN" version)"
 
 # --- config, whitelist, key (only if absent) ---------------------------------
 if [ ! -f "$CONF_DIR/config.json" ]; then

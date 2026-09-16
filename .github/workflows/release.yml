@@ -26,13 +26,20 @@ jobs:
         working-directory: engine
         run: |
           set -eu
+          version="$(tr -d '[:space:]' < ../VERSION)"
+          [ -n "$version" ] || { echo "VERSION is empty" >&2; exit 1; }
           mkdir -p ../dist
           go test ./...
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              go build -trimpath -ldflags "-s -w" \
+              go build -trimpath -ldflags "-s -w -X main.version=$version" \
               -o "../dist/caddy-abuseguard-linux-$arch" .
           done
+          got="$(../dist/caddy-abuseguard-linux-amd64 version | awk '{print $2}')"
+          [ "$got" = "$version" ] || {
+            echo "engine amd64 reports $got, want $version" >&2
+            exit 1
+          }
 
       # Scheduled/manual refreshes may update Caddy, but a versioned engine is
       # immutable. Download the existing engine assets instead of rebuilding

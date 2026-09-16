@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "0.2.7"
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
