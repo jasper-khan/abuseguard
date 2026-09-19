@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AbuseGuard 控制面板。运行： abuseguard
+# AbuseGuard 控制面板。运行： ag
 set -uo pipefail
 
 CONF_DIR=/etc/caddy-abuseguard
@@ -498,8 +498,8 @@ act_update() {
 		if ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
 			rm -f "$f"
 			echo "更新完成，正在重新加载控制面板..."
-			exec /usr/local/bin/abuseguard
-			echo "无法重新加载控制面板，请退出后重新运行 abuseguard。"
+			exec /usr/local/bin/ag
+			echo "无法重新加载控制面板，请退出后重新运行 ag。"
 		else
 			rm -f "$f"
 			echo "更新失败。"
@@ -572,12 +572,12 @@ MENU
 
 # The panel needs root (reads /etc/caddy-abuseguard, drives fail2ban/systemctl).
 # If launched as a normal user, transparently re-exec under sudo so plain
-# `abuseguard` opens the panel (prompting for a password only if sudo needs one).
+# `ag` opens the panel (prompting for a password only if sudo needs one).
 if [ "$(id -u)" != "0" ]; then
 	if command -v sudo >/dev/null 2>&1; then
 		exec sudo -- "$0" "$@"
 	fi
-	echo "abuseguard 需要 root 权限——请用 root 运行，或先安装 sudo。" >&2
+	echo "ag 需要 root 权限——请用 root 运行，或先安装 sudo。" >&2
 	exit 1
 fi
 while true; do menu; done

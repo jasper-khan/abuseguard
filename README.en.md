@@ -4,7 +4,7 @@
 
 AbuseGuard is a drop-in abuse-mitigation layer for a [Caddy](https://caddyserver.com/) reverse proxy on Debian/Ubuntu. For connections that reach the origin directly, it bans abusive and known-malicious IPs at the firewall (nftables) and can optionally auto-report them to [AbuseIPDB](https://www.abuseipdb.com/) — driven by fail2ban plus a small Go engine.
 
-One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS module), the fail2ban jails, a threat-intel sync, the optional reporter, and an interactive `abuseguard` panel.
+One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS module), the fail2ban jails, a threat-intel sync, the optional reporter, and an interactive `ag` panel.
 
 ## How it works
 
@@ -52,7 +52,7 @@ The installer supplies runtime dependencies such as `fail2ban`, `rsyslog`, and `
 On the first install you're **interactively prompted** for two optional secrets — the Cloudflare API token (TLS via DNS-01) and the AbuseIPDB API key (auto-reporting). **Just press Enter to skip either**; the AbuseIPDB key is not echoed while you type. Both can be set later from the panel. Updates preserve existing keys, skip these questions, and reload the panel automatically after success. When it finishes, the terminal prominently shows how to open the panel:
 
 ```bash
-abuseguard
+ag
 ```
 
 > With no terminal (CI / nohup / piped), the prompts are skipped automatically; you can also force this with `ABUSEGUARD_NONINTERACTIVE=1`.
@@ -79,7 +79,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # force one proxy
 Both the engine and the cloudflare-enabled Caddy are downloaded from this
 repo's GitHub release (Caddy is built by CI with `xcaddy`), so both get the
 direct→mirror fallback above and need no extra setup in mainland China. The
-`abuseguard` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR` was
+`ag` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR` was
 set at install time. If a Caddy with the `caddy-dns/cloudflare` module already
 exists, the installer detects and keeps it, skipping the download.
 
@@ -112,7 +112,7 @@ validation before it is applied.
 
 ## The panel
 
-Just run `abuseguard` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 10 seconds without requiring a menu action:
+Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 10 seconds without requiring a menu action:
 
 - status: services, **protected domains**, jails, timers, **threat-intel last-sync age**
 - **sites / reverse-proxy manager**: enter a domain + upstream (local port or remote IP:port) and it generates a protected reverse-proxy site (auto `import abuseguard` + TLS as needed); also list/delete
@@ -173,7 +173,7 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 
 ```
 /usr/local/bin/caddy                          Caddy (with caddy-dns/cloudflare)
-/usr/local/bin/abuseguard                     control panel
+/usr/local/bin/ag                             control panel
 /usr/local/libexec/caddy-abuseguard           Go engine
 /etc/caddy/Caddyfile                          global config + AbuseGuard imports
 /etc/caddy/abuseguard.caddy                   the (abuseguard) snippet
@@ -189,7 +189,7 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 ## Update / uninstall
 
 ```bash
-abuseguard                       # panel: [13] update, [14] uninstall
+ag                               # panel: [13] update, [14] uninstall
 sudo ./uninstall.sh              # interactive: conservative / thorough
 sudo ./uninstall.sh --conservative   # conservative: remove AbuseGuard, keep Caddy + your sites
 sudo ./uninstall.sh --purge          # thorough: also remove what AbuseGuard installed

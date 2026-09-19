@@ -13,7 +13,7 @@
 - **fail2ban** — watches the log, counts hits, enforces bans with the `nftables` action, and calls the engine for ignore decisions and report queuing.
 - **engine** (`/usr/local/libexec/caddy-abuseguard`) — a small stdlib-only Go binary. All state lives on disk; there is no daemon.
 - **systemd timers** — periodic intel refresh and report-queue flush.
-- **panel** (`abuseguard`) — a numbered bash TUI over the above.
+- **panel** (`ag`) — a numbered bash TUI over the above.
 
 ## Canonical Caddy layout
 

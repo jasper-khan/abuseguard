@@ -4,7 +4,7 @@
 
 AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
 
-一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `abuseguard` 控制面板。
+一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `ag` 控制面板。
 
 ## 工作原理
 
@@ -52,7 +52,7 @@ sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go�
 首次安装会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，AbuseIPDB key 输入时不会回显；两者都能之后随时在面板里设置。更新时会保留现有密钥、跳过这些询问，并在成功后自动重新加载面板。装完终端会醒目显示进面板的命令：
 
 ```bash
-abuseguard
+ag
 ```
 
 > 在无终端的环境（CI / nohup / 管道）里，安装会自动跳过询问；也可显式设 `ABUSEGUARD_NONINTERACTIVE=1` 强制跳过。
@@ -70,7 +70,7 @@ sudo ABUSEGUARD_MIRROR=cn ./install.sh          # 直接走代理链
 sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个代理
 ```
 
-引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建），因此都享受上面的直连→镜像回退，大陆无需额外配置。`abuseguard` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，安装器会自动检测并保留、跳过下载。
+引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建），因此都享受上面的直连→镜像回退，大陆无需额外配置。`ag` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，安装器会自动检测并保留、跳过下载。
 
 **完整性校验（强制）**：下载的 engine 与 Caddy **必须**通过 release 里 `SHA256SUMS.txt` 的校验。校验文件体积极小，因此会尽力拿到：先直连 GitHub（被限速也能拿到），失败再走整条镜像链，并带重试。**校验不符、或校验文件就是拿不到，都会中止安装**（不会“跳过校验继续装”）；如遇网络问题，请重试或用 `--from-source` 本地编译。诚实说明边界：若你用 `ABUSEGUARD_MIRROR=<prefix>/` 强制单一镜像，校验文件也会走该镜像，此时只能防"被动缓存型"镜像、防不住对该线路的主动篡改。
 
@@ -80,7 +80,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 ## 控制面板
 
-直接运行 `abuseguard`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）。标题会显示当前 AbuseGuard 引擎版本；首页的“当前封禁”每 10 秒重新查询各 jail，无需进入菜单手动刷新：
+直接运行 `ag`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）。标题会显示当前 AbuseGuard 引擎版本；首页的“当前封禁”每 10 秒重新查询各 jail，无需进入菜单手动刷新：
 
 - 查看状态：服务、**受保护域名**、jail、定时器、**情报最后同步时间**
 - **站点/反代管理**：输入域名 + 上游（本地端口或远程 IP:端口）即自动生成受保护的反代站点（自动写入 `import abuseguard` + 按需 TLS），也可列出/删除
@@ -141,7 +141,7 @@ example.com {
 
 ```
 /usr/local/bin/caddy                          Caddy（内置 caddy-dns/cloudflare）
-/usr/local/bin/abuseguard                     控制面板
+/usr/local/bin/ag                             控制面板
 /usr/local/libexec/caddy-abuseguard           Go 引擎
 /etc/caddy/Caddyfile                          全局配置 + AbuseGuard 导入
 /etc/caddy/abuseguard.caddy                   (abuseguard) 片段
@@ -157,7 +157,7 @@ example.com {
 ## 更新 / 卸载
 
 ```bash
-abuseguard                       # 面板：[13] 更新、[14] 卸载
+ag                               # 面板：[13] 更新、[14] 卸载
 sudo ./uninstall.sh              # 交互选择：保守 / 彻底
 sudo ./uninstall.sh --conservative   # 保守：删 AbuseGuard，保留 Caddy 和你的反代
 sudo ./uninstall.sh --purge          # 彻底：按安装清单删 AbuseGuard 装的一切

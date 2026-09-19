@@ -19,7 +19,8 @@ CONF_DIR=/etc/caddy-abuseguard
 STATE_DIR=/var/lib/caddy-abuseguard
 LOG_DIR=/var/log/caddy
 ENGINE_BIN=/usr/local/libexec/caddy-abuseguard
-PANEL_BIN=/usr/local/bin/abuseguard
+PANEL_BIN=/usr/local/bin/ag
+LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
 CADDY_ETC=/etc/caddy
 CADDYFILE=/etc/caddy/Caddyfile
@@ -213,6 +214,11 @@ remove_file /etc/fail2ban/action.d/caddy-abuseguard-queue.conf
 remove_file /etc/fail2ban/action.d/caddy-abuseguard-drop.conf
 remove_file "$ENGINE_BIN"
 remove_file "$PANEL_BIN"
+# Older releases installed the panel as `abuseguard`; clean up that leftover
+# too, but only when the file really is our panel.
+if [ -f "$LEGACY_PANEL_BIN" ] && head -n 2 "$LEGACY_PANEL_BIN" | grep -q 'AbuseGuard 控制面板'; then
+	remove_file "$LEGACY_PANEL_BIN"
+fi
 remove_file "$SNIPPET"
 
 # --- 2) sites + Caddyfile ----------------------------------------------------

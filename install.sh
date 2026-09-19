@@ -3,7 +3,7 @@
 #
 # Installs a hardened Caddy (with the caddy-dns/cloudflare DNS module),
 # fail2ban jails that block abusive IPs with nftables, a threat-intel sync,
-# an optional AbuseIPDB auto-reporter, and the `abuseguard` control panel.
+# an optional AbuseIPDB auto-reporter, and the `ag` control panel.
 #
 # Usage:
 #   sudo ./install.sh                 # download the prebuilt engine (GitHub release)
@@ -67,7 +67,8 @@ REPORTS_DIR="$STATE_DIR/reports"
 LOG_DIR=/var/log/caddy
 LIBEXEC_DIR=/usr/local/libexec
 ENGINE_BIN="$LIBEXEC_DIR/caddy-abuseguard"
-PANEL_BIN=/usr/local/bin/abuseguard
+PANEL_BIN=/usr/local/bin/ag
+LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
 CADDY_ETC=/etc/caddy
 CADDY_ENV="$CADDY_ETC/.env"
@@ -192,7 +193,7 @@ PRE_CADDY_ETC=0;  [ -e "$CADDY_ETC" ] && PRE_CADDY_ETC=1 || :
 PRE_LOG_DIR=0;    [ -e "$LOG_DIR" ] && PRE_LOG_DIR=1 || :
 PRE_CADDY_LIB=0;  [ -e /var/lib/caddy ] && PRE_CADDY_LIB=1 || :
 UPDATE_MODE=0
-if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ]; then UPDATE_MODE=1; fi
+if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ] || [ -x "$LEGACY_PANEL_BIN" ]; then UPDATE_MODE=1; fi
 
 # --- service accounts --------------------------------------------------------
 if ! id caddy >/dev/null 2>&1; then
@@ -735,6 +736,12 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.timer"   /etc/s
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.service"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
+# Older releases installed the panel as `abuseguard`. Remove that stale copy
+# so `ag` is the only shortcut, but only when the file really is our panel.
+if [ -f "$LEGACY_PANEL_BIN" ] && head -n 2 "$LEGACY_PANEL_BIN" | grep -q 'AbuseGuard 控制面板'; then
+	rm -f -- "$LEGACY_PANEL_BIN"
+	log "已移除旧快捷命令 abuseguard（请改用 ag）"
+fi
 
 # --- optional interactive setup ----------------------------------------------
 # Ask (y/N, default No) before prompting for each secret, so a plain Enter
@@ -746,7 +753,7 @@ if [ "$UPDATE_MODE" = 1 ]; then
 	log "更新模式：保留现有 API 密钥，跳过密钥询问"
 elif [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null; then
 	echo
-	log "可选配置（以下两项都可稍后随时用 abuseguard 面板设置）"
+	log "可选配置（以下两项都可稍后随时用 ag 面板设置）"
 	printf '  现在设置 Cloudflare API token 吗？（用于自动签发 TLS 证书）[y/N] '
 	IFS= read -r ans <&3 || ans=""
 	case "$ans" in
@@ -780,7 +787,7 @@ elif [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null
 	esac
 	exec 3<&-
 else
-	log "非交互运行：跳过密钥询问（稍后用 abuseguard 面板设置）"
+	log "非交互运行：跳过密钥询问（稍后用 ag 面板设置）"
 fi
 
 # --- validate + enable -------------------------------------------------------
@@ -824,9 +831,9 @@ EOF
 # just leave the summary above and tell the user how to open it.
 if [ "$UPDATE_MODE" = 0 ] && [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
 	echo
-	log "即将进入控制面板（下次可随时运行：abuseguard）..."
+	log "即将进入控制面板（下次可随时运行：ag）..."
 	sleep 1
 	exec "$PANEL_BIN" </dev/tty
 fi
 echo
-log "运行 abuseguard 打开控制面板。"
+log "运行 ag 打开控制面板。"
