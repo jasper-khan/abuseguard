@@ -1,5 +1,6 @@
 # Enable SSH protection on install. Keep the system's SSH log/backend and
 # detection thresholds; share AbuseGuard's allowlist and global ban action.
+# The installer rewrites target_port below to the port sshd actually listens on.
 [sshd]
 enabled = true
 bantime = 90d

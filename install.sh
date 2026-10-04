@@ -83,6 +83,19 @@ log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# detect_ssh_port -- print the TCP port sshd actually listens on. Prefer the
+# live listener (covers custom and socket-activated ports), fall back to the
+# effective sshd config. Prints nothing when neither source is usable.
+detect_ssh_port() {
+	local p=""
+	p="$(ss -H -tlnp 2>/dev/null | awk '/sshd/ { n = split($4, a, ":"); print a[n] }' | sort -un | head -n 1)" || p=""
+	if [ -z "$p" ]; then
+		p="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')" || p=""
+	fi
+	case "$p" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "$p"
+}
+
 verify_fail2ban_jails() {
 	local mode="$1" jail dump missing attempt
 	local jails="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
@@ -729,6 +742,16 @@ install -m 0644 "$SRC_DIR"/assets/fail2ban/filter.d/*.conf /etc/fail2ban/filter.
 install -m 0644 "$SRC_DIR"/assets/fail2ban/action.d/*.conf /etc/fail2ban/action.d/
 install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/caddy-abuseguard.local" /etc/fail2ban/jail.d/caddy-abuseguard.local
 install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/zz-caddy-abuseguard-report.local" /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
+# Reports carry the port that was actually attacked, so keep the SSH jail in
+# sync with the port sshd listens on instead of the hardcoded 22 default.
+ssh_port="$(detect_ssh_port)" || ssh_port=""
+if [ -n "$ssh_port" ]; then
+	sed -i -E "s/(profile=ssh-bruteforce, transport=SSH, target_port=)[0-9]+/\1$ssh_port/" \
+		/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
+	log "SSH 上报端口已同步为 $ssh_port"
+else
+	warn "未能探测 SSH 端口，SSH 上报端口保持默认 22（可在 /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local 手动修改）"
+fi
 
 # --- systemd timers + panel --------------------------------------------------
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/systemd/system/
