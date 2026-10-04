@@ -325,7 +325,7 @@ sites_lines() {
 }
 
 act_sites() {
-	local choice dom t port hp up tls f backup num target out d u
+	local choice dom t hp up tls f backup num target out d u
 	local -a doms
 	while true; do
 		clear 2>/dev/null || true
@@ -356,14 +356,14 @@ act_sites() {
 				domain_valid "$dom" || { echo "  域名格式无效"; sleep 1; continue; }
 				[ -e "$SITES_DIR/$dom.caddy" ] && { echo "  该域名已存在"; sleep 1; continue; }
 				echo "  上游类型："
-				echo "  [1] 本地端口（localhost:端口）"
-				echo "  [2] 远程 IP:端口"
+				echo "  [1] 本地 IP:端口（如 127.0.0.1:3000）"
+				echo "  [2] 公网 IP:端口（如 203.0.113.10:8080）"
 				read -r -p "  请选择: " t
 				case "$t" in
-					1) read -r -p "  本地端口: " port; port="$(printf '%s' "$port" | tr -d '[:space:]')"
-					   port_valid "$port" || { echo "  端口无效"; sleep 1; continue; }
-					   up="localhost:$port" ;;
-					2) read -r -p "  远程 IP:端口（如 10.0.0.5:8080）: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
+					1) read -r -p "  本地 IP:端口: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
+					   hostport_valid "$hp" || { echo "  IP:端口 格式无效"; sleep 1; continue; }
+					   up="$hp" ;;
+					2) read -r -p "  公网 IP:端口: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
 					   hostport_valid "$hp" || { echo "  IP:端口 格式无效"; sleep 1; continue; }
 					   up="$hp" ;;
 					*) continue ;;
