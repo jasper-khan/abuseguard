@@ -274,9 +274,11 @@ rm -f -- "$SITES_TEST/example.com.caddy"
 SYSTEMCTL_RELOAD_RC=1
 SYSTEMCTL_RESTART_RC=0
 : > "$SYSTEMCTL_LOG"
-site_output="$(printf '1\nexample.com\n1\n8080\n0\n' | act_sites 2>&1)" \
+site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)" \
 	|| fail "site update failed while restart fallback succeeded"
 [ -f "$SITES_TEST/example.com.caddy" ] || fail "successful restart fallback did not keep the new site"
+grep -q 'reverse_proxy 127\.0\.0\.1:8080' "$SITES_TEST/example.com.caddy" \
+	|| fail "new site did not use the entered local upstream"
 case "$site_output" in *"已添加 example.com"*) ;; *) fail "successful restart fallback did not report success" ;; esac
 grep -q '^reload caddy$' "$SYSTEMCTL_LOG" || fail "site update did not try reload first"
 grep -q '^restart caddy$' "$SYSTEMCTL_LOG" || fail "site update did not fall back to restart"
@@ -284,7 +286,7 @@ grep -q '^restart caddy$' "$SYSTEMCTL_LOG" || fail "site update did not fall bac
 rm -f -- "$SITES_TEST/example.com.caddy"
 SYSTEMCTL_RESTART_RC=1
 : > "$SYSTEMCTL_LOG"
-site_output="$(printf '1\nexample.com\n1\n8080\n0\n' | act_sites 2>&1)"
+site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)"
 [ ! -e "$SITES_TEST/example.com.caddy" ] || fail "failed site add kept the new site"
 case "$site_output" in *"已添加 example.com"*) fail "failed site add displayed success" ;; esac
 case "$site_output" in *"新站点配置已移除"*) ;; *) fail "failed site add did not report rollback" ;; esac
