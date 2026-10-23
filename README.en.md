@@ -114,16 +114,17 @@ validation before it is applied.
 
 Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 10 seconds without requiring a menu action:
 
-- status: services, **protected domains**, jails, timers, **threat-intel last-sync age**
-- **sites / reverse-proxy manager**: enter a domain + upstream (local port or remote IP:port) and it generates a protected reverse-proxy site (auto `import abuseguard` + TLS as needed); also list/delete
-- list currently-banned IPs per jail
-- **unban / ban a specific IP** (one-click release for a false positive)
-- **firewall manager** (menu 15): inspect rules, open/close TCP or UDP ports, and list/ban/unban IPs
-- edit the whitelist (in-panel add/remove; **an added IP is auto-unbanned** and fail2ban reloaded)
-- sync threat-intel now / flush the report queue now
-- set the AbuseIPDB key / Cloudflare token
-- toggle AbuseIPDB reporting on/off
-- view recent logs, update, uninstall
+The home screen has five categories, with related actions grouped within each. Enter `0` in a submenu to return to its parent:
+
+| Home entry | Available actions |
+| --- | --- |
+| `[1]` Overview | Services, protected domains, ban counts per jail, scheduled tasks |
+| `[2]` Sites and certificates | List, add, or delete reverse-proxy sites; set the Cloudflare API Token |
+| `[3]` Firewall | Open/close TCP or UDP ports; list, ban, or unban IPs; manage the whitelist; inspect or reapply rules |
+| `[4]` Threat intel | Sync intel, send the report queue, set the AbuseIPDB API Key, toggle automatic reporting |
+| `[5]` Maintenance | Recent logs, update, uninstall |
+
+Adding a site takes a domain and upstream (local or remote IP:port), then generates a protected reverse-proxy configuration with `import abuseguard` and TLS as needed. The whitelist supports in-panel add/remove; **an added IP is auto-unbanned** and fail2ban reloaded. The home screen also shows firewall status and threat-intel last-sync age.
 
 Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/caddy/sites/*.caddy`, and removes only the exact `header_up X-Forwarded-Host {host}` or `header_up X-Forwarded-Host {http.request.host}` directives that Caddy identifies as redundant. Other reverse-proxy settings and request headers are preserved.
 
@@ -156,7 +157,7 @@ The intel jail bans nothing until the list is synced. The engine pulls a public 
 
 Reporting is enabled in the config by default, but events are queued only after an API key is set. Sensitive-path probes are fixed to category `21` (Web App Attack); authentication brute-force bans from the `sshd` jail are fixed to `18,22` (Brute-Force + SSH). Request-rate bans, Web/SSH threat-intel hits, and manual panel bans remain local only.
 
-Public comments contain only a standardized behavior, the observed count and detection window, plus the HTTP protocol for web events. They never name AbuseGuard or include a host, exact path, query, headers, request body, user agent, SSH username, or raw log. Reports honor AbuseIPDB's per-IP 15-minute window; a later event for the same IP stays queued until eligible instead of being discarded. The daily cap remains 1000. A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue. An unreadable allowlist or corrupt state stops the flush; temporary API failures keep records for retry. The flush runs every 10m. Toggle external reporting with panel → 11; this never disables local bans.
+Public comments contain only a standardized behavior, the observed count and detection window, plus the HTTP protocol for web events. They never name AbuseGuard or include a host, exact path, query, headers, request body, user agent, SSH username, or raw log. Reports honor AbuseIPDB's per-IP 15-minute window; a later event for the same IP stays queued until eligible instead of being discarded. The daily cap remains 1000. A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue. An unreadable allowlist or corrupt state stops the flush; temporary API failures keep records for retry. The flush runs every 10m. Toggle external reporting with panel → `[4]` Threat intel → `[4]` Automatic reporting; this never disables local bans.
 
 ## Add your sites
 
@@ -196,7 +197,7 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 ## Update / uninstall
 
 ```bash
-ag                               # panel: [13] update, [14] uninstall
+ag                               # panel: [5] Maintenance → [2] update / [3] uninstall
 sudo ./uninstall.sh              # interactive: conservative / thorough
 sudo ./uninstall.sh --conservative   # conservative: remove AbuseGuard, keep Caddy + your sites
 sudo ./uninstall.sh --purge          # thorough: also remove what AbuseGuard installed

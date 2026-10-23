@@ -63,6 +63,15 @@ C_G='\033[1;32m'; C_Y='\033[1;33m'; C_R='\033[1;31m'; C_B='\033[1;34m'; C_0='\03
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
+panel_title() {
+	clear 2>/dev/null || true
+	printf '%b────────────────────────────────────────────────────────────%b\n' "$C_B" "$C_0"
+	printf '  %bAbuseGuard%b  /  %s\n' "$C_B" "$C_0" "$1"
+	printf '%b────────────────────────────────────────────────────────────%b\n' "$C_B" "$C_0"
+}
+
+panel_section() { printf '\n  %b%s%b\n' "$C_B" "$1" "$C_0"; }
+
 count_banned() {
 	local total=0 n
 	for j in $JAILS; do
@@ -89,8 +98,7 @@ intel_age_h() {
 }
 
 header() {
-	clear 2>/dev/null || true
-	local caddy f2b intel banned rep age fresh report_status version
+	local caddy f2b intel banned rep age fresh report_status version firewall_status
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
@@ -101,45 +109,42 @@ header() {
 	elif [ "$age" -gt 12 ]; then fresh="$(printf '（最后同步 %b%sh 前，建议检查%b）' "$C_Y" "$age" "$C_0")"
 	else fresh="（最后同步 ${age}h 前）"; fi
 	if [ "$rep" = on ]; then
-		[ -s "$KEYFILE" ] && report_status="${C_G}开${C_0}" || report_status="${C_Y}未配置 API Key${C_0}"
+		[ -s "$KEYFILE" ] && report_status="${C_G}已开启${C_0}" || report_status="${C_Y}未配置 API Key${C_0}"
 	else
-		report_status="${C_Y}关${C_0}"
+		report_status="${C_Y}已关闭${C_0}"
 	fi
-	echo -e "${C_B}=======================================================${C_0}"
-	echo -e "              ${C_G}AbuseGuard v${version}${C_0}  控制面板"
-	echo -e "${C_B}=======================================================${C_0}"
-	printf "  caddy: %b    fail2ban: %b\n" \
+	if firewall_running; then firewall_status="${C_G}运行中${C_0}"
+	else firewall_status="${C_Y}未就绪${C_0}"; fi
+	panel_title "控制中心 · v${version}"
+	printf "  服务    Caddy %b   Fail2Ban %b\n" \
 		"$( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )" \
 		"$( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	printf "  情报 IP: %s %b   当前封禁: %s   上报: %b\n" \
-		"$intel" "$fresh" "$banned" \
-		"$report_status"
-	echo -e "${C_B}-------------------------------------------------------${C_0}"
+	printf "  防护    防火墙 %b   当前封禁 %s\n" "$firewall_status" "$banned"
+	printf "  情报    %s 个 IP %b\n" "$intel" "$fresh"
+	printf "  上报    %b\n" "$report_status"
 }
 
 act_status() {
 	local st n desc next d u
-	echo "服务状态："
+	panel_title "运行概览"
+	panel_section "服务状态"
 	for s in caddy fail2ban; do
 		st="$(svc_state "$s")"; [ "$st" = active ] && st="运行中"
 		printf "  %-12s%s\n" "$s" "$st"
 	done
-	echo
-	echo "受保护站点（域名 → 反代上游）："
+	panel_section "受保护站点 · 域名 → 反代上游"
 	if [ -n "$(sites_lines)" ]; then
 		while IFS=$'\t' read -r d u; do [ -n "$d" ] && printf "  %-28s → %s\n" "$d" "$u"; done < <(sites_lines)
 	else
-		echo "  （暂无，可用菜单「站点/反代管理」添加）"
+		echo "  暂无站点，可从首页「站点与证书」添加。"
 	fi
-	echo
-	echo "封禁 jail（各自当前封禁数）："
+	panel_section "防护任务 · 各 jail 当前封禁数"
 	for j in $JAILS; do
 		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
 		[ -z "$n" ] && n="未启用"
 		printf "  %-20s%s\n" "$j" "$n"
 	done
-	echo
-	echo "定时任务："
+	panel_section "定时任务"
 	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
 		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
 		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
@@ -232,9 +237,9 @@ act_whitelist() {
 	local -a items
 	local line ip num target tmp c i
 	while true; do
-		clear 2>/dev/null || true
-		echo -e "${C_B}== 白名单（这些 IP 永不封禁、永不上报）==${C_0}"
-		echo
+		panel_title "防火墙管理 / IP 白名单"
+		echo "  白名单 IP 不会被封禁或上报，仍受端口规则限制。"
+		panel_section "当前白名单"
 		items=()
 		while IFS= read -r line; do
 			line="${line%%#*}"; line="$(printf '%s' "$line" | tr -d '[:space:]')"
@@ -246,11 +251,13 @@ act_whitelist() {
 			for line in "${items[@]}"; do echo "  $line"; done
 		fi
 		echo
-		echo "  [1] 添加（可批量）"
-		echo "  [2] 删除"
+		echo "  [1] 添加 IP 或网段（支持批量）"
+		echo "  [2] 删除白名单条目"
 		echo "  [3] 用编辑器打开"
-		echo "  [0] 返回"
-		read -r -p "请选择: " c
+		echo
+		echo "  [0] 返回防火墙管理"
+		echo
+		read -r -p "请选择 [0-3]: " c || return
 		case "$c" in
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
@@ -301,7 +308,7 @@ act_whitelist() {
 				fi
 				sleep 1 ;;
 			0) wl_reload; return ;;
-			*) ;;
+			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
 		esac
 	done
 }
@@ -455,37 +462,42 @@ act_firewall() {
 	local choice ports
 	nft list tables >/dev/null || { echo "无法访问 nftables。"; pause; return; }
 	while true; do
-		clear 2>/dev/null || true
-		echo -e "${C_B}== 防火墙管理 ==${C_0}"
+		panel_title "防火墙管理"
 		if firewall_running; then echo "  AbuseGuard 防火墙：运行中"; else echo "  AbuseGuard 防火墙：未就绪，请重新应用规则"; fi
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then echo "  开机恢复：已开启"; else echo "  开机恢复：未开启"; fi
 		echo "  策略：只开放下列入站端口，保留已建立连接。"
 		ports="$(firewall_ports)"
-		if [ -n "$ports" ]; then printf '%s\n' "$ports" | sed 's/^/    /'; else echo "    （配置缺失）"; fi
+		if [ -n "$ports" ]; then
+			printf '%s\n' "$ports" | awk '
+				$1 == "tcp" { tcp = tcp ts $2; ts = ", " }
+				$1 == "udp" { udp = udp us $2; us = ", " }
+				END { printf "  TCP   %s\n  UDP   %s\n", tcp ? tcp : "（无）", udp ? udp : "（无）" }
+			'
+		else echo "    （配置缺失）"; fi
 		firewall_check_conflicts || true
 		echo "  云安全组及容器转发规则需在对应平台管理。"
-		cat <<'MENU'
-
-  [1] 开放端口（添加规则）
-  [2] 关闭端口（删除放行规则）
-  [3] 查看被封禁的 IP
-  [4] 封禁 IP
-  [5] 解封 IP
-  [6] 查看本机全部 nftables 规则
-  [7] 重新应用防火墙规则
-  [0] 返回
-MENU
-		read -r -p "请选择: " choice || return
+		panel_section "端口放行"
+		echo "  [1] 开放端口            [2] 关闭端口"
+		panel_section "IP 访问控制"
+		echo "  [3] 查看封禁列表        [4] 封禁 IP"
+		echo "  [5] 解封 IP             [6] 管理白名单"
+		panel_section "规则维护"
+		echo "  [7] 查看全部规则        [8] 重新应用规则"
+		echo
+		echo "  [0] 返回首页"
+		echo
+		read -r -p "请选择 [0-8]: " choice || return
 		case "$choice" in
-			1) firewall_change_port open || echo "未完成端口变更。"; pause ;;
-			2) firewall_change_port close || echo "未完成端口变更。"; pause ;;
-			3) act_banned ;;
-			4) act_ban ;;
-			5) act_unban ;;
-			6) nft -a list ruleset; pause ;;
-			7) firewall_apply || echo "应用失败，请检查上方错误。"; pause ;;
+			1) panel_title "防火墙管理 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
+			2) panel_title "防火墙管理 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
+			3) panel_title "防火墙管理 / 封禁列表"; act_banned ;;
+			4) panel_title "防火墙管理 / 封禁 IP"; act_ban ;;
+			5) panel_title "防火墙管理 / 解封 IP"; act_unban ;;
+			6) act_whitelist ;;
+			7) panel_title "防火墙管理 / 全部规则"; nft -a list ruleset; pause ;;
+			8) panel_title "防火墙管理 / 重新应用规则"; firewall_apply || echo "应用失败，请检查上方错误。"; pause ;;
 			0) return ;;
-			*) ;;
+			*) echo "请输入 0–8 之间的菜单编号。"; pause ;;
 		esac
 	done
 }
@@ -514,9 +526,9 @@ act_sites() {
 	local choice dom t hp up tls f backup num target out d u
 	local -a doms
 	while true; do
-		clear 2>/dev/null || true
-		echo -e "${C_B}== 站点 / 反向代理（每个站点自动启用 AbuseGuard 防护）==${C_0}"
-		echo
+		panel_title "站点与证书"
+		echo "  添加域名和上游后，站点自动启用 AbuseGuard 防护。"
+		panel_section "已保护的站点 · 域名 → 反代上游"
 		doms=()
 		while IFS=$'\t' read -r d u; do
 			[ -n "$d" ] || continue
@@ -528,15 +540,20 @@ act_sites() {
 		if cf_is_set; then
 			echo "  证书方式：Cloudflare DNS（已配置 CF token）"
 		else
-			echo "  证书方式：Caddy 自动 HTTPS（需 80/443 可直达；在面板设 CF token 可改用 DNS）"
+			echo "  证书方式：Caddy 自动 HTTPS（需 80/443 可直达）"
 		fi
-		echo
+		panel_section "站点管理"
 		echo "  [1] 添加站点"
 		echo "  [2] 删除站点"
-		echo "  [0] 返回"
-		read -r -p "请选择: " choice
+		panel_section "证书设置"
+		echo "  [3] 设置 Cloudflare API Token"
+		echo
+		echo "  [0] 返回首页"
+		echo
+		read -r -p "请选择 [0-3]: " choice || return
 		case "$choice" in
 			1)
+				panel_title "站点与证书 / 添加站点"
 				read -r -p "  域名（如 example.com）: " dom
 				dom="$(printf '%s' "$dom" | tr -d '[:space:]')"
 				domain_valid "$dom" || { echo "  域名格式无效"; sleep 1; continue; }
@@ -604,8 +621,9 @@ act_sites() {
 				fi
 				rm -f -- "$backup"
 				echo "  已删除 $target （caddy 已应用配置）"; sleep 1 ;;
+			3) panel_title "站点与证书 / Cloudflare API Token"; act_cftoken ;;
 			0) return ;;
-			*) ;;
+			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
 		esac
 	done
 }
@@ -707,29 +725,80 @@ act_uninstall() {
 	pause
 }
 
+act_intel() {
+	local choice
+	while true; do
+		panel_title "威胁情报"
+		if [ "$(reporting_state)" = on ]; then
+			if [ -s "$KEYFILE" ]; then echo "  AbuseIPDB 自动上报：已开启"
+			else echo "  AbuseIPDB 自动上报：等待配置 API Key"; fi
+		else
+			echo "  AbuseIPDB 自动上报：已关闭"
+		fi
+		panel_section "情报同步"
+		echo "  [1] 立即同步威胁情报"
+		panel_section "AbuseIPDB 上报"
+		echo "  [2] 立即发送上报队列"
+		echo "  [3] 设置 AbuseIPDB API Key"
+		echo "  [4] 开关自动上报"
+		echo
+		echo "  [0] 返回首页"
+		echo
+		read -r -p "请选择 [0-4]: " choice || return
+		case "$choice" in
+			1) panel_title "威胁情报 / 同步情报"; act_sync ;;
+			2) panel_title "威胁情报 / 发送上报队列"; act_flush ;;
+			3) panel_title "威胁情报 / AbuseIPDB API Key"; act_key ;;
+			4) panel_title "威胁情报 / 自动上报"; act_toggle ;;
+			0) return ;;
+			*) echo "请输入 0–4 之间的菜单编号。"; pause ;;
+		esac
+	done
+}
+
+act_system() {
+	local choice
+	while true; do
+		panel_title "系统维护"
+		panel_section "运行诊断"
+		echo "  [1] 查看最近日志"
+		panel_section "版本维护"
+		echo "  [2] 更新 AbuseGuard"
+		panel_section "卸载"
+		echo "  [3] 卸载 AbuseGuard"
+		echo
+		echo "  [0] 返回首页"
+		echo
+		read -r -p "请选择 [0-3]: " choice || return
+		case "$choice" in
+			1) panel_title "系统维护 / 最近日志"; act_logs ;;
+			2) panel_title "系统维护 / 更新"; act_update ;;
+			3) panel_title "系统维护 / 卸载"; act_uninstall ;;
+			0) return ;;
+			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
+		esac
+	done
+}
+
 menu() {
 	local choice read_status
 	header
+	panel_section "功能导航"
 	cat <<'MENU'
-   [1]  状态（服务、受保护站点、jail、定时器）
-   [2]  站点/反代管理（加域名→自动 import abuseguard）
-   [3]  查看被封禁的 IP（按 jail）
-   [4]  解封指定 IP
-   [5]  立即封禁指定 IP
-   [6]  编辑白名单
-   [7]  立即同步威胁情报
-   [8]  立即冲刷上报队列
-   [9]  设置 AbuseIPDB API key
-  [10]  设置 Cloudflare API token
-  [11]  开关 AbuseIPDB 上报
-  [12]  查看最近日志
-  [13]  更新 AbuseGuard（重新运行安装器）
-  [14]  卸载
-  [15]  防火墙管理（端口开放/关闭、IP 封禁/解封）
-   [0]  退出
+  [1] 运行概览      服务状态 · 站点 · 防护任务
+
+  [2] 站点与证书    添加 / 删除站点 · Cloudflare 设置
+
+  [3] 防火墙管理    端口放行 · IP 封禁 / 解封 · 白名单
+
+  [4] 威胁情报      情报同步 · 上报队列 · API 设置
+
+  [5] 系统维护      运行日志 · 更新 · 卸载
+
+  [0] 退出面板
 MENU
 	echo
-	read -r -t "$PANEL_REFRESH_SECONDS" -p "请选择（每 ${PANEL_REFRESH_SECONDS} 秒自动刷新）: " choice
+	read -r -t "$PANEL_REFRESH_SECONDS" -p "请选择 [0-5]（首页每 ${PANEL_REFRESH_SECONDS} 秒自动刷新）: " choice
 	read_status=$?
 	case "$read_status" in
 		0) ;;
@@ -740,21 +809,11 @@ MENU
 	case "$choice" in
 		1) act_status ;;
 		2) act_sites ;;
-		3) act_banned ;;
-		4) act_unban ;;
-		5) act_ban ;;
-		6) act_whitelist ;;
-		7) act_sync ;;
-		8) act_flush ;;
-		9) act_key ;;
-		10) act_cftoken ;;
-		11) act_toggle ;;
-		12) act_logs ;;
-		13) act_update ;;
-		14) act_uninstall ;;
-		15) act_firewall ;;
+		3) act_firewall ;;
+		4) act_intel ;;
+		5) act_system ;;
 		0) exit 0 ;;
-		*) ;;
+		*) echo "请输入 0–5 之间的菜单编号。"; pause ;;
 	esac
 }
 

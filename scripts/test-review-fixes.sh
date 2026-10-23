@@ -216,6 +216,8 @@ systemctl() {
 	esac
 }
 clear() { :; }
+panel_title() { :; }
+panel_section() { :; }
 sleep() { :; }
 pause() { :; }
 C_B=""
