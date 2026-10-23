@@ -256,7 +256,6 @@ act_whitelist() {
 		echo "  [3] 用编辑器打开"
 		echo
 		echo "  [0] 返回防火墙管理"
-		echo
 		read -r -p "请选择 [0-3]: " c || return
 		case "$c" in
 			1)
@@ -485,7 +484,6 @@ act_firewall() {
 		echo "  [7] 查看全部规则        [8] 重新应用规则"
 		echo
 		echo "  [0] 返回首页"
-		echo
 		read -r -p "请选择 [0-8]: " choice || return
 		case "$choice" in
 			1) panel_title "防火墙管理 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
@@ -549,7 +547,6 @@ act_sites() {
 		echo "  [3] 设置 Cloudflare API Token"
 		echo
 		echo "  [0] 返回首页"
-		echo
 		read -r -p "请选择 [0-3]: " choice || return
 		case "$choice" in
 			1)
@@ -743,7 +740,6 @@ act_intel() {
 		echo "  [4] 开关自动上报"
 		echo
 		echo "  [0] 返回首页"
-		echo
 		read -r -p "请选择 [0-4]: " choice || return
 		case "$choice" in
 			1) panel_title "威胁情报 / 同步情报"; act_sync ;;
@@ -768,7 +764,6 @@ act_system() {
 		echo "  [3] 卸载 AbuseGuard"
 		echo
 		echo "  [0] 返回首页"
-		echo
 		read -r -p "请选择 [0-3]: " choice || return
 		case "$choice" in
 			1) panel_title "系统维护 / 最近日志"; act_logs ;;
@@ -785,19 +780,14 @@ menu() {
 	header
 	panel_section "功能导航"
 	cat <<'MENU'
-  [1] 运行概览      服务状态 · 站点 · 防护任务
-
-  [2] 站点与证书    添加 / 删除站点 · Cloudflare 设置
-
-  [3] 防火墙管理    端口放行 · IP 封禁 / 解封 · 白名单
-
-  [4] 威胁情报      情报同步 · 上报队列 · API 设置
-
-  [5] 系统维护      运行日志 · 更新 · 卸载
+  [1] 运行概览    服务状态 · 站点 · 防护任务
+  [2] 站点与证书  添加 / 删除站点 · Cloudflare 设置
+  [3] 防火墙管理  端口放行 · IP 封禁 / 解封 · 白名单
+  [4] 威胁情报    情报同步 · 上报队列 · API 设置
+  [5] 系统维护    运行日志 · 更新 · 卸载
 
   [0] 退出面板
 MENU
-	echo
 	read -r -t "$PANEL_REFRESH_SECONDS" -p "请选择 [0-5]（首页每 ${PANEL_REFRESH_SECONDS} 秒自动刷新）: " choice
 	read_status=$?
 	case "$read_status" in
