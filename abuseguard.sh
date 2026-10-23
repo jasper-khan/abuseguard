@@ -476,14 +476,18 @@ firewall_apply() {
 }
 
 firewall_change_port() {
-	local action="$1" proto port ports ssh_ports p
+	local action="$1" proto="${2:-}" port="${3:-}" ports ssh_ports p
 	[ -f "$FIREWALL_FILE" ] || { echo "防火墙配置缺失，请选择重新应用规则或重新运行安装器。"; return 1; }
 	firewall_check_conflicts || return 1
-	read -r -p "协议（tcp/udp，默认 tcp）: " proto || return 1
-	proto="${proto:-tcp}"
+	if [ "$#" -eq 1 ]; then
+		read -r -p "协议（tcp/udp，默认 tcp）: " proto || return 1
+		proto="${proto:-tcp}"
+	fi
 	case "$proto" in tcp|udp) ;; *) echo "协议只能是 tcp 或 udp。"; return 1 ;; esac
-	read -r -p "端口（1–65535，留空取消）: " port || return 1
-	[ -n "$port" ] || return 0
+	if [ "$#" -eq 1 ]; then
+		read -r -p "端口（1–65535，留空取消）: " port || return 1
+		[ -n "$port" ] || return 0
+	fi
 	[ "${#port}" -le 5 ] && port_valid "$port" || { echo "端口格式无效。"; return 1; }
 	port=$((10#$port))
 	ssh_ports="$(firewall_ssh_ports)" || return 1
@@ -862,7 +866,10 @@ if [ "$(id -u)" != "0" ]; then
 fi
 case "${1:-}" in
 	--firewall-apply) firewall_apply; exit $? ;;
+	--firewall-open)
+		[ "$#" -eq 3 ] || { echo "用法：ag --firewall-open tcp|udp 端口" >&2; exit 2; }
+		firewall_change_port open "$2" "$3"; exit $? ;;
 	"") ;;
-	*) echo "用法：ag [--firewall-apply]" >&2; exit 2 ;;
+	*) echo "用法：ag [--firewall-apply | --firewall-open tcp|udp 端口]" >&2; exit 2 ;;
 esac
 while true; do menu; done

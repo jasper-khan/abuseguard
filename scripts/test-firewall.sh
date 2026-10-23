@@ -49,6 +49,10 @@ systemctl() {
 }
 firewall_apply </dev/null
 nft list table inet caddy_abuseguard | grep -q 'tcp dport 2222 accept'
+firewall_change_port open tcp 54321 </dev/null
+firewall_change_port open udp 54321 </dev/null
+nft list table inet caddy_abuseguard | grep -q 'tcp dport 54321 accept'
+nft list table inet caddy_abuseguard | grep -q 'udp dport 54321 accept'
 printf 'tcp 22\ntcp 8080\nudp 443\n' | firewall_render > "$rules"
 nft -c -f "$rules"
 nft -f "$rules"
@@ -133,7 +137,22 @@ if firewall_ports | grep -qx 'tcp 80'; then fail 'port was not closed'; fi
 firewall_ports | grep -qx 'udp 443' || fail 'unrelated UDP rule lost'
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'port change was not applied'
 
+# Exercise the real CLI dispatch with the same isolated command doubles.
+entry="$(sed -n '/^case "${1:-}" in$/,/^esac$/p' "$ROOT/abuseguard.sh")"
+run_cli() { ( set -- "$@"; eval "$entry"; ); }
+run_cli --firewall-open tcp 54321 </dev/null >/dev/null
+run_cli --firewall-open tcp 054321 </dev/null >/dev/null 2>&1 && fail 'accepted an overlong port'
+run_cli --firewall-open udp 54321 </dev/null >/dev/null
+run_cli --firewall-open tcp 54321 </dev/null >/dev/null
+for rule in 'tcp 54321' 'udp 54321'; do
+	[ "$(firewall_ports | grep -cxF "$rule")" = 1 ] || fail "CLI missing or duplicated $rule"
+done
+cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'CLI did not persist and apply ports'
 saved="$(cat "$FIREWALL_FILE")"
+for args in '' 'tcp' 'tcp 0' 'udp 65536' 'invalid 80' 'tcp 80;drop' 'tcp 80 extra'; do
+	if run_cli --firewall-open $args </dev/null >/dev/null 2>&1; then fail "CLI accepted invalid arguments: $args"; fi
+done
+if run_cli --firewall-open tcp '' </dev/null >/dev/null 2>&1; then fail 'CLI accepted an empty port'; fi
 for p in 22 2200 2222; do
 	if firewall_change_port close <<< "$(printf 'tcp\n%s' "$p")" >/dev/null; then fail "closed SSH port $p"; fi
 done
@@ -142,7 +161,7 @@ for input in $'tcp\n0' $'tcp\n65536' $'tcp\n80;drop' $'invalid\n80'; do
 done
 [ "$(cat "$FIREWALL_FILE")" = "$saved" ] || fail 'rejected input changed config'
 CHECK_FAIL=1
-if firewall_change_port open <<< $'udp\n53' >/dev/null; then fail 'ignored nft validation error'; fi
+if run_cli --firewall-open udp 53 </dev/null >/dev/null; then fail 'ignored nft validation error'; fi
 CHECK_FAIL=0
 APPLY_FAIL=1
 if firewall_change_port open <<< $'udp\n53' >/dev/null; then fail 'ignored nft apply error'; fi
@@ -173,6 +192,7 @@ START_FAIL=0
 firewall_apply </dev/null >/dev/null
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'update did not restore saved rules'
 firewall_ports | grep -qx 'tcp 8080' || fail 'update lost a user-added port'
+firewall_ports | grep -qx 'udp 54321' || fail 'update lost a script-opened port'
 if firewall_ports | grep -qx 'tcp 80'; then fail 'update reopened a user-closed port'; fi
 if grep -q 'flush ruleset' "$TMP/nft.calls"; then fail 'flushed unrelated rules'; fi
 echo 'firewall panel tests: pass'
