@@ -4,7 +4,7 @@
 
 AbuseGuard is a drop-in abuse-mitigation layer for a [Caddy](https://caddyserver.com/) reverse proxy on Debian/Ubuntu. For connections that reach the origin directly, it bans abusive and known-malicious IPs at the firewall (nftables) and can optionally auto-report them to [AbuseIPDB](https://www.abuseipdb.com/) — driven by fail2ban plus a small Go engine.
 
-One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS module), the fail2ban jails, a threat-intel sync, the optional reporter, and an interactive `ag` panel.
+One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS module), an nftables input firewall, the fail2ban jails, a threat-intel sync, the optional reporter, and an interactive `ag` panel.
 
 ## How it works
 
@@ -127,11 +127,11 @@ Just run `ag` (the panel needs root; a normal user is transparently re-run under
 
 Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/caddy/sites/*.caddy`, and removes only the exact `header_up X-Forwarded-Host {host}` or `header_up X-Forwarded-Host {http.request.host}` directives that Caddy identifies as redundant. Other reverse-proxy settings and request headers are preserved.
 
-The port firewall is opt-in through the panel; installation and updates do not enable it. First activation allows all detected SSH ports, TCP 80/443, and UDP 443, and drops other new inbound connections. Established connections, loopback, ICMP (including IPv6 neighbor discovery), and DHCP remain allowed; outbound traffic is unrestricted. The panel refuses to close detected SSH ports. Closing other ports affects new connections only.
+Installation and updates automatically apply the AbuseGuard firewall and enable boot restoration, without another confirmation. The initial configuration allows all detected SSH ports, TCP 80/443, and UDP 443, and drops other new inbound connections. Existing configurations retain user-added and user-closed ports, with current SSH ports added as needed. Established connections, loopback, ICMP (including IPv6 neighbor discovery), and DHCP remain allowed; outbound traffic is unrestricted. The panel refuses to close detected SSH ports. Closing other ports affects new connections only.
 
-`/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot systemd service restores it at boot, without a new daemon. Disabling removes that table and boot restoration but keeps the configuration; uninstalling also removes only this project's table. IP bans retain the existing Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports.
+`/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot systemd service restores it at boot, without a new daemon. The menu can reapply saved rules; uninstalling removes only this project's table. IP bans retain the existing Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports.
 
-Opening a port here only permits it through AbuseGuard's local input rules: other firewalls and cloud security groups may still block it. Forwarded traffic, including published container ports, is outside this feature's scope. The IP allowlist exempts addresses from bans, not from port filtering. If another tool flushes the entire nftables ruleset, enable the port firewall again to restore it. Reverse-proxy upstream ports normally do not need public access.
+Before applying the firewall or editing ports, AbuseGuard checks existing nftables input chains. Other input rules or default-drop policies (except Fail2Ban) abort the operation and list the conflicting chains; migrate or disable those rules before retrying so that old rules cannot silently override a panel port allowance. Cloud security groups and forwarded traffic, including published container ports, remain managed by their respective platforms. The IP allowlist exempts addresses from bans, not from port filtering. If another tool flushes the entire nftables ruleset, reapply the firewall rules from the panel. Reverse-proxy upstream ports normally do not need public access.
 
 ## Protection model
 

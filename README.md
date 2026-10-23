@@ -4,7 +4,7 @@
 
 AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
 
-一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `ag` 控制面板。
+一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）、nftables 入站防火墙、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `ag` 控制面板。
 
 ## 工作原理
 
@@ -95,11 +95,11 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 更新会在校验前用 `caddy fmt` 规范化主 Caddyfile 和 `/etc/caddy/sites/*.caddy`，并删除 Caddy 明确判定为冗余的精确指令 `header_up X-Forwarded-Host {host}` 或 `header_up X-Forwarded-Host {http.request.host}`；其他反代配置和请求头均保留。
 
-端口防火墙需在面板中主动启用，安装和更新不会自动改变入站策略。首次启用默认开放检测到的所有 SSH 端口、80/tcp、443/tcp 和 443/udp，其余入站端口默认丢弃；保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭检测到的 SSH 端口；关闭其他端口只阻止新连接。
+安装或更新会自动启用 AbuseGuard 防火墙并设置开机恢复，无需另行确认。首次建立配置时开放检测到的所有 SSH 端口、80/tcp、443/tcp 和 443/udp，其余入站端口默认丢弃；已有配置则保留用户开放和关闭的端口，并补齐当前 SSH 端口。保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭检测到的 SSH 端口；关闭其他端口只阻止新连接。
 
-端口配置仅保存在 `/etc/caddy-abuseguard/firewall.nft`，由独立的 `inet caddy_abuseguard` 表执行。修改先通过 `nft -c` 校验，再以单次事务应用；一次性 systemd 服务负责开机恢复，无新增常驻进程。停用会移除这张表并取消开机恢复，保留配置；卸载也只移除本项目的表。IP 封禁继续复用 fail2ban，保留原有白名单、90 天封禁和不上报手动封禁的规则。
+端口配置仅保存在 `/etc/caddy-abuseguard/firewall.nft`，由独立的 `inet caddy_abuseguard` 表执行。修改先通过 `nft -c` 校验，再以单次事务应用；一次性 systemd 服务负责开机恢复，无新增常驻进程。菜单可重新应用规则；卸载只移除本项目的表。IP 封禁继续复用 fail2ban，保留原有白名单、90 天封禁和不上报手动封禁的规则。
 
-面板中的端口放行仅针对 AbuseGuard 的本机入站规则，其他防火墙和云安全组仍可拦截；容器发布端口等转发流量不在此范围。白名单只豁免 IP 封禁，不绕过端口策略。其他工具若清空整个 nftables ruleset，需要在面板重新启用以恢复端口规则。新增反代站点通常只需已有的 80/443，无需向公网开放反代上游端口。
+接管和修改端口前会检查现有 nftables 入站链：若发现其他有效入站规则或默认丢弃策略（Fail2Ban 除外），操作会报错并列出冲突链，需先迁移或停用对应规则后重试，避免面板放行却仍被旧规则拦截。云安全组及容器发布端口等转发流量仍由对应平台管理。白名单只豁免 IP 封禁，不绕过端口策略。其他工具若清空整个 nftables ruleset，需要在面板重新应用防火墙规则。新增反代站点通常只需已有的 80/443，无需向公网开放反代上游端口。
 
 ## 防护模型
 

@@ -758,7 +758,6 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/s
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.timer"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.service"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
-# Installed but opt-in: only the panel enables the default-deny port policy.
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-firewall.service" /etc/systemd/system/
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 # Older releases installed the panel as `abuseguard`. Remove that stale copy
@@ -823,6 +822,8 @@ fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
 verify_fail2ban_jails config
 
 systemctl daemon-reload
+log "正在启用 AbuseGuard 防火墙并设置开机恢复"
+"$PANEL_BIN" --firewall-apply || die "防火墙接管失败，安装未完成。请检查上方错误后重试。"
 log "正在启用并启动服务"
 # Prefer a non-disruptive reload, but restart when the existing Caddy has its
 # admin API disabled and therefore cannot accept `caddy reload`.

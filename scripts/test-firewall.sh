@@ -23,7 +23,7 @@ source "$1"
 rules="$2"
 # Stand in for Fail2Ban's independent table, including an IPv4 ban set.
 nft -f - <<'NFT'
-table inet f2b_test {
+table inet f2b-table {
 	set banned { type ipv4_addr; elements = { 198.51.100.10 }; }
 	chain input {
 		type filter hook input priority -1; policy accept;
@@ -31,7 +31,24 @@ table inet f2b_test {
 	}
 }
 NFT
-before="$(nft list table inet f2b_test)"
+before="$(nft list table inet f2b-table)"
+firewall_check_conflicts
+# The installer's noninteractive entry initializes the same persistent rules
+# and boot service as the panel. Use real nft, with only systemd/SSH doubled.
+CONF_DIR="$(dirname "$rules")"
+FIREWALL_FILE="$rules"
+ss() { return 0; }
+sshd() { printf 'port 2222\n'; }
+SSH_CONNECTION=''
+systemctl() {
+	case "$1" in
+		start) nft -f "$FIREWALL_FILE" ;;
+		enable) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+firewall_apply </dev/null
+nft list table inet caddy_abuseguard | grep -q 'tcp dport 2222 accept'
 printf 'tcp 22\ntcp 8080\nudp 443\n' | firewall_render > "$rules"
 nft -c -f "$rules"
 nft -f "$rules"
@@ -41,9 +58,15 @@ nft -f "$rules"
 nft -f "$rules" # repeat application must not duplicate rules
 [ "$(nft list table inet caddy_abuseguard | grep -c 'tcp dport 22 accept')" = 1 ]
 if nft list table inet caddy_abuseguard | grep -q 'dport 8080'; then exit 1; fi
-[ "$(nft list table inet f2b_test)" = "$before" ]
+[ "$(nft list table inet f2b-table)" = "$before" ]
 nft delete table inet caddy_abuseguard
-[ "$(nft list table inet f2b_test)" = "$before" ]
+[ "$(nft list table inet f2b-table)" = "$before" ]
+systemctl start "$FIREWALL_SERVICE" # boot restores the saved policy
+nft list table inet caddy_abuseguard | grep -q 'tcp dport 22 accept'
+nft 'add table inet foreign_filter; add chain inet foreign_filter input { type filter hook input priority 0; policy drop; }'
+if firewall_apply </dev/null; then echo 'conflicting policy was accepted' >&2; exit 1; fi
+nft list table inet foreign_filter | grep -q 'policy drop'
+nft list table inet caddy_abuseguard | grep -q 'tcp dport 22 accept'
 echo 'firewall kernel transaction tests: pass'
 KERNEL
 	exit
@@ -55,6 +78,7 @@ FIREWALL_FILE="$TMP/firewall.nft"
 CHECK_FAIL=0
 APPLY_FAIL=0
 START_FAIL=0
+RULESET_JSON='{"nftables":[]}'
 SSH_CONNECTION='192.0.2.1 54321 192.0.2.2 2222'
 pause() { :; }
 ss() { printf 'LISTEN 0 128 [::]:2222 *:* users:(("sshd",pid=1,fd=3))\n'; }
@@ -63,6 +87,7 @@ fail() { echo "firewall test failed: $*" >&2; exit 1; }
 nft() {
 	printf '%s\n' "$*" >> "$TMP/nft.calls"
 	case "$*" in
+		'-j list ruleset') printf '%s\n' "$RULESET_JSON" ;;
 		'list tables') return 0 ;;
 		'list table inet caddy_abuseguard') [ -f "$TMP/live.nft" ] ;;
 		'-c -f '*) [ "$CHECK_FAIL" = 0 ] ;;
@@ -75,16 +100,24 @@ systemctl() {
 	printf '%s\n' "$*" >> "$TMP/systemctl.calls"
 	case "$1" in
 		start) [ "$START_FAIL" = 0 ] && nft -f "$FIREWALL_FILE" ;;
-		enable|disable) return 0 ;;
+		enable) return 0 ;;
 		*) fail "unexpected systemctl command: $*" ;;
 	esac
 }
 fail2ban-client() { fail 'port management must not modify Fail2Ban'; }
 
-# Cancelling first activation changes neither disk nor kernel state.
-firewall_enable <<< n >/dev/null
-[ ! -e "$FIREWALL_FILE" ] && [ ! -e "$TMP/live.nft" ] || fail 'cancel enabled firewall'
-firewall_enable <<< y >/dev/null
+# An existing filtering policy must not be silently layered with ours.
+RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"drop"}}]}'
+if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored existing default-drop policy'; fi
+[ ! -e "$FIREWALL_FILE" ] && [ ! -e "$TMP/live.nft" ] || fail 'conflict changed firewall'
+RULESET_JSON='{"nftables":[{"chain":{"family":"ip","table":"filter","name":"INPUT","hook":"input","policy":"accept"}},{"rule":{"family":"ip","table":"filter","chain":"INPUT","expr":[{"jump":{"target":"ufw-before-input"}}]}}]}'
+if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored existing input rules'; fi
+RULESET_JSON='invalid-json'
+if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored unreadable nft state'; fi
+# Empty accepting chains and forwarded/container traffic do not compete with
+# the input policy; Fail2Ban and our own table are managed by AbuseGuard.
+RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
+firewall_apply </dev/null >/dev/null
 for rule in 'tcp 22' 'tcp 2200' 'tcp 2222' 'tcp 80' 'tcp 443' 'udp 443'; do
 	firewall_ports | grep -qxF "$rule" || fail "missing initial rule: $rule"
 done
@@ -129,18 +162,17 @@ SSH_CONNECTION=''
 if firewall_change_port open <<< $'udp\n53' >/dev/null 2>&1; then fail 'changed rules without SSH detection'; fi
 sshd() { printf 'port 2222\n'; }
 
-firewall_disable >/dev/null
-[ ! -e "$TMP/live.nft" ] || fail 'disable left live port rules'
-[ "$(cat "$FIREWALL_FILE")" = "$saved" ] || fail 'disable discarded saved config'
-firewall_change_port open <<< $'udp\n53' >/dev/null
-[ ! -e "$TMP/live.nft" ] || fail 'editing disabled firewall activated it'
-firewall_ports | grep -qx 'udp 53' || fail 'disabled config edit lost'
+# Re-running installation preserves the user's changes and restores missing
+# live rules instead of leaving an optional firewall inactive after updating.
+nft delete table inet caddy_abuseguard
 : > "$TMP/systemctl.calls"
 START_FAIL=1
-if firewall_enable <<< y >/dev/null; then fail 'ignored service start error'; fi
+if firewall_apply </dev/null >/dev/null; then fail 'ignored service start error'; fi
 if grep -q '^enable ' "$TMP/systemctl.calls"; then fail 'failed start enabled boot restore'; fi
 START_FAIL=0
-firewall_enable <<< y >/dev/null
-cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 're-enable did not restore saved rules'
+firewall_apply </dev/null >/dev/null
+cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'update did not restore saved rules'
+firewall_ports | grep -qx 'tcp 8080' || fail 'update lost a user-added port'
+if firewall_ports | grep -qx 'tcp 80'; then fail 'update reopened a user-closed port'; fi
 if grep -q 'flush ruleset' "$TMP/nft.calls"; then fail 'flushed unrelated rules'; fi
 echo 'firewall panel tests: pass'

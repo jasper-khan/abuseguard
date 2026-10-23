@@ -306,8 +306,29 @@ act_whitelist() {
 	done
 }
 
-# ---- 本机入站端口防火墙（IP 封禁仍由 fail2ban 管理） ----
+# ---- 本机防火墙（安装时启用，IP 自动封禁由 fail2ban 执行） ----
 firewall_running() { nft list table inet caddy_abuseguard >/dev/null 2>&1; }
+
+firewall_check_conflicts() {
+	local conflicts
+	# An accept here cannot override another base chain's drop. Ignore empty
+	# accept chains, our own table and Fail2Ban; reject competing input rules.
+	conflicts="$(nft -j list ruleset | jq -r '
+		.nftables as $objects | $objects[] | .chain // empty |
+		select(.hook == "input" and (.family == "inet" or .family == "ip" or .family == "ip6")) |
+		select((.family != "inet" or .table != "caddy_abuseguard") and .table != "f2b-table") |
+		. as $chain |
+		select(.policy == "drop" or any($objects[];
+			.rule.family == $chain.family and .rule.table == $chain.table and .rule.chain == $chain.name)) |
+		"\(.family) \(.table) \(.name)"
+	')" || { echo "无法读取现有防火墙规则，已停止接管。" >&2; return 1; }
+	[ -z "$conflicts" ] || {
+		echo "检测到其他本机入站规则，无法由 AbuseGuard 独立管理：" >&2
+		printf '  %s\n' "$conflicts" >&2
+		echo "请先迁移或停用对应的防火墙规则，再重新运行安装器。" >&2
+		return 1
+	}
+}
 
 firewall_ports() {
 	[ -f "$FIREWALL_FILE" ] || return 0
@@ -382,8 +403,9 @@ firewall_save() {
 	fi
 }
 
-firewall_enable() {
-	local ports ssh_ports p answer
+firewall_apply() {
+	local ports ssh_ports p
+	firewall_check_conflicts || return 1
 	ssh_ports="$(firewall_ssh_ports)" || return 1
 	if [ -f "$FIREWALL_FILE" ]; then
 		ports="$(firewall_ports)" || return 1
@@ -391,29 +413,20 @@ firewall_enable() {
 		ports=$'tcp 80\ntcp 443\nudp 443'
 	fi
 	for p in $ssh_ports; do ports+=$'\n'"tcp $p"; done
-	echo "启用后：仅开放以下入站端口，其余端口拒绝新连接。"
-	printf '%s\n' "$ports" | sort -u | sed 's/^/  /'
-	echo "保留已建立连接、回环、ICMP 和 DHCP；出站不受限制。"
-	read -r -p "确认启用并在开机时恢复？[y/N] " answer || return 1
-	case "$answer" in y|Y|yes|YES) ;; *) return 0 ;; esac
 	firewall_save "$ports" || return 1
 	systemctl start "$FIREWALL_SERVICE" || return 1
 	if ! systemctl enable "$FIREWALL_SERVICE"; then
 		echo "规则已生效，但设置开机恢复失败。" >&2
 		return 1
 	fi
-	echo "端口防火墙已启用，规则已保存。"
-}
-
-firewall_disable() {
-	systemctl disable "$FIREWALL_SERVICE" || return 1
-	if firewall_running; then nft delete table inet caddy_abuseguard || return 1; fi
-	echo "端口防火墙已停用，配置保留；IP 封禁继续生效。"
+	echo "AbuseGuard 防火墙已启用，开机自动恢复。开放端口："
+	firewall_ports | sed 's/^/  /'
 }
 
 firewall_change_port() {
 	local action="$1" proto port ports ssh_ports p
-	[ -f "$FIREWALL_FILE" ] || { echo "请先启用端口防火墙，建立初始规则。"; return 1; }
+	[ -f "$FIREWALL_FILE" ] || { echo "防火墙配置缺失，请选择重新应用规则或重新运行安装器。"; return 1; }
+	firewall_check_conflicts || return 1
 	read -r -p "协议（tcp/udp，默认 tcp）: " proto || return 1
 	proto="${proto:-tcp}"
 	case "$proto" in tcp|udp) ;; *) echo "协议只能是 tcp 或 udp。"; return 1 ;; esac
@@ -434,7 +447,7 @@ firewall_change_port() {
 	if firewall_running; then
 		echo "规则已保存并生效（已建立的连接继续保留）。"
 	else
-		echo "规则已保存；端口防火墙当前停用，启用后生效。"
+		echo "规则已保存；防火墙未运行，请选择重新应用规则。"
 	fi
 }
 
@@ -444,34 +457,33 @@ act_firewall() {
 	while true; do
 		clear 2>/dev/null || true
 		echo -e "${C_B}== 防火墙管理 ==${C_0}"
-		if firewall_running; then echo "  端口防火墙：运行中"; else echo "  端口防火墙：未启用"; fi
+		if firewall_running; then echo "  AbuseGuard 防火墙：运行中"; else echo "  AbuseGuard 防火墙：未就绪，请重新应用规则"; fi
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then echo "  开机恢复：已开启"; else echo "  开机恢复：未开启"; fi
-		echo "  启用后的策略：仅开放下列端口，保留已建立连接。"
+		echo "  策略：只开放下列入站端口，保留已建立连接。"
 		ports="$(firewall_ports)"
-		if [ -n "$ports" ]; then printf '%s\n' "$ports" | sed 's/^/    /'; else echo "    （首次启用时添加 SSH、80/tcp、443/tcp、443/udp）"; fi
-		echo "  管理本机入站流量；云防火墙、其他防火墙及容器转发规则独立生效。"
+		if [ -n "$ports" ]; then printf '%s\n' "$ports" | sed 's/^/    /'; else echo "    （配置缺失）"; fi
+		firewall_check_conflicts || true
+		echo "  云安全组及容器转发规则需在对应平台管理。"
 		cat <<'MENU'
 
-  [1] 启用端口防火墙
-  [2] 停用端口防火墙（保留 IP 封禁）
-  [3] 开放端口（添加规则）
-  [4] 关闭端口（删除放行规则）
-  [5] 查看被封禁的 IP
-  [6] 封禁 IP
-  [7] 解封 IP
-  [8] 查看本机全部 nftables 规则
+  [1] 开放端口（添加规则）
+  [2] 关闭端口（删除放行规则）
+  [3] 查看被封禁的 IP
+  [4] 封禁 IP
+  [5] 解封 IP
+  [6] 查看本机全部 nftables 规则
+  [7] 重新应用防火墙规则
   [0] 返回
 MENU
 		read -r -p "请选择: " choice || return
 		case "$choice" in
-			1) firewall_enable || echo "启用失败，请检查上方错误。"; pause ;;
-			2) firewall_disable || echo "停用失败，请检查上方错误。"; pause ;;
-			3) firewall_change_port open || echo "未完成端口变更。"; pause ;;
-			4) firewall_change_port close || echo "未完成端口变更。"; pause ;;
-			5) act_banned ;;
-			6) act_ban ;;
-			7) act_unban ;;
-			8) nft -a list ruleset; pause ;;
+			1) firewall_change_port open || echo "未完成端口变更。"; pause ;;
+			2) firewall_change_port close || echo "未完成端口变更。"; pause ;;
+			3) act_banned ;;
+			4) act_ban ;;
+			5) act_unban ;;
+			6) nft -a list ruleset; pause ;;
+			7) firewall_apply || echo "应用失败，请检查上方错误。"; pause ;;
 			0) return ;;
 			*) ;;
 		esac
@@ -756,4 +768,9 @@ if [ "$(id -u)" != "0" ]; then
 	echo "ag 需要 root 权限——请用 root 运行，或先安装 sudo。" >&2
 	exit 1
 fi
+case "${1:-}" in
+	--firewall-apply) firewall_apply; exit $? ;;
+	"") ;;
+	*) echo "用法：ag [--firewall-apply]" >&2; exit 2 ;;
+esac
 while true; do menu; done
