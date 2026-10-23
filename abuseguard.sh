@@ -70,9 +70,9 @@ panel_line() {
 	printf '%s%s%s%s%s\n' "$C_B" "$1" "${fill// /─}" "$2" "$C_0"
 }
 
-# 按终端字符宽度换行：中文占两列，ANSI 颜色不占列；跨行保留当前颜色。
+# 固定宽度框线：汉字和全角标点占两列，ANSI 颜色不占列。
 panel_row() {
-	local LC_ALL=C.UTF-8 text="$1" line='' color='' used=0 char code size seq needed word=0
+	local LC_ALL=C.UTF-8 text="$1" line='' color='' used=0 char size seq
 	local limit=$((PANEL_WIDTH - 4)) sgr=$'\033''\[[0-9;]*m'
 	while [ -n "$text" ]; do
 		if [[ "$text" =~ ^($sgr) ]]; then
@@ -80,21 +80,9 @@ panel_row() {
 			color="$seq"; [ "$seq" != "$C_0" ] || color=''
 			continue
 		fi
-		needed=1
-		if [ "$word" -eq 0 ] && [[ "$text" =~ ^([a-zA-Z0-9._:/,-]+) ]]; then
-			needed="${#BASH_REMATCH[1]}"
-			[ "$needed" -le "$limit" ] || needed=1
-		fi
-		char="${text:0:1}"; text="${text:1}"; size=1
-		case "$char" in [a-zA-Z0-9._:/,-]) word=1 ;; *) word=0 ;; esac
-		printf -v code '%d' "'$char"
-		if (( (code >= 0x1100 && code <= 0x115f) || (code >= 0x2e80 && code <= 0xa4cf) ||
-			(code >= 0xac00 && code <= 0xd7a3) || (code >= 0xf900 && code <= 0xfaff) ||
-			(code >= 0xfe10 && code <= 0xfe19) || (code >= 0xfe30 && code <= 0xfe6f) ||
-			(code >= 0xff00 && code <= 0xff60) || (code >= 0xffe0 && code <= 0xffe6) ||
-			(code >= 0x20000 && code <= 0x3fffd) )); then size=2; fi
-		[ "$needed" -ge "$size" ] || needed="$size"
-		if (( used + needed > limit )) || [ "$char" = $'\n' ]; then
+		char="${text:0:1}"; text="${text:1}"
+		case "$char" in [㐀-鿿　-〿！-～]) size=2 ;; *) size=1 ;; esac
+		if (( used + size > limit )) || [ "$char" = $'\n' ]; then
 			printf '%s│%s %s%*s %s│%s\n' "$C_B" "$C_0" "$line" "$((limit - used))" '' "$C_B" "$C_0"
 			line="$color"; used=0
 			[ "$char" != $'\n' ] || continue
@@ -105,10 +93,6 @@ panel_row() {
 }
 
 panel_start() {
-	local columns="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
-	case "$columns" in ''|*[!0-9]*) columns=80 ;; esac
-	[ "$columns" -ge 20 ] || columns=20
-	PANEL_WIDTH=$((columns > 78 ? 76 : columns - 2))
 	clear 2>/dev/null || true
 	panel_line '╭' '╮'
 	panel_row " ${C_B}AbuseGuard${C_0}  /  ${C_H}$1${C_0}"
@@ -119,25 +103,15 @@ panel_title() { panel_start "$1"; panel_end; }
 panel_section() { panel_line '├' '┤'; panel_row " ${C_H}$1${C_0}"; }
 
 panel_option() {
-	local label=" ${C_B}[$1]${C_0} ${C_H}$2${C_0}" hint="${3:-}" width gap
-	if [ -n "$hint" ] && [ "$PANEL_WIDTH" -ge 64 ]; then
+	local width gap=''
+	if [ -n "${3:-}" ]; then
 		width="$(printf '%s' "$2" | LC_ALL=C.UTF-8 wc -L)"
 		printf -v gap '%*s' "$((14 - width))" ''
-		panel_row "$label$gap$hint"
-	else
-		panel_row "$label"
-		[ -z "$hint" ] || panel_row "     $hint"
 	fi
+	panel_row " ${C_B}[$1]${C_0} ${C_H}$2${C_0}${gap}${3:-}"
 }
 
-panel_pair() {
-	if [ "$PANEL_WIDTH" -ge 64 ]; then
-		panel_option "$1" "$2" "${C_B}[$3]${C_0} ${C_H}$4${C_0}"
-	else
-		panel_option "$1" "$2"
-		panel_option "$3" "$4"
-	fi
-}
+panel_pair() { panel_option "$1" "$2" "${C_B}[$3]${C_0} ${C_H}$4${C_0}"; }
 
 panel_footer() {
 	panel_line '├' '┤'
@@ -191,12 +165,7 @@ header() {
 	panel_start "控制中心 · v${version}"
 	panel_section "运行状态"
 	panel_row " Caddy $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )   Fail2Ban $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	if [ "$PANEL_WIDTH" -ge 64 ]; then
-		panel_row " 防火墙 ${firewall_status}   当前封禁 ${C_H}${banned}${C_0}   上报 ${report_status}"
-	else
-		panel_row " 防火墙 ${firewall_status}   当前封禁 ${C_H}${banned}${C_0}"
-		panel_row " 上报 ${report_status}"
-	fi
+	panel_row " 防火墙 ${firewall_status}   当前封禁 ${C_H}${banned}${C_0}   上报 ${report_status}"
 	panel_row " 情报 IP ${C_H}${intel}${C_0}  ${fresh}"
 }
 
