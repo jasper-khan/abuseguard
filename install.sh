@@ -126,20 +126,24 @@ validate_caddyfile() {
 	CF_API_TOKEN="$cf_token" "$CADDY_BIN" validate --config "$config" --adapter caddyfile
 }
 
-# Only remove an empty mktemp directory. Leave nonempty trees for manual
-# cleanup instead of enumerating and deleting their contents.
+# Remove only a mktemp-created checkout, one entry at a time. Refuse symlinks
+# and any path outside the exact temporary-directory shapes used by mktemp.
 cleanup_temp_tree() {
-	local root="$1"
+	local root="$1" path
 	case "$root" in
 		/tmp/tmp.*|/var/tmp/tmp.*) : ;;
 		*) warn "拒绝清理非临时目录：$root"; return 1 ;;
 	esac
 	[ -e "$root" ] || return 0
 	[ ! -L "$root" ] || { warn "拒绝清理符号链接：$root"; return 1; }
-	if ! rmdir -- "$root" 2>/dev/null; then
-		warn "临时目录已保留，请检查后手动清理：$root"
-		return 1
-	fi
+	while IFS= read -r -d '' path; do
+		if [ -d "$path" ] && [ ! -L "$path" ]; then
+			rmdir -- "$path" || return 1
+		else
+			rm -f -- "$path" || return 1
+		fi
+	done < <(find "$root" -xdev -depth -mindepth 1 -print0)
+	rmdir -- "$root"
 }
 
 [ "$(id -u)" = "0" ] || die "请以 root 运行（sudo）。"
@@ -160,8 +164,8 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 		|| die "自举解压失败。"
 	rm -f "$AG_TMP/repo.tar.gz"
 	export ABUSEGUARD_REPO ABUSEGUARD_REF
-	# Run (not exec) so the EXIT trap reports the retained checkout for manual
-	# cleanup; propagate the installer's exit code.
+	# Run (not exec) the unpacked installer so the EXIT trap above still fires
+	# and cleans the temp checkout; propagate its exit code.
 	bash "$AG_TMP/install.sh" "$@"
 	exit $?
 fi
