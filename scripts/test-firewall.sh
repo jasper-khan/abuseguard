@@ -49,6 +49,7 @@ systemctl() {
 }
 firewall_apply </dev/null
 nft list table inet caddy_abuseguard | grep -q 'tcp dport 2222 accept'
+if nft list table inet caddy_abuseguard | grep -q 'tcp dport 80 accept'; then exit 1; fi
 firewall_change_port open tcp 54321 </dev/null
 firewall_change_port open udp 54321 </dev/null
 nft list table inet caddy_abuseguard | grep -q 'tcp dport 54321 accept'
@@ -122,9 +123,10 @@ if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored unreadable nft 
 # the input policy; Fail2Ban and our own table are managed by AbuseGuard.
 RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
 firewall_apply </dev/null >/dev/null
-for rule in 'tcp 22' 'tcp 2200' 'tcp 2222' 'tcp 80' 'tcp 443' 'udp 443'; do
+for rule in 'tcp 22' 'tcp 2200' 'tcp 2222' 'tcp 443' 'udp 443'; do
 	firewall_ports | grep -qxF "$rule" || fail "missing initial rule: $rule"
 done
+if firewall_ports | grep -qx 'tcp 80'; then fail 'initial config opened TCP 80'; fi
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'activation did not load saved config'
 grep -qxF "enable $FIREWALL_SERVICE" "$TMP/systemctl.calls" || fail 'boot restore not enabled'
 
@@ -132,6 +134,9 @@ grep -qxF "enable $FIREWALL_SERVICE" "$TMP/systemctl.calls" || fail 'boot restor
 firewall_change_port open <<< $'tcp\n8080' >/dev/null
 firewall_change_port open <<< $'tcp\n08080' >/dev/null
 [ "$(firewall_ports | grep -cx 'tcp 8080')" = 1 ] || fail 'duplicate/noncanonical port'
+firewall_change_port open <<< $'tcp\n80' >/dev/null
+firewall_apply </dev/null >/dev/null
+firewall_ports | grep -qx 'tcp 80' || fail 'update closed an explicitly opened TCP 80'
 firewall_change_port close <<< $'tcp\n80' >/dev/null
 if firewall_ports | grep -qx 'tcp 80'; then fail 'port was not closed'; fi
 firewall_ports | grep -qx 'udp 443' || fail 'unrelated UDP rule lost'

@@ -462,7 +462,7 @@ firewall_apply() {
 	if [ -f "$FIREWALL_FILE" ]; then
 		ports="$(firewall_ports)" || return 1
 	else
-		ports=$'tcp 80\ntcp 443\nudp 443'
+		ports=$'tcp 443\nudp 443'
 	fi
 	for p in $ssh_ports; do ports+=$'\n'"tcp $p"; done
 	firewall_save "$ports" || return 1
@@ -590,7 +590,7 @@ act_sites() {
 		if cf_is_set; then
 			panel_row " 证书方式：Cloudflare DNS（已配置 CF token）"
 		else
-			panel_row " 证书方式：Caddy 自动 HTTPS（需 80/443 可直达）"
+			panel_row " 证书方式：Caddy 自动 HTTPS（需 443/tcp 可直达）"
 		fi
 		panel_section "站点管理"
 		panel_option 1 "添加站点"
