@@ -14,7 +14,7 @@ SITES_DIR=/etc/caddy/sites
 STATE_DIR=/var/lib/caddy-abuseguard
 INTEL="$STATE_DIR/intel.txt"
 JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
-PANEL_REFRESH_SECONDS=10
+PANEL_REFRESH_SECONDS=1800
 FIREWALL_FILE="$CONF_DIR/firewall.nft"
 FIREWALL_SERVICE=caddy-abuseguard-firewall.service
 REPO_FILE="$CONF_DIR/repo"
@@ -834,7 +834,7 @@ menu() {
 	panel_option 3 "防火墙管理" "端口 · IP 封禁/解封 · 白名单"
 	panel_option 4 "威胁情报" "情报同步 · 上报 · API 设置"
 	panel_option 5 "系统维护" "日志 · 更新 · 卸载"
-	panel_footer "退出面板" "每 ${PANEL_REFRESH_SECONDS} 秒刷新状态"
+	panel_footer "退出面板" "每 30 分钟刷新状态"
 	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 [0-5] > " choice
 	read_status=$?
 	case "$read_status" in

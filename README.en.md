@@ -112,7 +112,7 @@ validation before it is applied.
 
 ## The panel
 
-Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 10 seconds without requiring a menu action:
+Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 30 minutes without requiring a menu action:
 
 The home screen has five categories, with related actions grouped within each. Enter `0` in a submenu to return to its parent. Blue borders separate sections, colors highlight status, and the background follows the SSH client's theme:
 

@@ -14,13 +14,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-grep -qx 'PANEL_REFRESH_SECONDS=10' "$PANEL"
+grep -qx 'PANEL_REFRESH_SECONDS=1800' "$PANEL"
 
 # Source only the function definitions, shorten the production timeout, and
 # keep stdin open without sending a choice. The menu must return for a redraw
 # before the holder closes the pipe two seconds later.
 awk '/^# The panel needs root/{exit} {print}' "$PANEL" |
-	sed 's/^PANEL_REFRESH_SECONDS=10$/PANEL_REFRESH_SECONDS=0.1/' > "$PANEL_SOURCE"
+	sed 's/^PANEL_REFRESH_SECONDS=1800$/PANEL_REFRESH_SECONDS=0.1/' > "$PANEL_SOURCE"
 
 result="$(
 	timeout 1 bash --noprofile --norc -c '
