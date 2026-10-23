@@ -758,6 +758,8 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/s
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.timer"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.service"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
+# Installed but opt-in: only the panel enables the default-deny port policy.
+install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-firewall.service" /etc/systemd/system/
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 # Older releases installed the panel as `abuseguard`. Remove that stale copy
 # so `ag` is the only shortcut, but only when the file really is our panel.

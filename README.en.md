@@ -118,6 +118,7 @@ Just run `ag` (the panel needs root; a normal user is transparently re-run under
 - **sites / reverse-proxy manager**: enter a domain + upstream (local port or remote IP:port) and it generates a protected reverse-proxy site (auto `import abuseguard` + TLS as needed); also list/delete
 - list currently-banned IPs per jail
 - **unban / ban a specific IP** (one-click release for a false positive)
+- **firewall manager** (menu 15): inspect rules, open/close TCP or UDP ports, and list/ban/unban IPs
 - edit the whitelist (in-panel add/remove; **an added IP is auto-unbanned** and fail2ban reloaded)
 - sync threat-intel now / flush the report queue now
 - set the AbuseIPDB key / Cloudflare token
@@ -125,6 +126,12 @@ Just run `ag` (the panel needs root; a normal user is transparently re-run under
 - view recent logs, update, uninstall
 
 Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/caddy/sites/*.caddy`, and removes only the exact `header_up X-Forwarded-Host {host}` or `header_up X-Forwarded-Host {http.request.host}` directives that Caddy identifies as redundant. Other reverse-proxy settings and request headers are preserved.
+
+The port firewall is opt-in through the panel; installation and updates do not enable it. First activation allows all detected SSH ports, TCP 80/443, and UDP 443, and drops other new inbound connections. Established connections, loopback, ICMP (including IPv6 neighbor discovery), and DHCP remain allowed; outbound traffic is unrestricted. The panel refuses to close detected SSH ports. Closing other ports affects new connections only.
+
+`/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot systemd service restores it at boot, without a new daemon. Disabling removes that table and boot restoration but keeps the configuration; uninstalling also removes only this project's table. IP bans retain the existing Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports.
+
+Opening a port here only permits it through AbuseGuard's local input rules: other firewalls and cloud security groups may still block it. Forwarded traffic, including published container ports, is outside this feature's scope. The IP allowlist exempts addresses from bans, not from port filtering. If another tool flushes the entire nftables ruleset, enable the port firewall again to restore it. Reverse-proxy upstream ports normally do not need public access.
 
 ## Protection model
 

@@ -197,6 +197,9 @@ clean_sites_keep() {
 
 # --- 1) stop + remove AbuseGuard's own components (both modes) ----------------
 log "停止并移除 AbuseGuard 组件"
+run "systemctl disable --now caddy-abuseguard-firewall.service >/dev/null 2>&1 || true"
+run "if nft list table inet caddy_abuseguard >/dev/null 2>&1; then nft delete table inet caddy_abuseguard; fi" || exit 1
+remove_file /etc/systemd/system/caddy-abuseguard-firewall.service
 for u in caddy-abuseguard-report.timer caddy-abuseguard-report.service \
          caddy-abuseguard-sync.timer caddy-abuseguard-sync.service; do
 	run "systemctl disable --now $u >/dev/null 2>&1 || true"

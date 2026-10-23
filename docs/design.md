@@ -15,6 +15,8 @@
 - **systemd timers** — periodic intel refresh and report-queue flush.
 - **panel** (`ag`) — a numbered bash TUI over the above.
 
+The panel also offers an opt-in host input firewall. Its only persistent state is `/etc/caddy-abuseguard/firewall.nft`; a oneshot systemd unit loads it at boot. The panel manages TCP/UDP port allow rules in a dedicated `inet caddy_abuseguard` table, with a default-drop input policy and exceptions for SSH, established connections, loopback, ICMP and DHCP. Port edits validate with `nft -c` and replace only that table in one transaction. IP bans continue to use Fail2Ban, so there is no second ban database or allowlist implementation. As specified by the [nftables verdict semantics](https://www.netfilter.org/projects/nftables/manpage.html), an accept in the port table cannot override a drop in another base chain. Other host firewalls, cloud firewalls and forwarded/container traffic remain outside this manager's control.
+
 ## Canonical Caddy layout
 
 The main `/etc/caddy/Caddyfile` contains global settings and imports the shared `/etc/caddy/abuseguard.caddy` snippet plus `/etc/caddy/sites/*.caddy`. Every protected site lives in its own `/etc/caddy/sites/<domain>.caddy` file and uses `import abuseguard`.

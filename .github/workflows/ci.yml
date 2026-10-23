@@ -63,6 +63,11 @@ jobs:
           done
           bash ./scripts/test-panel-refresh.sh
           bash ./scripts/test-site-migration.sh
+          bash ./scripts/test-firewall.sh
+      - name: Verify isolated nftables transactions
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq nftables
+          sudo bash ./scripts/test-firewall.sh --kernel
 
   log-contract:
     runs-on: ubuntu-latest

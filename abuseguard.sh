@@ -15,6 +15,8 @@ STATE_DIR=/var/lib/caddy-abuseguard
 INTEL="$STATE_DIR/intel.txt"
 JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
 PANEL_REFRESH_SECONDS=10
+FIREWALL_FILE="$CONF_DIR/firewall.nft"
+FIREWALL_SERVICE=caddy-abuseguard-firewall.service
 REPO_FILE="$CONF_DIR/repo"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" || echo jasper-khan/abuseguard )}"
 
@@ -304,6 +306,178 @@ act_whitelist() {
 	done
 }
 
+# ---- 本机入站端口防火墙（IP 封禁仍由 fail2ban 管理） ----
+firewall_running() { nft list table inet caddy_abuseguard >/dev/null 2>&1; }
+
+firewall_ports() {
+	[ -f "$FIREWALL_FILE" ] || return 0
+	awk 'NF == 4 && ($1 == "tcp" || $1 == "udp") && $2 == "dport" && $4 == "accept" { print $1, $3 }' "$FIREWALL_FILE"
+}
+
+# 同时保留当前监听、sshd 配置和本次 SSH 连接的端口，支持多个 SSH 端口。
+firewall_ssh_ports() {
+	local ports p
+	ports="$(
+		{
+			ss -H -tlnp 2>/dev/null | awk '/sshd/ { n = split($4, a, ":"); print a[n] }'
+			sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }'
+			[ -z "${SSH_CONNECTION:-}" ] || printf '%s\n' "${SSH_CONNECTION##* }"
+		} | sort -un
+	)"
+	[ -n "$ports" ] || { echo "无法识别 SSH 端口，已取消变更。" >&2; return 1; }
+	for p in $ports; do port_valid "$p" || return 1; done
+	printf '%s\n' "$ports"
+}
+
+# 单一持久配置；在一个 nft 事务中只替换本项目的表，不清空整个 ruleset。
+firewall_render() {
+	local proto port
+	cat <<'NFT'
+# Managed by ag. Change ports through the firewall menu.
+add table inet caddy_abuseguard
+delete table inet caddy_abuseguard
+table inet caddy_abuseguard {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iifname "lo" accept
+		ct state established,related accept
+		ct state invalid drop
+		meta l4proto { icmp, ipv6-icmp } accept
+		udp sport 67 udp dport 68 accept
+		udp sport 547 udp dport 546 accept
+NFT
+	while read -r proto port; do
+		[ -n "$proto" ] || continue
+		case "$proto" in tcp|udp) ;; *) return 1 ;; esac
+		port_valid "$port" || return 1
+		printf '\t\t%s dport %s accept\n' "$proto" "$port"
+	done
+	printf '\t}\n}\n'
+}
+
+firewall_save() {
+	local ports="$1" candidate active=0
+	# Do not take over an existing same-named table without our saved config.
+	if firewall_running; then
+		[ -f "$FIREWALL_FILE" ] || { echo "同名防火墙表已存在但没有配置文件，未接管。" >&2; return 1; }
+		active=1
+	fi
+	candidate="$(mktemp "$CONF_DIR/.firewall.XXXXXX")" || return 1
+	if ! printf '%s\n' "$ports" | sort -u | firewall_render > "$candidate" \
+		|| ! nft -c -f "$candidate"; then
+		rm -f -- "$candidate"
+		return 1
+	fi
+	if [ "$active" = 1 ] && ! nft -f "$candidate"; then
+		rm -f -- "$candidate"
+		return 1
+	fi
+	if ! mv -f -- "$candidate" "$FIREWALL_FILE"; then
+		# If persistence fails after applying, restore the previous live rules.
+		if [ "$active" = 1 ]; then
+			nft -f "$FIREWALL_FILE" || echo "恢复旧防火墙规则失败，请检查当前规则。" >&2
+		fi
+		rm -f -- "$candidate"
+		return 1
+	fi
+}
+
+firewall_enable() {
+	local ports ssh_ports p answer
+	ssh_ports="$(firewall_ssh_ports)" || return 1
+	if [ -f "$FIREWALL_FILE" ]; then
+		ports="$(firewall_ports)" || return 1
+	else
+		ports=$'tcp 80\ntcp 443\nudp 443'
+	fi
+	for p in $ssh_ports; do ports+=$'\n'"tcp $p"; done
+	echo "启用后：仅开放以下入站端口，其余端口拒绝新连接。"
+	printf '%s\n' "$ports" | sort -u | sed 's/^/  /'
+	echo "保留已建立连接、回环、ICMP 和 DHCP；出站不受限制。"
+	read -r -p "确认启用并在开机时恢复？[y/N] " answer || return 1
+	case "$answer" in y|Y|yes|YES) ;; *) return 0 ;; esac
+	firewall_save "$ports" || return 1
+	systemctl start "$FIREWALL_SERVICE" || return 1
+	if ! systemctl enable "$FIREWALL_SERVICE"; then
+		echo "规则已生效，但设置开机恢复失败。" >&2
+		return 1
+	fi
+	echo "端口防火墙已启用，规则已保存。"
+}
+
+firewall_disable() {
+	systemctl disable "$FIREWALL_SERVICE" || return 1
+	if firewall_running; then nft delete table inet caddy_abuseguard || return 1; fi
+	echo "端口防火墙已停用，配置保留；IP 封禁继续生效。"
+}
+
+firewall_change_port() {
+	local action="$1" proto port ports ssh_ports p
+	[ -f "$FIREWALL_FILE" ] || { echo "请先启用端口防火墙，建立初始规则。"; return 1; }
+	read -r -p "协议（tcp/udp，默认 tcp）: " proto || return 1
+	proto="${proto:-tcp}"
+	case "$proto" in tcp|udp) ;; *) echo "协议只能是 tcp 或 udp。"; return 1 ;; esac
+	read -r -p "端口（1–65535，留空取消）: " port || return 1
+	[ -n "$port" ] || return 0
+	[ "${#port}" -le 5 ] && port_valid "$port" || { echo "端口格式无效。"; return 1; }
+	port=$((10#$port))
+	ssh_ports="$(firewall_ssh_ports)" || return 1
+	if [ "$action" = close ] && [ "$proto" = tcp ] && grep -qxF "$port" <<< "$ssh_ports"; then
+		echo "这是 SSH 管理端口，不能在面板中关闭。"
+		return 1
+	fi
+	ports="$(firewall_ports)" || return 1
+	ports="$(awk -v proto="$proto" -v port="$port" '!($1 == proto && $2 == port)' <<< "$ports")"
+	[ "$action" != open ] || ports+=$'\n'"$proto $port"
+	for p in $ssh_ports; do ports+=$'\n'"tcp $p"; done
+	firewall_save "$ports" || return 1
+	if firewall_running; then
+		echo "规则已保存并生效（已建立的连接继续保留）。"
+	else
+		echo "规则已保存；端口防火墙当前停用，启用后生效。"
+	fi
+}
+
+act_firewall() {
+	local choice ports
+	nft list tables >/dev/null || { echo "无法访问 nftables。"; pause; return; }
+	while true; do
+		clear 2>/dev/null || true
+		echo -e "${C_B}== 防火墙管理 ==${C_0}"
+		if firewall_running; then echo "  端口防火墙：运行中"; else echo "  端口防火墙：未启用"; fi
+		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then echo "  开机恢复：已开启"; else echo "  开机恢复：未开启"; fi
+		echo "  启用后的策略：仅开放下列端口，保留已建立连接。"
+		ports="$(firewall_ports)"
+		if [ -n "$ports" ]; then printf '%s\n' "$ports" | sed 's/^/    /'; else echo "    （首次启用时添加 SSH、80/tcp、443/tcp、443/udp）"; fi
+		echo "  管理本机入站流量；云防火墙、其他防火墙及容器转发规则独立生效。"
+		cat <<'MENU'
+
+  [1] 启用端口防火墙
+  [2] 停用端口防火墙（保留 IP 封禁）
+  [3] 开放端口（添加规则）
+  [4] 关闭端口（删除放行规则）
+  [5] 查看被封禁的 IP
+  [6] 封禁 IP
+  [7] 解封 IP
+  [8] 查看本机全部 nftables 规则
+  [0] 返回
+MENU
+		read -r -p "请选择: " choice || return
+		case "$choice" in
+			1) firewall_enable || echo "启用失败，请检查上方错误。"; pause ;;
+			2) firewall_disable || echo "停用失败，请检查上方错误。"; pause ;;
+			3) firewall_change_port open || echo "未完成端口变更。"; pause ;;
+			4) firewall_change_port close || echo "未完成端口变更。"; pause ;;
+			5) act_banned ;;
+			6) act_ban ;;
+			7) act_unban ;;
+			8) nft -a list ruleset; pause ;;
+			0) return ;;
+			*) ;;
+		esac
+	done
+}
+
 # ---- 站点 / 反向代理管理 ----
 # CF token 是否已设置（决定站点用 Cloudflare DNS 还是 Caddy 默认 HTTPS）
 cf_is_set() { grep -qE '^CF_API_TOKEN=.+' "$CADDY_ENV" 2>/dev/null; }
@@ -539,6 +713,7 @@ menu() {
   [12]  查看最近日志
   [13]  更新 AbuseGuard（重新运行安装器）
   [14]  卸载
+  [15]  防火墙管理（端口开放/关闭、IP 封禁/解封）
    [0]  退出
 MENU
 	echo
@@ -565,6 +740,7 @@ MENU
 		12) act_logs ;;
 		13) act_update ;;
 		14) act_uninstall ;;
+		15) act_firewall ;;
 		0) exit 0 ;;
 		*) ;;
 	esac

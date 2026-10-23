@@ -86,6 +86,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 - **站点/反代管理**：输入域名 + 上游（本地或公网 IP:端口）即自动生成受保护的反代站点（自动写入 `import abuseguard` + 按需 TLS），也可列出/删除
 - 按 jail 列出当前被封禁的 IP
 - **解封 / 立即封禁指定 IP**（误封可一键解封）
+- **防火墙管理**（菜单 15）：查看规则、开放/关闭 TCP 或 UDP 端口，以及查看、封禁、解封 IP
 - 编辑白名单（面板内增删；**新增会自动解封该 IP** 并重载 fail2ban）
 - 立即同步威胁情报 / 立即冲刷上报队列
 - 设置 AbuseIPDB key / Cloudflare token
@@ -93,6 +94,12 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 - 查看近期日志、更新、卸载
 
 更新会在校验前用 `caddy fmt` 规范化主 Caddyfile 和 `/etc/caddy/sites/*.caddy`，并删除 Caddy 明确判定为冗余的精确指令 `header_up X-Forwarded-Host {host}` 或 `header_up X-Forwarded-Host {http.request.host}`；其他反代配置和请求头均保留。
+
+端口防火墙需在面板中主动启用，安装和更新不会自动改变入站策略。首次启用默认开放检测到的所有 SSH 端口、80/tcp、443/tcp 和 443/udp，其余入站端口默认丢弃；保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭检测到的 SSH 端口；关闭其他端口只阻止新连接。
+
+端口配置仅保存在 `/etc/caddy-abuseguard/firewall.nft`，由独立的 `inet caddy_abuseguard` 表执行。修改先通过 `nft -c` 校验，再以单次事务应用；一次性 systemd 服务负责开机恢复，无新增常驻进程。停用会移除这张表并取消开机恢复，保留配置；卸载也只移除本项目的表。IP 封禁继续复用 fail2ban，保留原有白名单、90 天封禁和不上报手动封禁的规则。
+
+面板中的端口放行仅针对 AbuseGuard 的本机入站规则，其他防火墙和云安全组仍可拦截；容器发布端口等转发流量不在此范围。白名单只豁免 IP 封禁，不绕过端口策略。其他工具若清空整个 nftables ruleset，需要在面板重新启用以恢复端口规则。新增反代站点通常只需已有的 80/443，无需向公网开放反代上游端口。
 
 ## 防护模型
 
