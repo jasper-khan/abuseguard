@@ -216,8 +216,12 @@ systemctl() {
 	esac
 }
 clear() { :; }
+panel_start() { :; }
 panel_title() { :; }
 panel_section() { :; }
+panel_row() { :; }
+panel_option() { :; }
+panel_footer() { :; }
 sleep() { :; }
 pause() { :; }
 C_B=""

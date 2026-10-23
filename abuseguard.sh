@@ -59,18 +59,91 @@ caddy_restart_active() {
 	[ "$(systemctl is-active caddy 2>/dev/null)" = active ]
 }
 
-C_G='\033[1;32m'; C_Y='\033[1;33m'; C_R='\033[1;31m'; C_B='\033[1;34m'; C_0='\033[0m'
+C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;34m'; C_H=$'\033[1m'; C_0=$'\033[0m'
+PANEL_WIDTH=76
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
-panel_title() {
-	clear 2>/dev/null || true
-	printf '%b────────────────────────────────────────────────────────────%b\n' "$C_B" "$C_0"
-	printf '  %bAbuseGuard%b  /  %s\n' "$C_B" "$C_0" "$1"
-	printf '%b────────────────────────────────────────────────────────────%b\n' "$C_B" "$C_0"
+panel_line() {
+	local fill
+	printf -v fill '%*s' "$((PANEL_WIDTH - 2))" ''
+	printf '%s%s%s%s%s\n' "$C_B" "$1" "${fill// /─}" "$2" "$C_0"
 }
 
-panel_section() { printf '\n  %b%s%b\n' "$C_B" "$1" "$C_0"; }
+# 按终端字符宽度换行：中文占两列，ANSI 颜色不占列；跨行保留当前颜色。
+panel_row() {
+	local LC_ALL=C.UTF-8 text="$1" line='' color='' used=0 char code size seq needed word=0
+	local limit=$((PANEL_WIDTH - 4)) sgr=$'\033''\[[0-9;]*m'
+	while [ -n "$text" ]; do
+		if [[ "$text" =~ ^($sgr) ]]; then
+			seq="${BASH_REMATCH[1]}"; line+="$seq"; text="${text:${#seq}}"
+			color="$seq"; [ "$seq" != "$C_0" ] || color=''
+			continue
+		fi
+		needed=1
+		if [ "$word" -eq 0 ] && [[ "$text" =~ ^([a-zA-Z0-9._:/,-]+) ]]; then
+			needed="${#BASH_REMATCH[1]}"
+			[ "$needed" -le "$limit" ] || needed=1
+		fi
+		char="${text:0:1}"; text="${text:1}"; size=1
+		case "$char" in [a-zA-Z0-9._:/,-]) word=1 ;; *) word=0 ;; esac
+		printf -v code '%d' "'$char"
+		if (( (code >= 0x1100 && code <= 0x115f) || (code >= 0x2e80 && code <= 0xa4cf) ||
+			(code >= 0xac00 && code <= 0xd7a3) || (code >= 0xf900 && code <= 0xfaff) ||
+			(code >= 0xfe10 && code <= 0xfe19) || (code >= 0xfe30 && code <= 0xfe6f) ||
+			(code >= 0xff00 && code <= 0xff60) || (code >= 0xffe0 && code <= 0xffe6) ||
+			(code >= 0x20000 && code <= 0x3fffd) )); then size=2; fi
+		[ "$needed" -ge "$size" ] || needed="$size"
+		if (( used + needed > limit )) || [ "$char" = $'\n' ]; then
+			printf '%s│%s %s%*s %s│%s\n' "$C_B" "$C_0" "$line" "$((limit - used))" '' "$C_B" "$C_0"
+			line="$color"; used=0
+			[ "$char" != $'\n' ] || continue
+		fi
+		line+="$char"; used=$((used + size))
+	done
+	printf '%s│%s %s%*s %s│%s\n' "$C_B" "$C_0" "$line" "$((limit - used))" '' "$C_B" "$C_0"
+}
+
+panel_start() {
+	local columns="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+	case "$columns" in ''|*[!0-9]*) columns=80 ;; esac
+	[ "$columns" -ge 20 ] || columns=20
+	PANEL_WIDTH=$((columns > 78 ? 76 : columns - 2))
+	clear 2>/dev/null || true
+	panel_line '╭' '╮'
+	panel_row " ${C_B}AbuseGuard${C_0}  /  ${C_H}$1${C_0}"
+}
+
+panel_end() { panel_line '╰' '╯'; }
+panel_title() { panel_start "$1"; panel_end; }
+panel_section() { panel_line '├' '┤'; panel_row " ${C_H}$1${C_0}"; }
+
+panel_option() {
+	local label=" ${C_B}[$1]${C_0} ${C_H}$2${C_0}" hint="${3:-}" width gap
+	if [ -n "$hint" ] && [ "$PANEL_WIDTH" -ge 64 ]; then
+		width="$(printf '%s' "$2" | LC_ALL=C.UTF-8 wc -L)"
+		printf -v gap '%*s' "$((14 - width))" ''
+		panel_row "$label$gap$hint"
+	else
+		panel_row "$label"
+		[ -z "$hint" ] || panel_row "     $hint"
+	fi
+}
+
+panel_pair() {
+	if [ "$PANEL_WIDTH" -ge 64 ]; then
+		panel_option "$1" "$2" "${C_B}[$3]${C_0} ${C_H}$4${C_0}"
+	else
+		panel_option "$1" "$2"
+		panel_option "$3" "$4"
+	fi
+}
+
+panel_footer() {
+	panel_line '├' '┤'
+	panel_option 0 "$1" "${2:-}"
+	panel_end
+}
 
 count_banned() {
 	local total=0 n
@@ -115,45 +188,50 @@ header() {
 	fi
 	if firewall_running; then firewall_status="${C_G}运行中${C_0}"
 	else firewall_status="${C_Y}未就绪${C_0}"; fi
-	panel_title "控制中心 · v${version}"
-	printf "  服务    Caddy %b   Fail2Ban %b\n" \
-		"$( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )" \
-		"$( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	printf "  防护    防火墙 %b   当前封禁 %s\n" "$firewall_status" "$banned"
-	printf "  情报    %s 个 IP %b\n" "$intel" "$fresh"
-	printf "  上报    %b\n" "$report_status"
+	panel_start "控制中心 · v${version}"
+	panel_section "运行状态"
+	panel_row " Caddy $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )   Fail2Ban $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
+	if [ "$PANEL_WIDTH" -ge 64 ]; then
+		panel_row " 防火墙 ${firewall_status}   当前封禁 ${C_H}${banned}${C_0}   上报 ${report_status}"
+	else
+		panel_row " 防火墙 ${firewall_status}   当前封禁 ${C_H}${banned}${C_0}"
+		panel_row " 上报 ${report_status}"
+	fi
+	panel_row " 情报 IP ${C_H}${intel}${C_0}  ${fresh}"
 }
 
 act_status() {
 	local st n desc next d u
-	panel_title "运行概览"
+	panel_start "运行概览"
 	panel_section "服务状态"
 	for s in caddy fail2ban; do
 		st="$(svc_state "$s")"; [ "$st" = active ] && st="运行中"
-		printf "  %-12s%s\n" "$s" "$st"
+		panel_row " $s  $st"
 	done
 	panel_section "受保护站点 · 域名 → 反代上游"
 	if [ -n "$(sites_lines)" ]; then
-		while IFS=$'\t' read -r d u; do [ -n "$d" ] && printf "  %-28s → %s\n" "$d" "$u"; done < <(sites_lines)
+		while IFS=$'\t' read -r d u; do [ -n "$d" ] && panel_row " $d → $u"; done < <(sites_lines)
 	else
-		echo "  暂无站点，可从首页「站点与证书」添加。"
+		panel_row " 暂无站点，可从首页「站点与证书」添加。"
 	fi
 	panel_section "防护任务 · 各 jail 当前封禁数"
 	for j in $JAILS; do
 		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
 		[ -z "$n" ] && n="未启用"
-		printf "  %-20s%s\n" "$j" "$n"
+		printf -v st ' %-20s%s' "$j" "$n"
+		panel_row "$st"
 	done
 	panel_section "定时任务"
 	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
 		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
 		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
 			next="$(systemctl show "$u" -p NextElapseUSecRealtime --value 2>/dev/null)"
-			case "$next" in ""|0|n/a) echo "  $desc：已启用" ;; *) echo "  $desc：已启用（下次 $next）" ;; esac
+			case "$next" in ""|0|n/a) panel_row " $desc：已启用" ;; *) panel_row " $desc：已启用（下次 $next）" ;; esac
 		else
-			echo "  $desc：未启用"
+			panel_row " $desc：未启用"
 		fi
 	done
+	panel_end
 	pause
 }
 
@@ -237,26 +315,25 @@ act_whitelist() {
 	local -a items
 	local line ip num target tmp c i
 	while true; do
-		panel_title "防火墙管理 / IP 白名单"
-		echo "  白名单 IP 不会被封禁或上报，仍受端口规则限制。"
+		panel_start "防火墙管理 / IP 白名单"
 		panel_section "当前白名单"
+		panel_row " 白名单 IP 不会被封禁或上报，仍受端口规则限制。"
 		items=()
 		while IFS= read -r line; do
 			line="${line%%#*}"; line="$(printf '%s' "$line" | tr -d '[:space:]')"
 			[ -n "$line" ] && items+=("$line")
 		done < "$WHITELIST"
 		if [ "${#items[@]}" -eq 0 ]; then
-			echo "  （空）"
+			panel_row " （空）"
 		else
-			for line in "${items[@]}"; do echo "  $line"; done
+			for line in "${items[@]}"; do panel_row " $line"; done
 		fi
-		echo
-		echo "  [1] 添加 IP 或网段（支持批量）"
-		echo "  [2] 删除白名单条目"
-		echo "  [3] 用编辑器打开"
-		echo
-		echo "  [0] 返回防火墙管理"
-		read -r -p "请选择 [0-3]: " c || return
+		panel_section "白名单操作"
+		panel_option 1 "添加 IP 或网段（支持批量）"
+		panel_option 2 "删除白名单条目"
+		panel_option 3 "用编辑器打开"
+		panel_footer "返回防火墙管理"
+		read -r -p "  选择 [0-3] > " c || return
 		case "$c" in
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
@@ -458,33 +535,37 @@ firewall_change_port() {
 }
 
 act_firewall() {
-	local choice ports
+	local choice ports line warning state boot
 	nft list tables >/dev/null || { echo "无法访问 nftables。"; pause; return; }
 	while true; do
-		panel_title "防火墙管理"
-		if firewall_running; then echo "  AbuseGuard 防火墙：运行中"; else echo "  AbuseGuard 防火墙：未就绪，请重新应用规则"; fi
-		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then echo "  开机恢复：已开启"; else echo "  开机恢复：未开启"; fi
-		echo "  策略：只开放下列入站端口，保留已建立连接。"
+		panel_start "防火墙管理"
+		panel_section "当前策略"
+		if firewall_running; then state="${C_G}运行中${C_0}"; else state="${C_Y}未就绪，请重新应用规则${C_0}"; fi
+		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="已开启"; else boot="未开启"; fi
+		panel_row " 防火墙 $state   开机恢复 $boot"
+		panel_row " 仅开放下列入站端口，保留已建立连接。"
 		ports="$(firewall_ports)"
 		if [ -n "$ports" ]; then
-			printf '%s\n' "$ports" | awk '
+			while IFS= read -r line; do panel_row "$line"; done < <(printf '%s\n' "$ports" | awk '
 				$1 == "tcp" { tcp = tcp ts $2; ts = ", " }
 				$1 == "udp" { udp = udp us $2; us = ", " }
-				END { printf "  TCP   %s\n  UDP   %s\n", tcp ? tcp : "（无）", udp ? udp : "（无）" }
-			'
-		else echo "    （配置缺失）"; fi
-		firewall_check_conflicts || true
-		echo "  云安全组及容器转发规则需在对应平台管理。"
+				END { printf " TCP   %s\n UDP   %s\n", tcp ? tcp : "（无）", udp ? udp : "（无）" }
+			')
+		else panel_row " （配置缺失）"; fi
+		warning="$(firewall_check_conflicts 2>&1)" || true
+		if [ -n "$warning" ]; then
+			while IFS= read -r line; do panel_row "${C_Y}$line${C_0}"; done <<< "$warning"
+		fi
+		panel_row " 云安全组及容器转发规则需在对应平台管理。"
 		panel_section "端口放行"
-		echo "  [1] 开放端口            [2] 关闭端口"
+		panel_pair 1 "开放端口" 2 "关闭端口"
 		panel_section "IP 访问控制"
-		echo "  [3] 查看封禁列表        [4] 封禁 IP"
-		echo "  [5] 解封 IP             [6] 管理白名单"
+		panel_pair 3 "查看封禁列表" 4 "封禁 IP"
+		panel_pair 5 "解封 IP" 6 "管理白名单"
 		panel_section "规则维护"
-		echo "  [7] 查看全部规则        [8] 重新应用规则"
-		echo
-		echo "  [0] 返回首页"
-		read -r -p "请选择 [0-8]: " choice || return
+		panel_pair 7 "查看全部规则" 8 "重新应用规则"
+		panel_footer "返回首页"
+		read -r -p "  选择 [0-8] > " choice || return
 		case "$choice" in
 			1) panel_title "防火墙管理 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
 			2) panel_title "防火墙管理 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
@@ -524,30 +605,27 @@ act_sites() {
 	local choice dom t hp up tls f backup num target out d u
 	local -a doms
 	while true; do
-		panel_title "站点与证书"
-		echo "  添加域名和上游后，站点自动启用 AbuseGuard 防护。"
+		panel_start "站点与证书"
 		panel_section "已保护的站点 · 域名 → 反代上游"
 		doms=()
 		while IFS=$'\t' read -r d u; do
 			[ -n "$d" ] || continue
 			doms+=("$d")
-			printf "  %-28s → %s\n" "$d" "$u"
+			panel_row " $d → $u"
 		done < <(sites_lines)
-		[ "${#doms[@]}" -eq 0 ] && echo "  （暂无站点）"
-		echo
+		[ "${#doms[@]}" -eq 0 ] && panel_row " （暂无站点，选择 [1] 添加并启用防护）"
 		if cf_is_set; then
-			echo "  证书方式：Cloudflare DNS（已配置 CF token）"
+			panel_row " 证书方式：Cloudflare DNS（已配置 CF token）"
 		else
-			echo "  证书方式：Caddy 自动 HTTPS（需 80/443 可直达）"
+			panel_row " 证书方式：Caddy 自动 HTTPS（需 80/443 可直达）"
 		fi
 		panel_section "站点管理"
-		echo "  [1] 添加站点"
-		echo "  [2] 删除站点"
+		panel_option 1 "添加站点"
+		panel_option 2 "删除站点"
 		panel_section "证书设置"
-		echo "  [3] 设置 Cloudflare API Token"
-		echo
-		echo "  [0] 返回首页"
-		read -r -p "请选择 [0-3]: " choice || return
+		panel_option 3 "设置 Cloudflare API Token"
+		panel_footer "返回首页"
+		read -r -p "  选择 [0-3] > " choice || return
 		case "$choice" in
 			1)
 				panel_title "站点与证书 / 添加站点"
@@ -725,22 +803,22 @@ act_uninstall() {
 act_intel() {
 	local choice
 	while true; do
-		panel_title "威胁情报"
+		panel_start "威胁情报"
+		panel_section "情报与上报状态"
 		if [ "$(reporting_state)" = on ]; then
-			if [ -s "$KEYFILE" ]; then echo "  AbuseIPDB 自动上报：已开启"
-			else echo "  AbuseIPDB 自动上报：等待配置 API Key"; fi
+			if [ -s "$KEYFILE" ]; then panel_row " AbuseIPDB 自动上报：${C_G}已开启${C_0}"
+			else panel_row " AbuseIPDB 自动上报：${C_Y}等待配置 API Key${C_0}"; fi
 		else
-			echo "  AbuseIPDB 自动上报：已关闭"
+			panel_row " AbuseIPDB 自动上报：${C_Y}已关闭${C_0}"
 		fi
 		panel_section "情报同步"
-		echo "  [1] 立即同步威胁情报"
+		panel_option 1 "立即同步威胁情报"
 		panel_section "AbuseIPDB 上报"
-		echo "  [2] 立即发送上报队列"
-		echo "  [3] 设置 AbuseIPDB API Key"
-		echo "  [4] 开关自动上报"
-		echo
-		echo "  [0] 返回首页"
-		read -r -p "请选择 [0-4]: " choice || return
+		panel_option 2 "立即发送上报队列"
+		panel_option 3 "设置 AbuseIPDB API Key"
+		panel_option 4 "开关自动上报"
+		panel_footer "返回首页"
+		read -r -p "  选择 [0-4] > " choice || return
 		case "$choice" in
 			1) panel_title "威胁情报 / 同步情报"; act_sync ;;
 			2) panel_title "威胁情报 / 发送上报队列"; act_flush ;;
@@ -755,16 +833,15 @@ act_intel() {
 act_system() {
 	local choice
 	while true; do
-		panel_title "系统维护"
+		panel_start "系统维护"
 		panel_section "运行诊断"
-		echo "  [1] 查看最近日志"
+		panel_option 1 "查看最近日志"
 		panel_section "版本维护"
-		echo "  [2] 更新 AbuseGuard"
+		panel_option 2 "更新 AbuseGuard"
 		panel_section "卸载"
-		echo "  [3] 卸载 AbuseGuard"
-		echo
-		echo "  [0] 返回首页"
-		read -r -p "请选择 [0-3]: " choice || return
+		panel_option 3 "${C_R}卸载 AbuseGuard${C_0}"
+		panel_footer "返回首页"
+		read -r -p "  选择 [0-3] > " choice || return
 		case "$choice" in
 			1) panel_title "系统维护 / 最近日志"; act_logs ;;
 			2) panel_title "系统维护 / 更新"; act_update ;;
@@ -779,16 +856,13 @@ menu() {
 	local choice read_status
 	header
 	panel_section "功能导航"
-	cat <<'MENU'
-  [1] 运行概览    服务状态 · 站点 · 防护任务
-  [2] 站点与证书  添加 / 删除站点 · Cloudflare 设置
-  [3] 防火墙管理  端口放行 · IP 封禁 / 解封 · 白名单
-  [4] 威胁情报    情报同步 · 上报队列 · API 设置
-  [5] 系统维护    运行日志 · 更新 · 卸载
-
-  [0] 退出面板
-MENU
-	read -r -t "$PANEL_REFRESH_SECONDS" -p "请选择 [0-5]（首页每 ${PANEL_REFRESH_SECONDS} 秒自动刷新）: " choice
+	panel_option 1 "运行概览" "服务状态 · 站点 · 防护任务"
+	panel_option 2 "站点与证书" "站点管理 · Cloudflare 证书"
+	panel_option 3 "防火墙管理" "端口 · IP 封禁/解封 · 白名单"
+	panel_option 4 "威胁情报" "情报同步 · 上报 · API 设置"
+	panel_option 5 "系统维护" "日志 · 更新 · 卸载"
+	panel_footer "退出面板" "每 ${PANEL_REFRESH_SECONDS} 秒刷新状态"
+	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 [0-5] > " choice
 	read_status=$?
 	case "$read_status" in
 		0) ;;
