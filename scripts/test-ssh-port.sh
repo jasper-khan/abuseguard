@@ -80,8 +80,8 @@ systemctl() {
 firewall_change_port() {
 	printf 'fw %s\n' "$*" >> "$TMP/calls"
 	case "$1" in
-		open) printf '%s %s\n' "$2" "$3" >> "$FIREWALL_FILE" ;;
-		close) printf '%s\n' "$(grep -vxF "$2 $3" "$FIREWALL_FILE")" > "$FIREWALL_FILE" ;;
+		open) printf '%s %s %s\n' "$2" "$3" "${4:-any}" >> "$FIREWALL_FILE" ;;
+		close) printf '%s\n' "$(grep -vxF "$2 $3 ${4:-any}" "$FIREWALL_FILE")" > "$FIREWALL_FILE" ;;
 	esac
 	return 0
 }
@@ -97,7 +97,7 @@ reset_all() {
 	rm -f -- "$SSHD_DROPIN" "$SSHD_DROPIN_DIR/99-ssh-port.conf"
 	: > "$TMP/listen"
 	printf '22\n' > "$TMP/listen"
-	printf 'tcp 22\n' > "$FIREWALL_FILE"
+	printf 'tcp 22 any\n' > "$FIREWALL_FILE"
 	: > "$TMP/calls"
 	printf '[sshd]\naction = caddy-abuseguard-queue[profile=ssh-bruteforce, transport=SSH, target_port=22, window="%%(findtime)s"]\n' > "$SSH_REPORT_JAIL"
 	SSH_CONNECTION=''
@@ -109,7 +109,7 @@ run_ssh_port() { printf '%b' "$1" | act_ssh_port; }
 close_port() { real_firewall_change_port close tcp "$1"; }
 called() { grep -qxF "$1" "$TMP/calls"; }
 listening() { grep -qxF "$1" "$TMP/listen"; }
-fw_open() { grep -qxF "tcp $1" "$FIREWALL_FILE"; }
+fw_open() { grep -qE "^tcp[[:space:]]+$1([[:space:]]|$)" "$FIREWALL_FILE"; }
 
 # No Port directive: add the new port while keeping the default 22.
 reset_all
@@ -118,7 +118,7 @@ grep -qxF 'Port 22' "$SSHD_DROPIN" || fail 'old port not kept during the switch'
 grep -qxF 'Port 2222' "$SSHD_DROPIN" || fail 'new port not added'
 listening 22 && listening 2222 || fail 'both ports should listen after the switch'
 called reload || fail 'sshd not reloaded'
-called 'fw open tcp 2222' || fail 'new port not opened'
+called 'fw open tcp 2222 any' || fail 'new port not opened'
 fw_open 22 || fail 'old port rule removed too early'
 grep -qF 'target_port=2222' "$SSH_REPORT_JAIL" || fail 'report port not synced'
 
@@ -173,7 +173,7 @@ fw_open 22 || fail 'last-port guard changed the firewall'
 reset_all
 printf 'Port 22\n' > "$SSHD_MAIN"
 printf '2222\n' >> "$TMP/listen"
-printf 'tcp 2222\n' >> "$FIREWALL_FILE"
+printf 'tcp 2222 any\n' >> "$FIREWALL_FILE"
 if close_port 2222 >/dev/null 2>&1; then fail 'closed a port with no Port directive'; fi
 fw_open 2222 || fail 'refused close still changed the firewall'
 listening 2222 || fail 'refused close stopped the port'
@@ -182,7 +182,7 @@ listening 2222 || fail 'refused close stopped the port'
 reset_all
 printf 'Port 22\n' > "$SSHD_MAIN"
 printf '2222\n' >> "$TMP/listen"
-printf 'tcp 2222\n' >> "$FIREWALL_FILE"
+printf 'tcp 2222 any\n' >> "$FIREWALL_FILE"
 if close_port 22 >/dev/null 2>&1; then fail 'removed the last configured Port'; fi
 grep -qxF 'Port 22' "$SSHD_MAIN" || fail 'last-Port rollback did not restore the config'
 fw_open 22 || fail 'last-Port rollback changed the firewall'
@@ -193,6 +193,13 @@ SSHD_DROPIN_DIR="$TMP/missing"
 if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a missing drop-in directory'; fi
 [ -e "$TMP/missing" ] && fail 'created the drop-in directory'
 SSHD_DROPIN_DIR="$TMP/dropin"
+
+# SSH port switch inherits the old port's source restrictions.
+reset_all
+printf 'tcp 22 203.0.113.5/32\ntcp 443 any\n' > "$FIREWALL_FILE"
+run_ssh_port '2222\ny\n' >/dev/null || fail 'source inheritance switch failed'
+called 'fw open tcp 2222 203.0.113.5/32' || fail 'new port did not inherit the source'
+if called 'fw open tcp 2222 any'; then fail 'inherited port was widened to any'; fi
 
 # Duplicate Port directives cannot be switched safely.
 reset_all
@@ -218,14 +225,14 @@ reset_all
 SSHD_T_FAIL=1
 if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted an invalid config'; fi
 [ -e "$SSHD_DROPIN" ] && fail 'left the drop-in after sshd -t failure'
-if called 'fw open tcp 2222'; then fail 'opened the port before config validation'; fi
+if called 'fw open tcp 2222 any'; then fail 'opened the port before config validation'; fi
 
 # Reload failure restores the config and removes the opened port.
 reset_all
 RELOAD_FAIL=1
 if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a reload failure'; fi
 [ -e "$SSHD_DROPIN" ] && fail 'left the drop-in after reload rollback'
-called 'fw close tcp 2222' || fail 'opened port was not rolled back'
+called 'fw close tcp 2222 any no-ssh' || fail 'opened port was not rolled back'
 
 # Socket activation ignores Port in sshd_config.
 reset_all

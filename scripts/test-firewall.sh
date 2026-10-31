@@ -129,24 +129,36 @@ if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored unreadable nft 
 # the input policy; Fail2Ban and our own table are managed by AbuseGuard.
 RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
 firewall_apply </dev/null >/dev/null
-for rule in 'tcp 22' 'tcp 2200' 'tcp 2222' 'tcp 443' 'udp 443'; do
+for rule in 'tcp 22 any' 'tcp 2200 any' 'tcp 2222 any' 'tcp 443 any' 'udp 443 any'; do
 	firewall_ports | grep -qxF "$rule" || fail "missing initial rule: $rule"
 done
-if firewall_ports | grep -qx 'tcp 80'; then fail 'initial config opened TCP 80'; fi
+if firewall_ports | grep -qx 'tcp 80 any'; then fail 'initial config opened TCP 80'; fi
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'activation did not load saved config'
 grep -qxF "enable $FIREWALL_SERVICE" "$TMP/systemctl.calls" || fail 'boot restore not enabled'
 
 # Add/remove ports and repeated additions preserve unrelated rules.
-firewall_change_port open <<< $'tcp\n8080' >/dev/null
-firewall_change_port open <<< $'tcp\n08080' >/dev/null
-[ "$(firewall_ports | grep -cx 'tcp 8080')" = 1 ] || fail 'duplicate/noncanonical port'
-firewall_change_port open <<< $'tcp\n80' >/dev/null
+firewall_change_port open <<< $'tcp\n8080\n' >/dev/null
+firewall_change_port open <<< $'tcp\n08080\n' >/dev/null
+[ "$(firewall_ports | grep -cx 'tcp 8080 any')" = 1 ] || fail 'duplicate/noncanonical port'
+firewall_change_port open <<< $'tcp\n80\n' >/dev/null
 firewall_apply </dev/null >/dev/null
-firewall_ports | grep -qx 'tcp 80' || fail 'update closed an explicitly opened TCP 80'
-firewall_change_port close <<< $'tcp\n80' >/dev/null
-if firewall_ports | grep -qx 'tcp 80'; then fail 'port was not closed'; fi
-firewall_ports | grep -qx 'udp 443' || fail 'unrelated UDP rule lost'
+firewall_ports | grep -qx 'tcp 80 any' || fail 'update closed an explicitly opened TCP 80'
+firewall_change_port close tcp 80 any >/dev/null
+if firewall_ports | grep -qx 'tcp 80 any'; then fail 'port was not closed'; fi
+firewall_ports | grep -qx 'udp 443 any' || fail 'unrelated UDP rule lost'
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'port change was not applied'
+grep -qE '^[[:space:]]*tcp dport 22 accept' "$FIREWALL_FILE" && fail 'allow rule is not IPv4-only'
+grep -q 'meta nfproto ipv4 tcp dport 22 accept' "$FIREWALL_FILE" || fail 'allow rule is not IPv4-only'
+
+# Per-source rules: the same port can be limited to one address and removed alone.
+firewall_change_port open tcp 8443 any >/dev/null
+firewall_change_port open tcp 8443 203.0.113.5 >/dev/null
+firewall_ports | grep -qx 'tcp 8443 203.0.113.5' || fail 'source rule missing'
+firewall_change_port close tcp 8443 203.0.113.5 >/dev/null
+firewall_ports | grep -qx 'tcp 8443 any' || fail 'closing one source dropped the port rule'
+if firewall_ports | grep -qx 'tcp 8443 203.0.113.5'; then fail 'source rule was not closed'; fi
+firewall_change_port close tcp 8443 any >/dev/null
+
 
 # Exercise the real CLI dispatch with the same isolated command doubles.
 entry="$(sed -n '/^case "${1:-}" in$/,/^esac$/p' "$ROOT/abuseguard.sh")"
@@ -155,7 +167,7 @@ run_cli --firewall-open tcp 54321 </dev/null >/dev/null
 run_cli --firewall-open tcp 054321 </dev/null >/dev/null 2>&1 && fail 'accepted an overlong port'
 run_cli --firewall-open udp 54321 </dev/null >/dev/null
 run_cli --firewall-open tcp 54321 </dev/null >/dev/null
-for rule in 'tcp 54321' 'udp 54321'; do
+for rule in 'tcp 54321 any' 'udp 54321 any'; do
 	[ "$(firewall_ports | grep -cxF "$rule")" = 1 ] || fail "CLI missing or duplicated $rule"
 done
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'CLI did not persist and apply ports'
@@ -164,10 +176,12 @@ for args in '' 'tcp' 'tcp 0' 'udp 65536' 'invalid 80' 'tcp 80;drop' 'tcp 80 extr
 	if run_cli --firewall-open $args </dev/null >/dev/null 2>&1; then fail "CLI accepted invalid arguments: $args"; fi
 done
 if run_cli --firewall-open tcp '' </dev/null >/dev/null 2>&1; then fail 'CLI accepted an empty port'; fi
+if firewall_change_port open tcp 8443 example.com >/dev/null 2>&1; then fail 'accepted a hostname source'; fi
+if firewall_change_port open tcp 8443 2001:db8::1 >/dev/null 2>&1; then fail 'accepted an IPv6 source'; fi
 for p in 22 2200 2222; do
-	if firewall_change_port close <<< "$(printf 'tcp\n%s' "$p")" >/dev/null; then fail "closed SSH port $p"; fi
+	if firewall_change_port close tcp "$p" any >/dev/null; then fail "closed SSH port $p"; fi
 done
-for input in $'tcp\n0' $'tcp\n65536' $'tcp\n80;drop' $'invalid\n80'; do
+for input in $'tcp\n0\n' $'tcp\n65536\n' $'tcp\n80;drop\n' $'invalid\n80\n'; do
 	if firewall_change_port open <<< "$input" >/dev/null; then fail "accepted invalid input"; fi
 done
 [ "$(cat "$FIREWALL_FILE")" = "$saved" ] || fail 'rejected input changed config'
@@ -175,12 +189,12 @@ CHECK_FAIL=1
 if run_cli --firewall-open udp 53 </dev/null >/dev/null; then fail 'ignored nft validation error'; fi
 CHECK_FAIL=0
 APPLY_FAIL=1
-if firewall_change_port open <<< $'udp\n53' >/dev/null; then fail 'ignored nft apply error'; fi
+if firewall_change_port open <<< $'udp\n53\n' >/dev/null; then fail 'ignored nft apply error'; fi
 APPLY_FAIL=0
 [ "$(cat "$FIREWALL_FILE")" = "$saved" ] || fail 'nft failure changed saved config'
 [ "$(cat "$TMP/live.nft")" = "$saved" ] || fail 'nft failure changed live config'
 mv() { return 1; }
-if firewall_change_port open <<< $'udp\n53' >/dev/null; then fail 'ignored persistence error'; fi
+if firewall_change_port open <<< $'udp\n53\n' >/dev/null; then fail 'ignored persistence error'; fi
 unset -f mv
 [ "$(cat "$FIREWALL_FILE")" = "$saved" ] || fail 'persistence failure changed saved config'
 [ "$(cat "$TMP/live.nft")" = "$saved" ] || fail 'persistence failure did not restore live rules'
@@ -189,7 +203,7 @@ unset -f mv
 ss() { return 1; }
 sshd() { return 1; }
 SSH_CONNECTION=''
-if firewall_change_port open <<< $'udp\n53' >/dev/null 2>&1; then fail 'changed rules without SSH detection'; fi
+if firewall_change_port open <<< $'udp\n53\n' >/dev/null 2>&1; then fail 'changed rules without SSH detection'; fi
 sshd() { printf 'port 2222\n'; }
 
 # Re-running installation preserves the user's changes and restores missing
@@ -202,8 +216,26 @@ if grep -q '^enable ' "$TMP/systemctl.calls"; then fail 'failed start enabled bo
 START_FAIL=0
 firewall_apply </dev/null >/dev/null
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'update did not restore saved rules'
-firewall_ports | grep -qx 'tcp 8080' || fail 'update lost a user-added port'
-firewall_ports | grep -qx 'udp 54321' || fail 'update lost a script-opened port'
-if firewall_ports | grep -qx 'tcp 80'; then fail 'update reopened a user-closed port'; fi
+firewall_ports | grep -qx 'tcp 8080 any' || fail 'update lost a user-added port'
+firewall_ports | grep -qx 'udp 54321 any' || fail 'update lost a script-opened port'
+if firewall_ports | grep -qx 'tcp 80 any'; then fail 'update reopened a user-closed port'; fi
 if grep -q 'flush ruleset' "$TMP/nft.calls"; then fail 'flushed unrelated rules'; fi
+ss() { printf 'LISTEN 0 128 [::]:2222 *:* users:(("sshd",pid=1,fd=3))
+'; }
+sshd() { printf 'port 22
+port 2200
+'; }
+# Reapplying rules must not widen a restricted SSH port.
+printf 'tcp 22 203.0.113.5/32\ntcp 2222 any\ntcp 2200 any\n' | firewall_render > "$FIREWALL_FILE"
+firewall_apply </dev/null >/dev/null
+firewall_ports | grep -qx 'tcp 22 203.0.113.5/32' || fail 'reapply dropped the SSH source restriction'
+if firewall_ports | grep -qx 'tcp 22 any'; then fail 'reapply widened a restricted SSH port'; fi
+
+# A rollback close skips SSH handling and must not re-add the port.
+firewall_change_port close tcp 22 203.0.113.5/32 no-ssh >/dev/null
+if firewall_ports | grep -qx 'tcp 22 203.0.113.5/32'; then fail 'rollback close kept the rule'; fi
+if firewall_ports | grep -qx 'tcp 22 any'; then fail 'rollback close re-added the port'; fi
+firewall_apply </dev/null >/dev/null
+firewall_ports | grep -qx 'tcp 22 any' || fail 'apply did not restore the SSH port'
+
 echo 'firewall panel tests: pass'

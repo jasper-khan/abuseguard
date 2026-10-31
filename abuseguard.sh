@@ -392,7 +392,16 @@ firewall_check_conflicts() {
 
 firewall_ports() {
 	[ -f "$FIREWALL_FILE" ] || return 0
-	awk 'NF == 4 && ($1 == "tcp" || $1 == "udp") && $2 == "dport" && $4 == "accept" { print $1, $3 }' "$FIREWALL_FILE"
+	awk '
+		$1 == "meta" && $2 == "nfproto" && $3 == "ipv4" && ($4 == "tcp" || $4 == "udp") && $5 == "dport" && $7 == "accept" { print $4, $6, "any"; next }
+		$1 == "ip" && $2 == "saddr" && ($4 == "tcp" || $4 == "udp") && $5 == "dport" && $7 == "accept" { print $4, $6, $3; next }
+		NF == 4 && ($1 == "tcp" || $1 == "udp") && $2 == "dport" && $4 == "accept" { print $1, $3, "any" }
+	' "$FIREWALL_FILE"
+}
+
+# 该端口是否已有任意来源的规则。
+firewall_has_port() {
+	printf '%s\n' "$1" | grep -qE "^tcp[[:space:]]+$2([[:space:]]|$)"
 }
 
 # 同时保留当前监听、sshd 配置和本次 SSH 连接的端口，支持多个 SSH 端口。
@@ -412,7 +421,7 @@ firewall_ssh_ports() {
 
 # 单一持久配置；在一个 nft 事务中只替换本项目的表，不清空整个 ruleset。
 firewall_render() {
-	local proto port
+	local proto port source
 	cat <<'NFT'
 # Managed by ag. Change ports through the firewall menu.
 add table inet caddy_abuseguard
@@ -427,11 +436,15 @@ table inet caddy_abuseguard {
 		udp sport 67 udp dport 68 accept
 		udp sport 547 udp dport 546 accept
 NFT
-	while read -r proto port; do
+	while read -r proto port source; do
 		[ -n "$proto" ] || continue
 		case "$proto" in tcp|udp) ;; *) return 1 ;; esac
 		port_valid "$port" || return 1
-		printf '\t\t%s dport %s accept\n' "$proto" "$port"
+		if [ -n "$source" ] && [ "$source" != any ]; then
+			printf '\t\tip saddr %s %s dport %s accept\n' "$source" "$proto" "$port"
+		else
+			printf '\t\tmeta nfproto ipv4 %s dport %s accept\n' "$proto" "$port"
+		fi
 	done
 	printf '\t}\n}\n'
 }
@@ -470,9 +483,11 @@ firewall_apply() {
 	if [ -f "$FIREWALL_FILE" ]; then
 		ports="$(firewall_ports)" || return 1
 	else
-		ports=$'tcp 443\nudp 443'
+		ports=$'tcp 443 any\nudp 443 any'
 	fi
-	for p in $ssh_ports; do ports+=$'\n'"tcp $p"; done
+	for p in $ssh_ports; do
+		firewall_has_port "$ports" "$p" || ports+=$'\n'"tcp $p any"
+	done
 	firewall_save "$ports" || return 1
 	systemctl start "$FIREWALL_SERVICE" || return 1
 	if ! systemctl enable "$FIREWALL_SERVICE"; then
@@ -484,44 +499,88 @@ firewall_apply() {
 }
 
 firewall_change_port() {
-	local action="$1" proto="${2:-}" port="${3:-}" ports ssh_ports p
+	local action="$1" proto="${2:-}" port="${3:-}" source="${4:-any}" skip_ssh="${5:-}"
+	local interactive=0 ports ssh_ports p rules idx selected remaining pr po so
+	[ "$#" -eq 1 ] && interactive=1
 	[ -f "$FIREWALL_FILE" ] || { echo "防火墙配置缺失，请选择重新应用规则或重新运行安装器。"; return 1; }
 	firewall_check_conflicts || return 1
-	if [ "$#" -eq 1 ]; then
+
+	if [ "$interactive" = 1 ] && [ "$action" = close ]; then
+		rules="$(firewall_ports)" || return 1
+		if [ -z "$rules" ]; then
+			echo "没有可关闭的端口规则。"
+			return 0
+		fi
+		panel_row " 编号  协议  端口  来源"
+		idx=0
+		while read -r pr po so; do
+			idx=$((idx + 1))
+			panel_row "$(printf ' [%d]  %-4s %-6s %s' "$idx" "$pr" "$po" "${so:-any}")"
+		done <<< "$rules"
+		read -r -p "  要关闭的规则编号（留空取消）: " selected || return 1
+		[ -n "$selected" ] || return 0
+		case "$selected" in *[!0-9]*) echo "编号无效。"; return 1 ;; esac
+		selected=$((10#$selected))
+		[ "$selected" -ge 1 ] && [ "$selected" -le "$idx" ] || { echo "编号无效。"; return 1; }
+		selected="$(printf '%s\n' "$rules" | sed -n "${selected}p")"
+		set -- $selected
+		proto="$1"; port="$2"; source="${3:-any}"
+	elif [ "$interactive" = 1 ]; then
 		read -r -p "协议（tcp/udp，默认 tcp）: " proto || return 1
 		proto="${proto:-tcp}"
 	fi
 	case "$proto" in tcp|udp) ;; *) echo "协议只能是 tcp 或 udp。"; return 1 ;; esac
-	if [ "$#" -eq 1 ]; then
+	if [ "$interactive" = 1 ] && [ "$action" = open ]; then
 		read -r -p "端口（1–65535，留空取消）: " port || return 1
 		[ -n "$port" ] || return 0
+		read -r -p "来源 IPv4/CIDR（留空=所有来源）: " source || return 1
+		source="${source:-any}"
 	fi
 	[ "${#port}" -le 5 ] && port_valid "$port" || { echo "端口格式无效。"; return 1; }
 	port=$((10#$port))
-	ssh_ports="$(firewall_ssh_ports)" || return 1
-	if [ "$action" = close ] && [ "$proto" = tcp ] && grep -qxF "$port" <<< "$ssh_ports"; then
+	source="${source:-any}"
+	case "$source" in *[[:space:]]*) echo "来源不能包含空白。"; return 1 ;; esac
+	case "$source" in any) ;; *[!0-9./]*) echo "来源必须是 IPv4 地址、CIDR 或留空。"; return 1 ;; esac
+
+	if [ "$skip_ssh" != no-ssh ]; then
+		ssh_ports="$(firewall_ssh_ports)" || return 1
+	fi
+	ports="$(firewall_ports)" || return 1
+	if [ "$action" = close ] && ! printf '%s\n' "$ports" | grep -qxF "$proto $port $source"; then
+		echo "规则不存在：$proto $port $source"
+		return 1
+	fi
+
+	if [ "$action" = close ] && [ "$skip_ssh" != no-ssh ] && [ "$proto" = tcp ] && grep -qxF "$port" <<< "$ssh_ports"; then
 		if [ -n "${SSH_CONNECTION:-}" ] && [ "${SSH_CONNECTION##* }" = "$port" ]; then
 			echo "这是当前 SSH 会话端口，关闭会断开连接。"
 			return 1
 		fi
-		if [ "$(grep -c . <<< "$ssh_ports")" -le 1 ]; then
-			echo "这是唯一的 SSH 管理端口，不能在面板中关闭。"
-			return 1
+		remaining="$(printf '%s\n' "$ports" | grep -cE "^tcp[[:space:]]+$port([[:space:]]|$)")"
+		if [ "$remaining" -le 1 ]; then
+			if [ "$(grep -c . <<< "$ssh_ports")" -le 1 ]; then
+				echo "这是唯一的 SSH 管理端口，不能在面板中关闭。"
+				return 1
+			fi
+			if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+				echo "SSH 由 ssh.socket 激活，请在系统层面调整端口。"
+				return 1
+			fi
+			if ! ssh_port_remove "$port"; then
+				echo "无法从 sshd 配置中移除端口 $port，已取消关闭。"
+				return 1
+			fi
+			ssh_ports="$(firewall_ssh_ports)" || return 1
 		fi
-		if systemctl is-active --quiet ssh.socket 2>/dev/null; then
-			echo "SSH 由 ssh.socket 激活，请在系统层面调整端口。"
-			return 1
-		fi
-		if ! ssh_port_remove "$port"; then
-			echo "无法从 sshd 配置中移除端口 $port，已取消关闭。"
-			return 1
-		fi
-		ssh_ports="$(firewall_ssh_ports)" || return 1
 	fi
-	ports="$(firewall_ports)" || return 1
-	ports="$(awk -v proto="$proto" -v port="$port" '!($1 == proto && $2 == port)' <<< "$ports")"
-	[ "$action" != open ] || ports+=$'\n'"$proto $port"
-	for p in $ssh_ports; do ports+=$'\n'"tcp $p"; done
+
+	ports="$(awk -v proto="$proto" -v port="$port" -v src="$source" '!($1 == proto && $2 == port && ($3 == src || ($3 == "" && src == "any")))' <<< "$ports")"
+	[ "$action" = close ] || ports+=$'\n'"$proto $port $source"
+	if [ "$skip_ssh" != no-ssh ]; then
+		for p in $ssh_ports; do
+			firewall_has_port "$ports" "$p" || ports+=$'\n'"tcp $p any"
+		done
+	fi
 	firewall_save "$ports" || return 1
 	if firewall_running; then
 		echo "规则已保存并生效（已建立的连接继续保留）。"
@@ -543,8 +602,8 @@ act_firewall() {
 		ports="$(firewall_ports)"
 		if [ -n "$ports" ]; then
 			while IFS= read -r line; do panel_row "$line"; done < <(printf '%s\n' "$ports" | awk '
-				$1 == "tcp" { tcp = tcp ts $2; ts = ", " }
-				$1 == "udp" { udp = udp us $2; us = ", " }
+				$1 == "tcp" { tcp = tcp ts $2 ($3 != "" && $3 != "any" ? "(" $3 ")" : ""); ts = ", " }
+				$1 == "udp" { udp = udp us $2 ($3 != "" && $3 != "any" ? "(" $3 ")" : ""); us = ", " }
 				END { printf " TCP   %s\n UDP   %s\n", tcp ? tcp : "（无）", udp ? udp : "（无）" }
 			')
 		else panel_row " （配置缺失）"; fi
@@ -640,7 +699,7 @@ ssh_port_remove() {
 
 # 加入新端口，旧端口继续监听；关闭旧端口由防火墙管理完成。
 act_ssh_port() {
-	local cur new answer port_sites port_count backup="" fw=0 now p
+	local cur new answer port_sites port_count backup="" fw=0 now p old_sources="" added_sources="" src a
 	systemctl cat ssh.service >/dev/null 2>&1 || { echo "未找到 ssh 服务，无法修改 SSH 端口。"; return 1; }
 	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
 		echo "系统使用 ssh.socket 激活 SSH，面板不修改其端口；请先恢复 ssh.service 再试。"
@@ -696,12 +755,19 @@ act_ssh_port() {
 		ssh_restore_file "$SSHD_DROPIN" "$backup"
 		return 1
 	fi
+	old_sources="$(firewall_ports | awk -v p="$cur" '$1 == "tcp" && $2 == p { print $3 }' | sort -u)"
+	case " $old_sources " in *" any "*) old_sources=any ;; esac
+	[ -n "$old_sources" ] || old_sources=any
 	if [ -f "$FIREWALL_FILE" ]; then
-		if ! firewall_change_port open tcp "$new" >/dev/null; then
-			echo "防火墙放行新端口失败，已回滚。"
-			ssh_restore_file "$SSHD_DROPIN" "$backup"
-			return 1
-		fi
+		for src in $old_sources; do
+			if ! firewall_change_port open tcp "$new" "$src" >/dev/null; then
+				echo "防火墙放行新端口失败，已回滚。"
+				for a in $added_sources; do firewall_change_port close tcp "$new" "$a" no-ssh >/dev/null 2>&1; done
+				ssh_restore_file "$SSHD_DROPIN" "$backup"
+				return 1
+			fi
+			added_sources+=" $src"
+		done
 		fw=1
 	elif firewall_running; then
 		echo "防火墙正在运行但配置缺失，无法安全放行新端口，已取消。"
@@ -711,7 +777,7 @@ act_ssh_port() {
 	if ! systemctl reload ssh 2>/dev/null; then
 		echo "sshd 重载失败，已回滚。"
 		ssh_restore_file "$SSHD_DROPIN" "$backup"
-		[ "$fw" = 0 ] || firewall_change_port close tcp "$new" >/dev/null 2>&1
+		if [ "$fw" = 1 ]; then for a in $added_sources; do firewall_change_port close tcp "$new" "$a" no-ssh >/dev/null 2>&1; done; fi
 		return 1
 	fi
 	for p in "$cur" "$new"; do
@@ -722,7 +788,7 @@ act_ssh_port() {
 		if ! ss -H -tlnp "sport = :$p" 2>/dev/null | grep -q sshd; then
 			echo "端口 $p 未在监听，已回滚。"
 			ssh_restore_file "$SSHD_DROPIN" "$backup"
-			[ "$fw" = 0 ] || firewall_change_port close tcp "$new" >/dev/null 2>&1
+			if [ "$fw" = 1 ]; then for a in $added_sources; do firewall_change_port close tcp "$new" "$a" no-ssh >/dev/null 2>&1; done; fi
 			return 1
 		fi
 	done
