@@ -95,11 +95,11 @@ called 'fw open tcp 2222' || fail 'new port not opened'
 if called 'fw close tcp 22'; then fail 'closed the current session port'; fi
 grep -qF 'target_port=2222' "$SSH_REPORT_JAIL" || fail 'report port not synced'
 
-# Without a session on the old port, its firewall rule is removed.
+# The old port always stays allowed; closing it is a manual follow-up.
 reset_all
 SSH_CONNECTION=''
 run_ssh_port '2222\nyes\n' >/dev/null || fail 'success path without session failed'
-called 'fw close tcp 22' || fail 'old port was not closed'
+if called 'fw close tcp 22'; then fail 'old port was auto-closed'; fi
 
 # An explicit Port elsewhere would make sshd listen on both ports.
 reset_all

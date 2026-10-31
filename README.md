@@ -99,7 +99,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 安装或更新会自动启用 AbuseGuard 防火墙并设置开机恢复，无需另行确认。首次建立配置时开放检测到的所有 SSH 端口、443/tcp 和 443/udp，其余入站端口默认丢弃；80/tcp 不默认开放，需要 HTTP 访问或跳转时可在面板手动放行。已有配置则保留用户开放和关闭的端口，并补齐当前 SSH 端口。保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭检测到的 SSH 端口；关闭其他端口只阻止新连接。
 
-「SSH 管理」中的「修改 SSH 端口」会先校验 `sshd -t`，再放行新端口、重载 sshd 并确认新端口已监听，任一步失败都恢复原配置；成功后同步 fail2ban 的 SSH 上报端口，旧端口在不再承接当前会话时移除防火墙放行。配置写入 `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`；切换前需先在云安全组或上游防火墙放行新端口。`ssh.socket` 激活方式、或 sshd 主配置已显式写死 `Port` 时，面板会拒绝修改。
+「SSH 管理」中的「修改 SSH 端口」会先校验 `sshd -t`，再放行新端口、重载 sshd 并确认新端口已监听，任一步失败都恢复原配置；成功后同步 fail2ban 的 SSH 上报端口，旧端口的防火墙放行会保留，确认新端口可登录后可在防火墙管理中手动关闭。配置写入 `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`；切换前需先在云安全组或上游防火墙放行新端口。`ssh.socket` 激活方式、或 sshd 主配置已显式写死 `Port` 时，面板会拒绝修改。
 
 端口配置仅保存在 `/etc/caddy-abuseguard/firewall.nft`，由独立的 `inet caddy_abuseguard` 表执行。修改先通过 `nft -c` 校验，再以单次事务应用；一次性 systemd 服务负责开机恢复，无新增常驻进程。菜单可重新应用规则；卸载只移除本项目的表。IP 封禁继续复用 fail2ban，保留原有白名单、90 天封禁和不上报手动封禁的规则。
 

@@ -576,7 +576,7 @@ ssh_port_rollback() {
 }
 
 act_ssh_port() {
-	local cur new old answer conflict backup="" fw=0 svc=ssh
+	local cur new answer conflict backup="" fw=0 svc=ssh
 	systemctl cat "$svc.service" >/dev/null 2>&1 || { echo "未找到 ssh 服务，无法修改 SSH 端口。"; return 1; }
 	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
 		echo "系统使用 ssh.socket 激活 SSH，面板不修改其端口；请先恢复 ssh.service 再试。"
@@ -654,15 +654,8 @@ act_ssh_port() {
 		fail2ban-client reload >/dev/null 2>&1 || echo "fail2ban 重载失败，SSH 上报端口可能未生效。" >&2
 	fi
 
-	echo "SSH 已切换到端口 $new，请用新端口重新登录验证。"
-	old="$cur"
-	if [ -n "${SSH_CONNECTION:-}" ] && [ "${SSH_CONNECTION##* }" = "$old" ]; then
-		echo "旧端口 $old 是当前会话入口，已保留放行；重新登录后可在防火墙管理中关闭。"
-	elif ss -H -tln "sport = :$old" 2>/dev/null | grep -q .; then
-		echo "旧端口 $old 仍被其他服务监听，已保留放行。"
-	elif [ "$fw" = 1 ] && firewall_change_port close tcp "$old" >/dev/null; then
-		echo "旧端口 $old 的防火墙放行已移除。"
-	fi
+	echo "SSH 已切换到端口 $new，请用新端口重新登录确认。"
+	echo "旧端口 $cur 的防火墙放行已保留；确认新端口可登录后，可在防火墙管理中关闭。"
 }
 
 # SSH 管理入口：目前只放端口修改，后续登录方式与密钥管理也归到这里。
