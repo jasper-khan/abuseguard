@@ -113,7 +113,7 @@ fw_open() { grep -qxF "tcp $1" "$FIREWALL_FILE"; }
 
 # No Port directive: add the new port while keeping the default 22.
 reset_all
-run_ssh_port '2222\nyes\n' >/dev/null || fail 'switch returned non-zero'
+run_ssh_port '2222\ny\n' >/dev/null || fail 'switch returned non-zero'
 grep -qxF 'Port 22' "$SSHD_DROPIN" || fail 'old port not kept during the switch'
 grep -qxF 'Port 2222' "$SSHD_DROPIN" || fail 'new port not added'
 listening 22 && listening 2222 || fail 'both ports should listen after the switch'
@@ -136,7 +136,7 @@ fw_open 2222 || fail 'new firewall rule lost while closing the old one'
 # An existing single Port stays put during the switch; closing removes it in place.
 reset_all
 printf '# existing migration\nPort 22\n# keep me\n' > "$SSHD_MAIN"
-run_ssh_port '2222\nyes\n' >/dev/null || fail 'did not keep an existing Port during the switch'
+run_ssh_port '2222\ny\n' >/dev/null || fail 'did not keep an existing Port during the switch'
 grep -qxF 'Port 22' "$SSHD_MAIN" || fail 'existing Port removed too early'
 grep -qxF 'Port 2222' "$SSHD_DROPIN" || fail 'new Port not added alongside'
 SSH_CONNECTION='192.0.2.1 50000 192.0.2.2 2222'
@@ -148,7 +148,7 @@ grep -qxF 'Port 2222' "$SSHD_DROPIN" || fail 'new Port lost during close'
 # A single Port drop-in (a machine migrated earlier) works the same way.
 reset_all
 printf '# migrated\nPort 22\n' > "$SSHD_DROPIN_DIR/99-ssh-port.conf"
-run_ssh_port '2222\nyes\n' >/dev/null || fail 'did not switch from a migrated drop-in'
+run_ssh_port '2222\ny\n' >/dev/null || fail 'did not switch from a migrated drop-in'
 grep -qxF 'Port 22' "$SSHD_DROPIN_DIR/99-ssh-port.conf" || fail 'migrated Port removed too early'
 grep -qxF 'Port 2222' "$SSHD_DROPIN" || fail 'new Port not added for a migrated drop-in'
 SSH_CONNECTION='192.0.2.1 50000 192.0.2.2 2222'
@@ -158,7 +158,7 @@ grep -qxF '# migrated' "$SSHD_DROPIN_DIR/99-ssh-port.conf" || fail 'migrated dro
 
 # The current session port cannot be closed from the firewall menu.
 reset_all
-run_ssh_port '2222\nyes\n' >/dev/null || fail 'setup for the session-port guard failed'
+run_ssh_port '2222\ny\n' >/dev/null || fail 'setup for the session-port guard failed'
 SSH_CONNECTION='192.0.2.1 50000 192.0.2.2 22'
 if close_port 22 >/dev/null 2>&1; then fail 'closed the current session port'; fi
 grep -qxF 'Port 22' "$SSHD_DROPIN" || fail 'session-port guard changed the config'
@@ -190,7 +190,7 @@ fw_open 22 || fail 'last-Port rollback changed the firewall'
 # A missing drop-in directory is refused before writing anything.
 reset_all
 SSHD_DROPIN_DIR="$TMP/missing"
-if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted a missing drop-in directory'; fi
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a missing drop-in directory'; fi
 [ -e "$TMP/missing" ] && fail 'created the drop-in directory'
 SSHD_DROPIN_DIR="$TMP/dropin"
 
@@ -198,38 +198,38 @@ SSHD_DROPIN_DIR="$TMP/dropin"
 reset_all
 printf 'Port 22\nPort 22\n' > "$SSHD_MAIN"
 before="$(cat "$SSHD_MAIN")"
-if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted duplicate Port directives'; fi
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted duplicate Port directives'; fi
 [ "$(cat "$SSHD_MAIN")" = "$before" ] || fail 'changed a duplicate-Port config'
 [ -e "$SSHD_DROPIN" ] && fail 'wrote a drop-in despite duplicate Ports'
 
 # Two different Port directives are refused before any change.
 reset_all
 printf 'Port 22\nPort 2200\n' > "$SSHD_MAIN"
-if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted multiple listening Ports'; fi
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted multiple listening Ports'; fi
 
 # A port already in use by another service is refused.
 reset_all
 printf '2222\n' >> "$TMP/listen"
-if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted a busy port'; fi
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a busy port'; fi
 [ -e "$SSHD_DROPIN" ] && fail 'wrote a drop-in for a busy port'
 
 # sshd -t failure rolls back before the firewall is touched.
 reset_all
 SSHD_T_FAIL=1
-if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted an invalid config'; fi
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted an invalid config'; fi
 [ -e "$SSHD_DROPIN" ] && fail 'left the drop-in after sshd -t failure'
 if called 'fw open tcp 2222'; then fail 'opened the port before config validation'; fi
 
 # Reload failure restores the config and removes the opened port.
 reset_all
 RELOAD_FAIL=1
-if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted a reload failure'; fi
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a reload failure'; fi
 [ -e "$SSHD_DROPIN" ] && fail 'left the drop-in after reload rollback'
 called 'fw close tcp 2222' || fail 'opened port was not rolled back'
 
 # Socket activation ignores Port in sshd_config.
 reset_all
 SOCKET_ACTIVE=1
-if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted ssh.socket activation'; fi
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted ssh.socket activation'; fi
 
 echo 'ssh port tests: pass'

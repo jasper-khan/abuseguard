@@ -672,10 +672,10 @@ act_ssh_port() {
 		echo "端口 $new 已被其他服务监听，已取消。"
 		return 1
 	fi
-	echo "  新端口 $new 会和旧端口 $cur 同时监听；请先用新端口登录确认，再到防火墙管理关闭旧端口。"
-	echo "  请先确认云安全组或上游防火墙已放行 $new/tcp。"
-	read -r -p "  输入 yes 继续: " answer || return 1
-	[ "$answer" = yes ] || { echo "已取消。"; return 1; }
+	echo "  ${C_R}新旧端口将同时监听；确认新端口可登录后到防火墙关闭旧端口。${C_0}"
+	echo "  ${C_R}请先在云安全组放行 $new/tcp。${C_0}"
+	read -r -p "  继续？[y/N]: " answer || return 1
+	case "$answer" in y|Y) ;; *) echo "已取消。"; return 1 ;; esac
 
 	[ ! -f "$SSHD_DROPIN" ] || { backup="$(mktemp)"; cp -- "$SSHD_DROPIN" "$backup" || return 1; }
 	# 已有的单个 Port 留在原文件；我们的 drop-in 只负责新端口。没有 Port 时，
@@ -746,7 +746,6 @@ act_ssh() {
 		ports="$(ssh_current_ports)"
 		[ -n "$ports" ] || ports="无法读取"
 		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
-		panel_row " 新旧端口并存时，确认新端口可登录后到防火墙管理关闭旧端口。"
 		panel_section "端口"
 		panel_option 1 "修改 SSH 端口"
 		panel_footer "返回首页"
