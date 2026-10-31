@@ -10,7 +10,8 @@ cleanup() {
 	rm -f -- "$TMP/live.nft"
 	rm -f -- "$TMP/nft.calls"
 	rm -f -- "$TMP/systemctl.calls"
-	rm -f -- "$TMP/kernel.nft" "$TMP/sshd_config"
+	rm -f -- "$TMP/kernel.nft"
+	rm -f -- "$TMP/sshd_config"
 	rmdir -- "$TMP/dropin" 2>/dev/null || true
 	rmdir -- "$TMP"
 }
@@ -242,6 +243,12 @@ firewall_ports | grep -qx 'tcp 22 any' || fail 'apply did not restore the SSH po
 firewall_set_policy ipv6 1 >/dev/null || fail 'could not enable IPv6 inbound'
 grep -q '^# policy ipv4-in=1 ipv6-in=1' "$FIREWALL_FILE" || fail 'IPv6 policy not saved'
 if grep -q 'meta nfproto ipv6 drop' "$FIREWALL_FILE"; then fail 'IPv6 drop remained after enabling'; fi
+# A second panel can change policy while this panel remains open.
+firewall_policy_load
+(firewall_set_policy ipv4 0 >/dev/null) || fail 'second panel could not disable IPv4'
+firewall_change_port open tcp 8787 any >/dev/null
+grep -q '^# policy ipv4-in=0 ipv6-in=1' "$FIREWALL_FILE" || fail 'port change restored stale IPv4 policy'
+firewall_set_policy ipv4 1 >/dev/null || fail 'could not restore IPv4 for subsequent checks'
 firewall_set_policy ipv6 0 >/dev/null || fail 'could not disable IPv6 inbound'
 grep -q 'meta nfproto ipv6 drop' "$FIREWALL_FILE" || fail 'IPv6 drop missing after disabling'
 firewall_set_policy ipv4 0 >/dev/null || fail 'could not disable IPv4 inbound'

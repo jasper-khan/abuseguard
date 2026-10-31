@@ -4,9 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 cleanup() {
-	rm -f -- "$TMP/panel.sh" "$TMP/sshd_config" "$TMP/report.local"
-	rm -f -- "$TMP/listen" "$TMP/calls" "$TMP/fw.nft"
-	rm -f -- "$TMP/dropin/99-abuseguard-port.conf" "$TMP/dropin/99-ssh-port.conf"
+	rm -f -- "$TMP/panel.sh"
+	rm -f -- "$TMP/sshd_config"
+	rm -f -- "$TMP/report.local"
+	rm -f -- "$TMP/listen"
+	rm -f -- "$TMP/calls"
+	rm -f -- "$TMP/fw.nft"
+	rm -f -- "$TMP/ssh-backup"
+	rm -f -- "$TMP/dropin/99-abuseguard-port.conf"
+	rm -f -- "$TMP/dropin/99-ssh-port.conf"
 	rmdir -- "$TMP/dropin" 2>/dev/null || true
 	rmdir -- "$TMP" 2>/dev/null || true
 }
@@ -29,6 +35,8 @@ fail() { echo "ssh port test failed: $*" >&2; exit 1; }
 SOCKET_ACTIVE=0
 RELOAD_FAIL=0
 SSHD_T_FAIL=0
+SAVE_FAIL=0
+mktemp() { : > "$TMP/ssh-backup"; printf '%s\n' "$TMP/ssh-backup"; }
 ss() {
 	local filter="${!#}" port
 	if [ "$filter" = -tlnp ] || [ "$filter" = -tln ]; then
@@ -87,14 +95,15 @@ firewall_change_port() {
 }
 firewall_check_conflicts() { return 0; }
 firewall_ports() { cat "$FIREWALL_FILE"; }
-firewall_save() { printf '%s\n' "$1" | grep . | sort -u > "$FIREWALL_FILE"; printf 'save\n' >> "$TMP/calls"; return 0; }
+firewall_save() { [ "$SAVE_FAIL" = 0 ] || return 1; printf '%s\n' "$1" | grep . | sort -u > "$FIREWALL_FILE"; printf 'save\n' >> "$TMP/calls"; return 0; }
 firewall_running() { return 0; }
 fail2ban-client() { printf 'f2b %s\n' "$*" >> "$TMP/calls"; return 0; }
 sleep() { :; }
 
 reset_all() {
 	printf '#Port 22\n' > "$SSHD_MAIN"
-	rm -f -- "$SSHD_DROPIN" "$SSHD_DROPIN_DIR/99-ssh-port.conf"
+	rm -f -- "$SSHD_DROPIN"
+	rm -f -- "$SSHD_DROPIN_DIR/99-ssh-port.conf"
 	: > "$TMP/listen"
 	printf '22\n' > "$TMP/listen"
 	printf 'tcp 22 any\n' > "$FIREWALL_FILE"
@@ -104,6 +113,7 @@ reset_all() {
 	SOCKET_ACTIVE=0
 	RELOAD_FAIL=0
 	SSHD_T_FAIL=0
+	SAVE_FAIL=0
 }
 run_ssh_port() { printf '%b' "$1" | act_ssh_port; }
 close_port() { real_firewall_change_port close tcp "$1"; }
@@ -132,6 +142,18 @@ listening 22 && fail 'old port still listening after close'
 listening 2222 || fail 'new port stopped listening after close'
 fw_open 22 && fail 'old firewall rule survived the close'
 fw_open 2222 || fail 'new firewall rule lost while closing the old one'
+[ ! -e "$TMP/ssh-backup" ] || fail 'successful close left the SSH backup'
+
+# If committing the firewall fails, restore the old SSH configuration and listener.
+reset_all
+run_ssh_port '2222\ny\n' >/dev/null || fail 'setup for failed firewall save failed'
+SSH_CONNECTION='192.0.2.1 50000 192.0.2.2 2222'
+SAVE_FAIL=1
+if close_port 22 >/dev/null 2>&1; then fail 'accepted a failed firewall save'; fi
+grep -qxF 'Port 22' "$SSHD_DROPIN" || fail 'failed firewall save removed the old Port'
+listening 22 && listening 2222 || fail 'failed firewall save did not restore both listeners'
+fw_open 22 && fw_open 2222 || fail 'failed firewall save changed firewall rules'
+[ ! -e "$TMP/ssh-backup" ] || fail 'rollback left the SSH backup'
 
 # An existing single Port stays put during the switch; closing removes it in place.
 reset_all
@@ -201,6 +223,21 @@ run_ssh_port '2222\ny\n' >/dev/null || fail 'source inheritance switch failed'
 called 'fw open tcp 2222 203.0.113.5/32' || fail 'new port did not inherit the source'
 if called 'fw open tcp 2222 any'; then fail 'inherited port was widened to any'; fi
 
+# A target rule cannot broaden the old SSH port's source restrictions.
+reset_all
+printf 'tcp 22 203.0.113.5/32\ntcp 2222 any\n' > "$FIREWALL_FILE"
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a broader target-port rule'; fi
+[ ! -e "$SSHD_DROPIN" ] || fail 'a conflicting target rule changed the SSH config'
+grep -qxF 'tcp 2222 any' "$FIREWALL_FILE" || fail 'a conflicting target rule was changed'
+
+# On a failed switch, only newly added rules are removed.
+reset_all
+printf 'tcp 22 198.51.100.12/32\ntcp 22 203.0.113.5/32\ntcp 2222 203.0.113.5/32\n' > "$FIREWALL_FILE"
+RELOAD_FAIL=1
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a reload failure with existing rules'; fi
+grep -qxF 'tcp 2222 203.0.113.5/32' "$FIREWALL_FILE" || fail 'rollback deleted a pre-existing rule'
+if grep -qxF 'tcp 2222 198.51.100.12/32' "$FIREWALL_FILE"; then fail 'rollback left a new rule'; fi
+
 # IPv6 source restrictions are inherited too.
 reset_all
 printf 'tcp 22 2001:db8::5
@@ -242,6 +279,18 @@ RELOAD_FAIL=1
 if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a reload failure'; fi
 [ -e "$SSHD_DROPIN" ] && fail 'left the drop-in after reload rollback'
 called 'fw close tcp 2222 any no-ssh' || fail 'opened port was not rolled back'
+
+# Existing SSH drop-in backups are consumed on both success and rollback.
+reset_all
+printf 'Port 22\n' > "$SSHD_DROPIN"
+run_ssh_port '2222\ny\n' >/dev/null || fail 'switch from existing drop-in failed'
+[ ! -e "$TMP/ssh-backup" ] || fail 'successful switch left the SSH backup'
+reset_all
+printf 'Port 22\n' > "$SSHD_DROPIN"
+RELOAD_FAIL=1
+if run_ssh_port '2222\ny\n' >/dev/null 2>&1; then fail 'accepted a reload failure with a drop-in'; fi
+grep -qxF 'Port 22' "$SSHD_DROPIN" || fail 'failed switch did not restore the drop-in'
+[ ! -e "$TMP/ssh-backup" ] || fail 'failed switch left the SSH backup'
 
 # Socket activation ignores Port in sshd_config.
 reset_all

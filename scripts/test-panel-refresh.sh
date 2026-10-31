@@ -86,7 +86,7 @@ act_ban() { echo 'action:ban'; }
 act_unban() { echo 'action:unban'; }
 act_whitelist() { echo 'action:whitelist'; }
 firewall_apply() { echo 'action:apply'; }
-firewall_policy_load() { fw_ipv4_in=1; fw_ipv6_in=0; fw_policy_loaded=1; }
+firewall_policy_load() { fw_ipv4_in=1; fw_ipv6_in=0; }
 firewall_toggle_family() { echo "action:family-$1"; }
 act_sync() { echo 'action:sync'; }
 act_flush() { echo 'action:flush'; }

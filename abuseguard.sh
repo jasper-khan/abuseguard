@@ -422,22 +422,23 @@ firewall_ssh_ports() {
 # 单一持久配置；在一个 nft 事务中只替换本项目的表，不清空整个 ruleset。
 fw_ipv4_in=1
 fw_ipv6_in=0
-fw_policy_loaded=0
 
 firewall_policy_load() {
-	[ "$fw_policy_loaded" = 1 ] && return 0
 	local line=""
 	[ -f "$FIREWALL_FILE" ] && line="$(sed -n '1{/^# policy /p;}' "$FIREWALL_FILE")"
 	fw_ipv4_in=1
 	fw_ipv6_in=0
 	case "$line" in *ipv4-in=0*) fw_ipv4_in=0 ;; esac
 	case "$line" in *ipv6-in=1*) fw_ipv6_in=1 ;; esac
-	fw_policy_loaded=1
 }
 
 firewall_render() {
 	local proto port source
 	firewall_policy_load
+	case "${1:-}" in
+		ipv4) fw_ipv4_in="$2" ;;
+		ipv6) fw_ipv6_in="$2" ;;
+	esac
 	printf '# policy ipv4-in=%s ipv6-in=%s\n' "$fw_ipv4_in" "$fw_ipv6_in"
 	cat <<'NFT'
 # Managed by ag. Change ports through the firewall menu.
@@ -479,7 +480,7 @@ firewall_save() {
 		active=1
 	fi
 	candidate="$(mktemp "$CONF_DIR/.firewall.XXXXXX")" || return 1
-	if ! printf '%s\n' "$ports" | sort -u | firewall_render > "$candidate" \
+	if ! printf '%s\n' "$ports" | sort -u | firewall_render "${2:-}" "${3:-}" > "$candidate" \
 		|| ! nft -c -f "$candidate"; then
 		rm -f -- "$candidate"
 		return 1
@@ -522,7 +523,7 @@ firewall_apply() {
 
 firewall_change_port() {
 	local action="$1" proto="${2:-}" port="${3:-}" source="${4:-any}" skip_ssh="${5:-}"
-	local interactive=0 ports ssh_ports p rules idx selected remaining pr po so
+	local interactive=0 ports ssh_ports p rules idx selected remaining pr po so ssh_retire_file="" ssh_retire_backup=""
 	[ "$#" -eq 1 ] && interactive=1
 	[ -f "$FIREWALL_FILE" ] || { echo "防火墙配置缺失，请选择重新应用规则或重新运行安装器。"; return 1; }
 	firewall_check_conflicts || return 1
@@ -592,7 +593,10 @@ firewall_change_port() {
 				echo "无法从 sshd 配置中移除端口 $port，已取消关闭。"
 				return 1
 			fi
-			ssh_ports="$(firewall_ssh_ports)" || return 1
+			if ! ssh_ports="$(firewall_ssh_ports)"; then
+				ssh_restore_file "$ssh_retire_file" "$ssh_retire_backup"
+				return 1
+			fi
 		fi
 	fi
 
@@ -603,7 +607,13 @@ firewall_change_port() {
 			firewall_has_port "$ports" "$p" || ports+=$'\n'"tcp $p any"
 		done
 	fi
-	firewall_save "$ports" || return 1
+	if ! firewall_save "$ports"; then
+		[ -z "$ssh_retire_backup" ] || ssh_restore_file "$ssh_retire_file" "$ssh_retire_backup"
+		return 1
+	fi
+	if [ -n "$ssh_retire_backup" ] && ! rm -f -- "$ssh_retire_backup"; then
+		echo "规则已生效，但无法删除 SSH 配置备份：$ssh_retire_backup" >&2
+	fi
 	if firewall_running; then
 		echo "规则已保存并生效（已建立的连接继续保留）。"
 	else
@@ -612,16 +622,11 @@ firewall_change_port() {
 }
 
 firewall_set_policy() {
-	local fam="$1" value="$2" ports old
-	firewall_policy_load
+	local fam="$1" value="$2" ports
 	[ -f "$FIREWALL_FILE" ] || { echo "防火墙配置缺失，请先重新应用规则。"; return 1; }
 	firewall_check_conflicts || return 1
 	ports="$(firewall_ports)" || return 1
-	if [ "$fam" = ipv4 ]; then old=$fw_ipv4_in; fw_ipv4_in=$value; else old=$fw_ipv6_in; fw_ipv6_in=$value; fi
-	fw_policy_loaded=1
-	if firewall_save "$ports"; then return 0; fi
-	if [ "$fam" = ipv4 ]; then fw_ipv4_in=$old; else fw_ipv6_in=$old; fi
-	return 1
+	firewall_save "$ports" "$fam" "$value"
 }
 
 firewall_toggle_family() {
@@ -720,14 +725,20 @@ ssh_port_sites() {
 ssh_restore_file() {
 	local file="$1" backup="$2"
 	if [ -n "$backup" ]; then
-		mv -f -- "$backup" "$file"
+		if ! mv -f -- "$backup" "$file"; then
+			echo "无法恢复 SSH 配置，备份保留于 $backup。" >&2
+			return 1
+		fi
 	else
-		rm -f -- "$file"
+		rm -f -- "$file" || return 1
 	fi
-	sshd -t >/dev/null 2>&1 && systemctl reload ssh >/dev/null 2>&1
+	if ! sshd -t >/dev/null 2>&1 || ! systemctl reload ssh >/dev/null 2>&1; then
+		echo "SSH 配置已恢复，但无法重载，请检查 ssh 服务。" >&2
+		return 1
+	fi
 }
 
-# 从 sshd 配置中移除某个端口的 Port 指令；失败时恢复并重载。
+# 从 sshd 配置中移除某个端口；调用者保留备份直到防火墙提交成功。
 ssh_port_remove() {
 	local port="$1" sites files file backup
 	sites="$(ssh_port_sites "$port")"
@@ -735,7 +746,11 @@ ssh_port_remove() {
 	[ -n "$files" ] || return 1
 	[ "$(printf '%s\n' "$files" | grep -c .)" -eq 1 ] || return 1
 	file="$files"
-	backup="$(mktemp)" && cp -- "$file" "$backup" || return 1
+	backup="$(mktemp)" || return 1
+	if ! cp -p -- "$file" "$backup"; then
+		rm -f -- "$backup"
+		return 1
+	fi
 	if ! sed -i -E "/^[[:space:]]*Port[[:space:]]+$port([[:space:]]|$)/d" "$file"; then
 		ssh_restore_file "$file" "$backup"
 		return 1
@@ -759,13 +774,15 @@ ssh_port_remove() {
 		ssh_restore_file "$file" "$backup"
 		return 1
 	fi
-	rm -f -- "$backup"
+	# The caller keeps this backup until the firewall change is committed.
+	ssh_retire_file="$file"
+	ssh_retire_backup="$backup"
 	return 0
 }
 
 # 加入新端口，旧端口继续监听；关闭旧端口由防火墙管理完成。
 act_ssh_port() {
-	local cur new answer port_sites port_count backup="" fw=0 now p old_sources="" added_sources="" src a
+	local cur new answer port_sites port_count backup="" fw=0 now p old_sources="" target_sources="" added_sources="" src a
 	systemctl cat ssh.service >/dev/null 2>&1 || { echo "未找到 ssh 服务，无法修改 SSH 端口。"; return 1; }
 	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
 		echo "系统使用 ssh.socket 激活 SSH，面板不修改其端口；请先恢复 ssh.service 再试。"
@@ -797,12 +814,30 @@ act_ssh_port() {
 		echo "端口 $new 已被其他服务监听，已取消。"
 		return 1
 	fi
+	old_sources="$(firewall_ports | awk -v p="$cur" '$1 == "tcp" && $2 == p { print $3 }' | sort -u)"
+	if printf '%s\n' "$old_sources" | grep -qxF any; then old_sources=any; fi
+	[ -n "$old_sources" ] || old_sources=any
+	target_sources="$(firewall_ports | awk -v p="$new" '$1 == "tcp" && $2 == p { print $3 }' | sort -u)"
+	if [ "$old_sources" != any ]; then
+		for src in $target_sources; do
+			if ! printf '%s\n' "$old_sources" | grep -qxF "$src"; then
+				echo "新端口已有不同来源的防火墙规则，请先在防火墙管理中调整。"
+				return 1
+			fi
+		done
+	fi
 	echo "  ${C_R}新旧端口将同时监听；确认新端口可登录后到防火墙关闭旧端口。${C_0}"
 	echo "  ${C_R}请先在云安全组放行 $new/tcp。${C_0}"
 	read -r -p "  继续？[y/N]: " answer || return 1
 	case "$answer" in y|Y) ;; *) echo "已取消。"; return 1 ;; esac
 
-	[ ! -f "$SSHD_DROPIN" ] || { backup="$(mktemp)"; cp -- "$SSHD_DROPIN" "$backup" || return 1; }
+	if [ -f "$SSHD_DROPIN" ]; then
+		backup="$(mktemp)" || return 1
+		if ! cp -p -- "$SSHD_DROPIN" "$backup"; then
+			rm -f -- "$backup"
+			return 1
+		fi
+	fi
 	# 已有的单个 Port 留在原文件；我们的 drop-in 只负责新端口。没有 Port 时，
 	# 把当前端口也显式写出来，否则 sshd 只监听新端口。
 	if [ "$port_count" = 1 ] && [ "${port_sites%%:*}" != "$SSHD_DROPIN" ]; then
@@ -821,11 +856,9 @@ act_ssh_port() {
 		ssh_restore_file "$SSHD_DROPIN" "$backup"
 		return 1
 	fi
-	old_sources="$(firewall_ports | awk -v p="$cur" '$1 == "tcp" && $2 == p { print $3 }' | sort -u)"
-	case " $old_sources " in *" any "*) old_sources=any ;; esac
-	[ -n "$old_sources" ] || old_sources=any
 	if [ -f "$FIREWALL_FILE" ]; then
 		for src in $old_sources; do
+			if printf '%s\n' "$target_sources" | grep -qxF "$src"; then continue; fi
 			if ! firewall_change_port open tcp "$new" "$src" >/dev/null; then
 				echo "防火墙放行新端口失败，已回滚。"
 				for a in $added_sources; do firewall_change_port close tcp "$new" "$a" no-ssh >/dev/null 2>&1; done
@@ -858,7 +891,9 @@ act_ssh_port() {
 			return 1
 		fi
 	done
-	[ -z "$backup" ] || rm -f -- "$backup"
+	if [ -n "$backup" ] && ! rm -f -- "$backup"; then
+		echo "端口已切换，但无法删除 SSH 配置备份：$backup" >&2
+	fi
 
 	# 上报元数据切到最终端口；旧端口只是过渡期保留。
 	if [ -f "$SSH_REPORT_JAIL" ]; then
