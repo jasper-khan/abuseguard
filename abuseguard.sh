@@ -17,6 +17,10 @@ JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-inte
 PANEL_REFRESH_SECONDS=1800
 FIREWALL_FILE="$CONF_DIR/firewall.nft"
 FIREWALL_SERVICE=caddy-abuseguard-firewall.service
+SSHD_MAIN=/etc/ssh/sshd_config
+SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
+SSHD_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-port.conf"
+SSH_REPORT_JAIL=/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
 REPO_FILE="$CONF_DIR/repo"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" || echo jasper-khan/abuseguard )}"
 
@@ -554,6 +558,134 @@ act_firewall() {
 	done
 }
 
+# ---- SSH 端口 ----
+# 修改 sshd 监听端口：先校验配置，再放行新端口、重载并验证监听，任一步失败回滚。
+ssh_current_ports() {
+	sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un || true
+}
+
+ssh_port_rollback() {
+	local dropin="$1" backup="$2" svc="$3" new="$4" fw="${5:-0}"
+	if [ -n "$backup" ] && [ -f "$backup" ]; then
+		mv -f -- "$backup" "$dropin"
+	else
+		rm -f -- "$dropin"
+	fi
+	sshd -t >/dev/null 2>&1 && systemctl reload "$svc" >/dev/null 2>&1
+	[ "$fw" != 1 ] || firewall_change_port close tcp "$new" >/dev/null 2>&1
+}
+
+act_ssh_port() {
+	local cur new old answer conflict backup="" fw=0 svc=ssh
+	systemctl cat "$svc.service" >/dev/null 2>&1 || { echo "未找到 ssh 服务，无法修改 SSH 端口。"; return 1; }
+	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+		echo "系统使用 ssh.socket 激活 SSH，面板不修改其端口；请先恢复 ssh.service 再试。"
+		return 1
+	fi
+	command -v sshd >/dev/null 2>&1 || { echo "未找到 sshd，无法修改 SSH 端口。"; return 1; }
+	cur="$(ssh_current_ports)"
+	[ -n "$cur" ] || { echo "无法读取当前 SSH 端口，已取消。"; return 1; }
+	[ -d "$SSHD_DROPIN_DIR" ] || { echo "系统没有 $SSHD_DROPIN_DIR，无法安全修改端口。"; return 1; }
+	echo "当前 SSH 端口：$(printf '%s' "$cur" | tr '\n' ' ')"
+	# 其他位置显式写 Port 会让 sshd 同时监听多个端口，无法在这里安全替换。
+	conflict="$(grep -rniE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$SSHD_MAIN" "$SSHD_DROPIN_DIR" 2>/dev/null |
+		grep -v "^$SSHD_DROPIN:" | cut -d: -f1 | sort -u)"
+	if [ -n "$conflict" ]; then
+		echo "以下文件已显式配置 Port，面板无法替换（会同时监听多个端口）："
+		printf '  %s\n' "$conflict"
+		echo "请先注释这些 Port 行后重试。"
+		return 1
+	fi
+	read -r -p "  新的 SSH 端口（1–65535，留空取消）: " new || return 1
+	[ -n "$new" ] || return 0
+	[ "${#new}" -le 5 ] && port_valid "$new" || { echo "端口格式无效。"; return 1; }
+	new=$((10#$new))
+	printf '%s\n' "$cur" | grep -qxF "$new" && { echo "新端口与当前端口相同。"; return 1; }
+	if ss -H -tln "sport = :$new" 2>/dev/null | grep -q .; then
+		echo "端口 $new 已被其他服务监听，已取消。"
+		return 1
+	fi
+	echo "  切换期间旧端口保持可用；请先确认云安全组或上游防火墙已放行 $new/tcp。"
+	read -r -p "  输入 yes 确认切换（留空取消）: " answer || return 1
+	[ "$answer" = yes ] || { echo "已取消。"; return 1; }
+
+	[ ! -f "$SSHD_DROPIN" ] || { backup="$(mktemp)"; cp -- "$SSHD_DROPIN" "$backup" || return 1; }
+	if ! printf 'Port %s\n' "$new" > "$SSHD_DROPIN" || ! sshd -t; then
+		echo "sshd 配置校验失败，未修改端口。"
+		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+		return 1
+	fi
+	if [ "$(ssh_current_ports)" != "$new" ]; then
+		echo "sshd 未识别新端口（sshd_config 可能未包含 sshd_config.d），已回滚。"
+		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+		return 1
+	fi
+	if [ -f "$FIREWALL_FILE" ]; then
+		if ! firewall_change_port open tcp "$new" >/dev/null; then
+			echo "防火墙放行新端口失败，已回滚。"
+			ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+			return 1
+		fi
+		fw=1
+	elif firewall_running; then
+		echo "防火墙正在运行但配置缺失，无法安全放行新端口，已取消。"
+		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+		return 1
+	fi
+	if ! systemctl reload "$svc" 2>/dev/null; then
+		echo "sshd 重载失败，已回滚。"
+		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" "$fw"
+		return 1
+	fi
+	for _ in {1..10}; do
+		ss -H -tlnp "sport = :$new" 2>/dev/null | grep -q sshd && break
+		sleep 1
+	done
+	if ! ss -H -tlnp "sport = :$new" 2>/dev/null | grep -q sshd; then
+		echo "新端口未在监听，已回滚。"
+		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" "$fw"
+		return 1
+	fi
+	[ -z "$backup" ] || rm -f -- "$backup"
+
+	# 上报元数据跟随 sshd 实际端口。
+	if [ -f "$SSH_REPORT_JAIL" ]; then
+		sed -i -E "s/(profile=ssh-bruteforce, transport=SSH, target_port=)[0-9]+/\1$new/" "$SSH_REPORT_JAIL"
+		fail2ban-client reload >/dev/null 2>&1 || echo "fail2ban 重载失败，SSH 上报端口可能未生效。" >&2
+	fi
+
+	echo "SSH 已切换到端口 $new，请用新端口重新登录验证。"
+	old="$cur"
+	if [ -n "${SSH_CONNECTION:-}" ] && [ "${SSH_CONNECTION##* }" = "$old" ]; then
+		echo "旧端口 $old 是当前会话入口，已保留放行；重新登录后可在防火墙管理中关闭。"
+	elif ss -H -tln "sport = :$old" 2>/dev/null | grep -q .; then
+		echo "旧端口 $old 仍被其他服务监听，已保留放行。"
+	elif [ "$fw" = 1 ] && firewall_change_port close tcp "$old" >/dev/null; then
+		echo "旧端口 $old 的防火墙放行已移除。"
+	fi
+}
+
+# SSH 管理入口：目前只放端口修改，后续登录方式与密钥管理也归到这里。
+act_ssh() {
+	local choice ports
+	while true; do
+		panel_start "SSH 管理"
+		panel_section "当前状态"
+		ports="$(ssh_current_ports)"
+		[ -n "$ports" ] || ports="无法读取"
+		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
+		panel_section "端口"
+		panel_option 1 "修改 SSH 端口"
+		panel_footer "返回首页"
+		read -r -p "  选择 [0-1] > " choice || return
+		case "$choice" in
+			1) panel_title "SSH 管理 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
+			0) return ;;
+			*) echo "请输入 0–1 之间的菜单编号。"; pause ;;
+		esac
+	done
+}
+
 # ---- 站点 / 反向代理管理 ----
 # CF token 是否已设置（决定站点用 Cloudflare DNS 还是 Caddy 默认 HTTPS）
 cf_is_set() { grep -qE '^CF_API_TOKEN=.+' "$CADDY_ENV" 2>/dev/null; }
@@ -833,8 +965,9 @@ menu() {
 	panel_option 3 "防火墙管理" "端口 · IP 封禁/解封 · 白名单"
 	panel_option 4 "威胁情报" "情报同步 · 上报 · API 设置"
 	panel_option 5 "系统维护" "日志 · 更新 · 卸载"
+	panel_option 6 "SSH 管理" "修改监听端口"
 	panel_footer "退出面板" "每 30 分钟刷新状态"
-	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 [0-5] > " choice
+	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 [0-6] > " choice
 	read_status=$?
 	case "$read_status" in
 		0) ;;
@@ -848,8 +981,9 @@ menu() {
 		3) act_firewall ;;
 		4) act_intel ;;
 		5) act_system ;;
+		6) act_ssh ;;
 		0) exit 0 ;;
-		*) echo "请输入 0–5 之间的菜单编号。"; pause ;;
+		*) echo "请输入 0–6 之间的菜单编号。"; pause ;;
 	esac
 }
 

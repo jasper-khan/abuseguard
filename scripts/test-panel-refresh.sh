@@ -91,6 +91,7 @@ act_flush() { echo 'action:flush'; }
 act_key() { echo 'action:key'; }
 act_toggle() { echo 'action:toggle'; }
 act_logs() { echo 'action:logs'; }
+act_ssh_port() { echo 'action:ssh-port'; }
 act_update() { echo 'action:update'; }
 act_uninstall() { echo 'action:uninstall'; }
 printf '1\n' | menu
@@ -98,7 +99,8 @@ printf '2\n3\n0\n' | menu
 printf '3\n1\n2\n3\n4\n5\n6\n7\n8\n0\n' | menu
 printf '4\n1\n2\n3\n4\n0\n' | menu
 printf '5\n1\n2\n3\n0\n' | menu
-for category in 2 3 4 5; do
+printf '6\n1\n0\n' | menu
+for category in 2 3 4 5 6; do
 	printf '%s\n0\n' "$category" | menu
 done
 for screen in act_sites act_firewall act_intel act_system; do
@@ -107,7 +109,7 @@ done
 NAVIGATION
 )"
 actions="$(printf '%s\n' "$navigation" | sed -n 's/^action://p')"
-expected=$'status\ncftoken\nport-open\nport-close\nbanned\nban\nunban\nwhitelist\nrules\napply\nsync\nflush\nkey\ntoggle\nlogs\nupdate\nuninstall'
+expected=$'status\ncftoken\nport-open\nport-close\nbanned\nban\nunban\nwhitelist\nrules\napply\nsync\nflush\nkey\ntoggle\nlogs\nupdate\nuninstall\nssh-port'
 [ "$actions" = "$expected" ] || { printf 'unexpected menu actions:\n%s\n' "$actions" >&2; exit 1; }
 
 # Keep framed rows aligned and preserve long Chinese text with ANSI colors.

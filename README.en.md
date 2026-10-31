@@ -114,7 +114,7 @@ validation before it is applied.
 
 Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 30 minutes without requiring a menu action:
 
-The home screen has five categories, with related actions grouped within each. Enter `0` in a submenu to return to its parent. Blue borders separate sections, colors highlight status, and the background follows the SSH client's theme:
+The home screen has six categories, with related actions grouped within each. Enter `0` in a submenu to return to its parent. Blue borders separate sections, colors highlight status, and the background follows the SSH client's theme:
 
 | Home entry | Available actions |
 | --- | --- |
@@ -123,12 +123,15 @@ The home screen has five categories, with related actions grouped within each. E
 | `[3]` Firewall | Open/close TCP or UDP ports; list, ban, or unban IPs; manage the whitelist; inspect or reapply rules |
 | `[4]` Threat intel | Sync intel, send the report queue, set the AbuseIPDB API Key, toggle automatic reporting |
 | `[5]` Maintenance | Recent logs, update, uninstall |
+| `[6]` SSH | Change the SSH listening port |
 
 Adding a site takes a domain and upstream (local or remote IP:port), then generates a protected reverse-proxy configuration with `import abuseguard` and TLS as needed. The whitelist supports in-panel add/remove; **an added IP is auto-unbanned** and fail2ban reloaded. The home screen also shows firewall status and threat-intel last-sync age.
 
 Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/caddy/sites/*.caddy`, and removes only the exact `header_up X-Forwarded-Host {host}` or `header_up X-Forwarded-Host {http.request.host}` directives that Caddy identifies as redundant. Other reverse-proxy settings and request headers are preserved.
 
 Installation and updates automatically apply the AbuseGuard firewall and enable boot restoration, without another confirmation. The initial configuration allows all detected SSH ports, TCP 443, and UDP 443, and drops other new inbound connections. TCP 80 is closed by default; allow it explicitly in the panel if HTTP access or redirects are needed. Existing configurations retain user-added and user-closed ports, with current SSH ports added as needed. Established connections, loopback, ICMP (including IPv6 neighbor discovery), and DHCP remain allowed; outbound traffic is unrestricted. The panel refuses to close detected SSH ports. Closing other ports affects new connections only.
+
+An SSH port change in `[6]` SSH runs `sshd -t` first, then allows the new port, reloads sshd, and confirms it is listening; any failure restores the previous configuration. On success it syncs Fail2Ban's SSH report port and removes the old port's firewall rule once that port no longer carries the current session. The setting is written to `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`; allow the new port in the cloud security group first. The panel refuses `ssh.socket` activation or an explicit `Port` in the main sshd config.
 
 `/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot systemd service restores it at boot, without a new daemon. The menu can reapply saved rules; uninstalling removes only this project's table. IP bans retain the existing Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports.
 
@@ -205,6 +208,8 @@ sudo ./uninstall.sh --conservative   # conservative: remove AbuseGuard, keep Cad
 sudo ./uninstall.sh --purge          # thorough: also remove what AbuseGuard installed
 sudo ./uninstall.sh --dry-run        # show what would be removed, change nothing
 ```
+
+A panel-changed SSH port is not reverted on uninstall (the setting stays in `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`), so removal never switches SSH back to the default port and locks you out; change it from `[6]` SSH after reinstalling.
 
 Uninstall is **symmetric to install**: install records a manifest (what
 AbuseGuard created vs. what you already had).

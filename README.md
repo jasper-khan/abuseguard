@@ -82,7 +82,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 直接运行 `ag`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）。标题会显示当前 AbuseGuard 引擎版本；首页的“封禁记录”每 30 分钟重新查询各 jail，无需进入菜单手动刷新：
 
-首页按五个分类组织，分类内按功能分组；子菜单输入 `0` 返回上一层。面板使用蓝色框线分区和状态色，背景沿用 SSH 客户端主题：
+首页按六个分类组织，分类内按功能分组；子菜单输入 `0` 返回上一层。面板使用蓝色框线分区和状态色，背景沿用 SSH 客户端主题：
 
 | 首页入口 | 分类内的功能 |
 | --- | --- |
@@ -91,12 +91,15 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 | `[3]` 防火墙管理 | 开放/关闭 TCP、UDP 端口；查看、封禁、解封 IP；管理白名单；查看、重新应用规则 |
 | `[4]` 威胁情报 | 立即同步情报、发送上报队列、设置 AbuseIPDB API Key、开关自动上报 |
 | `[5]` 系统维护 | 查看近期日志、更新、卸载 |
+| `[6]` SSH 管理 | 修改 SSH 监听端口 |
 
 添加站点只需输入域名和上游（本地或公网 IP:端口），面板自动生成受保护的反代配置（`import abuseguard` 和按需 TLS）。白名单支持面板内增删，**新增会自动解封该 IP** 并重载 fail2ban。首页显示防火墙状态及情报最后同步时间。
 
 更新会在校验前用 `caddy fmt` 规范化主 Caddyfile 和 `/etc/caddy/sites/*.caddy`，并删除 Caddy 明确判定为冗余的精确指令 `header_up X-Forwarded-Host {host}` 或 `header_up X-Forwarded-Host {http.request.host}`；其他反代配置和请求头均保留。
 
 安装或更新会自动启用 AbuseGuard 防火墙并设置开机恢复，无需另行确认。首次建立配置时开放检测到的所有 SSH 端口、443/tcp 和 443/udp，其余入站端口默认丢弃；80/tcp 不默认开放，需要 HTTP 访问或跳转时可在面板手动放行。已有配置则保留用户开放和关闭的端口，并补齐当前 SSH 端口。保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭检测到的 SSH 端口；关闭其他端口只阻止新连接。
+
+「SSH 管理」中的「修改 SSH 端口」会先校验 `sshd -t`，再放行新端口、重载 sshd 并确认新端口已监听，任一步失败都恢复原配置；成功后同步 fail2ban 的 SSH 上报端口，旧端口在不再承接当前会话时移除防火墙放行。配置写入 `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`；切换前需先在云安全组或上游防火墙放行新端口。`ssh.socket` 激活方式、或 sshd 主配置已显式写死 `Port` 时，面板会拒绝修改。
 
 端口配置仅保存在 `/etc/caddy-abuseguard/firewall.nft`，由独立的 `inet caddy_abuseguard` 表执行。修改先通过 `nft -c` 校验，再以单次事务应用；一次性 systemd 服务负责开机恢复，无新增常驻进程。菜单可重新应用规则；卸载只移除本项目的表。IP 封禁继续复用 fail2ban，保留原有白名单、90 天封禁和不上报手动封禁的规则。
 
@@ -173,6 +176,8 @@ sudo ./uninstall.sh --conservative   # 保守：删 AbuseGuard，保留 Caddy �
 sudo ./uninstall.sh --purge          # 彻底：按安装清单删 AbuseGuard 装的一切
 sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何改动
 ```
+
+面板修改过的 SSH 端口不会随卸载回滚（配置保留在 `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`），避免恢复默认端口导致失联；如需改回，重装后在「SSH 管理」中设置即可。
 
 卸载**对称于安装**：安装时会记录一份清单（哪些是 AbuseGuard 新建的、哪些你原本就有）。
 
