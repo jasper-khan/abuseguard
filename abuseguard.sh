@@ -165,7 +165,7 @@ header() {
 	panel_start "控制中心 · v${version}"
 	panel_section "运行状态"
 	panel_row " Caddy $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )   Fail2Ban $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	panel_row " 防火墙 ${firewall_status}   当前封禁 ${C_H}${banned}${C_0}   上报 ${report_status}"
+	panel_row " 防火墙 ${firewall_status}   封禁记录 ${C_H}${banned}${C_0}   上报 ${report_status}"
 	panel_row " 情报 IP ${C_H}${intel}${C_0}  ${fresh}"
 }
 
