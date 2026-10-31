@@ -10,7 +10,8 @@ cleanup() {
 	rm -f -- "$TMP/live.nft"
 	rm -f -- "$TMP/nft.calls"
 	rm -f -- "$TMP/systemctl.calls"
-	rm -f -- "$TMP/kernel.nft"
+	rm -f -- "$TMP/kernel.nft" "$TMP/sshd_config"
+	rmdir -- "$TMP/dropin" 2>/dev/null || true
 	rmdir -- "$TMP"
 }
 trap cleanup EXIT
@@ -80,6 +81,10 @@ fi
 source "$TMP/panel.sh"
 CONF_DIR="$TMP"
 FIREWALL_FILE="$TMP/firewall.nft"
+SSHD_MAIN="$TMP/sshd_config"
+SSHD_DROPIN_DIR="$TMP/dropin"
+: > "$SSHD_MAIN"
+mkdir "$SSHD_DROPIN_DIR"
 CHECK_FAIL=0
 APPLY_FAIL=0
 START_FAIL=0
@@ -106,6 +111,7 @@ systemctl() {
 	case "$1" in
 		start) [ "$START_FAIL" = 0 ] && nft -f "$FIREWALL_FILE" ;;
 		enable) return 0 ;;
+		is-active) return 1 ;;
 		*) fail "unexpected systemctl command: $*" ;;
 	esac
 }
