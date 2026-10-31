@@ -149,10 +149,14 @@ intel_age_h() {
 }
 
 header() {
-	local caddy f2b intel banned rep age fresh report_status version firewall_status
+	local caddy f2b intel banned rep age fresh report_status version firewall_status ssh_ports
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
+	ssh_ports="$(ssh_current_ports)"
+	[ -n "$ssh_ports" ] || ssh_ports="?"
+	ssh_ports="$(printf '%s' "$ssh_ports" | tr '\n' ' ')"
+	ssh_ports="${ssh_ports% }"
 	version="$("$ENGINE" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
 	[ -n "$version" ] || version="?"
 	age="$(intel_age_h)"
@@ -168,7 +172,7 @@ header() {
 	else firewall_status="${C_Y}未就绪${C_0}"; fi
 	panel_start "控制中心 · v${version}"
 	panel_section "运行状态"
-	panel_row " Caddy $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )   Fail2Ban $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
+	panel_row " Caddy $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )   Fail2Ban $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )   SSH 端口 ${C_H}${ssh_ports}${C_0}"
 	panel_row " 防火墙 ${firewall_status}   封禁记录 ${C_H}${banned}${C_0}   上报 ${report_status}"
 	panel_row " 情报 IP ${C_H}${intel}${C_0}  ${fresh}"
 }
@@ -496,8 +500,23 @@ firewall_change_port() {
 	port=$((10#$port))
 	ssh_ports="$(firewall_ssh_ports)" || return 1
 	if [ "$action" = close ] && [ "$proto" = tcp ] && grep -qxF "$port" <<< "$ssh_ports"; then
-		echo "这是 SSH 管理端口，不能在面板中关闭。"
-		return 1
+		if [ -n "${SSH_CONNECTION:-}" ] && [ "${SSH_CONNECTION##* }" = "$port" ]; then
+			echo "这是当前 SSH 会话端口，关闭会断开连接。"
+			return 1
+		fi
+		if [ "$(grep -c . <<< "$ssh_ports")" -le 1 ]; then
+			echo "这是唯一的 SSH 管理端口，不能在面板中关闭。"
+			return 1
+		fi
+		if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+			echo "SSH 由 ssh.socket 激活，请在系统层面调整端口。"
+			return 1
+		fi
+		if ! ssh_port_remove "$port"; then
+			echo "无法从 sshd 配置中移除端口 $port，已取消关闭。"
+			return 1
+		fi
+		ssh_ports="$(firewall_ssh_ports)" || return 1
 	fi
 	ports="$(firewall_ports)" || return 1
 	ports="$(awk -v proto="$proto" -v port="$port" '!($1 == proto && $2 == port)' <<< "$ports")"
@@ -559,25 +578,66 @@ act_firewall() {
 }
 
 # ---- SSH 端口 ----
-# 修改 sshd 监听端口：先校验配置，再放行新端口、重载并验证监听，任一步失败回滚。
+# 修改端口时新旧端口同时监听；确认新端口可登录后，再到防火墙管理关闭旧端口。
 ssh_current_ports() {
 	sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un || true
 }
 
-ssh_port_rollback() {
-	local dropin="$1" backup="$2" svc="$3" new="$4" fw="${5:-0}"
-	if [ -n "$backup" ] && [ -f "$backup" ]; then
-		mv -f -- "$backup" "$dropin"
-	else
-		rm -f -- "$dropin"
-	fi
-	sshd -t >/dev/null 2>&1 && systemctl reload "$svc" >/dev/null 2>&1
-	[ "$fw" != 1 ] || firewall_change_port close tcp "$new" >/dev/null 2>&1
+# 列出声明 Port 的位置（可只匹配某个端口），格式：文件:行:内容。
+ssh_port_sites() {
+	local pat='^[[:space:]]*Port[[:space:]]+[0-9]+'
+	[ -z "${1:-}" ] || pat='^[[:space:]]*Port[[:space:]]+'"$1"'([[:space:]]|$)'
+	grep -HnE "$pat" "$SSHD_MAIN" 2>/dev/null
+	grep -rnE --include='*.conf' "$pat" "$SSHD_DROPIN_DIR" 2>/dev/null || true
 }
 
+# 恢复某个 sshd 配置文件并重载（失败回滚）。
+ssh_restore_file() {
+	local file="$1" backup="$2"
+	if [ -n "$backup" ]; then
+		mv -f -- "$backup" "$file"
+	else
+		rm -f -- "$file"
+	fi
+	sshd -t >/dev/null 2>&1 && systemctl reload ssh >/dev/null 2>&1
+}
+
+# 从 sshd 配置中移除某个端口的 Port 指令；失败时恢复并重载。
+ssh_port_remove() {
+	local port="$1" sites files file backup
+	sites="$(ssh_port_sites "$port")"
+	files="$(printf '%s\n' "$sites" | grep . | cut -d: -f1 | sort -u)"
+	[ -n "$files" ] || return 1
+	[ "$(printf '%s\n' "$files" | grep -c .)" -eq 1 ] || return 1
+	file="$files"
+	backup="$(mktemp)" && cp -- "$file" "$backup" || return 1
+	if ! sed -i -E "/^[[:space:]]*Port[[:space:]]+$port([[:space:]]|$)/d" "$file"; then
+		ssh_restore_file "$file" "$backup"
+		return 1
+	fi
+	if [ "$file" = "$SSHD_DROPIN" ] && ! grep -qE '^[[:space:]]*Port[[:space:]]+' "$file"; then
+		rm -f -- "$file"
+	fi
+	if ! sshd -t; then
+		ssh_restore_file "$file" "$backup"
+		return 1
+	fi
+	if ! systemctl reload ssh 2>/dev/null; then
+		ssh_restore_file "$file" "$backup"
+		return 1
+	fi
+	if ss -H -tlnp "sport = :$port" 2>/dev/null | grep -q sshd; then
+		ssh_restore_file "$file" "$backup"
+		return 1
+	fi
+	rm -f -- "$backup"
+	return 0
+}
+
+# 加入新端口，旧端口继续监听；关闭旧端口由防火墙管理完成。
 act_ssh_port() {
-	local cur new answer conflict backup="" fw=0 svc=ssh
-	systemctl cat "$svc.service" >/dev/null 2>&1 || { echo "未找到 ssh 服务，无法修改 SSH 端口。"; return 1; }
+	local cur new answer port_sites port_count backup="" fw=0 now p
+	systemctl cat ssh.service >/dev/null 2>&1 || { echo "未找到 ssh 服务，无法修改 SSH 端口。"; return 1; }
 	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
 		echo "系统使用 ssh.socket 激活 SSH，面板不修改其端口；请先恢复 ssh.service 再试。"
 		return 1
@@ -585,18 +645,20 @@ act_ssh_port() {
 	command -v sshd >/dev/null 2>&1 || { echo "未找到 sshd，无法修改 SSH 端口。"; return 1; }
 	cur="$(ssh_current_ports)"
 	[ -n "$cur" ] || { echo "无法读取当前 SSH 端口，已取消。"; return 1; }
-	[ -d "$SSHD_DROPIN_DIR" ] || { echo "系统没有 $SSHD_DROPIN_DIR，无法安全修改端口。"; return 1; }
-	echo "当前 SSH 端口：$(printf '%s' "$cur" | tr '\n' ' ')"
-	# 其他位置显式写 Port 会让 sshd 同时监听多个端口，无法在这里安全替换。
-	conflict="$(grep -rniE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$SSHD_MAIN" "$SSHD_DROPIN_DIR" 2>/dev/null |
-		grep -v "^$SSHD_DROPIN:" | cut -d: -f1 | sort -u)"
-	if [ -n "$conflict" ]; then
-		echo "以下文件已显式配置 Port，面板无法替换（会同时监听多个端口）："
-		printf '  %s\n' "$conflict"
-		echo "请先注释这些 Port 行后重试。"
+	if [ "$(printf '%s\n' "$cur" | grep -c .)" -ne 1 ]; then
+		echo "当前 SSH 监听多个端口（$(printf '%s' "$cur" | tr '\n' ' ')），面板无法安全切换。"
 		return 1
 	fi
-	read -r -p "  新的 SSH 端口（1–65535，留空取消）: " new || return 1
+	echo "当前 SSH 端口：$cur"
+	port_sites="$(ssh_port_sites)"
+	port_count="$(printf '%s\n' "$port_sites" | grep -c .)"
+	if [ "$port_count" -gt 1 ]; then
+		echo "检测到多个 Port 指令，面板无法安全切换（sshd 会同时监听多个端口）："
+		printf '  %s\n' "$port_sites"
+		echo "请先只保留一个 Port 指令后重试。"
+		return 1
+	fi
+	read -r -p "  新的 SSH 端口（1-65535，留空取消）: " new || return 1
 	[ -n "$new" ] || return 0
 	[ "${#new}" -le 5 ] && port_valid "$new" || { echo "端口格式无效。"; return 1; }
 	new=$((10#$new))
@@ -605,60 +667,72 @@ act_ssh_port() {
 		echo "端口 $new 已被其他服务监听，已取消。"
 		return 1
 	fi
-	echo "  切换期间旧端口保持可用；请先确认云安全组或上游防火墙已放行 $new/tcp。"
-	read -r -p "  输入 yes 确认切换（留空取消）: " answer || return 1
+	echo "  新端口 $new 会和旧端口 $cur 同时监听；请先用新端口登录确认，再到防火墙管理关闭旧端口。"
+	echo "  请先确认云安全组或上游防火墙已放行 $new/tcp。"
+	read -r -p "  输入 yes 继续: " answer || return 1
 	[ "$answer" = yes ] || { echo "已取消。"; return 1; }
 
 	[ ! -f "$SSHD_DROPIN" ] || { backup="$(mktemp)"; cp -- "$SSHD_DROPIN" "$backup" || return 1; }
-	if ! printf 'Port %s\n' "$new" > "$SSHD_DROPIN" || ! sshd -t; then
-		echo "sshd 配置校验失败，未修改端口。"
-		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+	# 已有的单个 Port 留在原文件；我们的 drop-in 只负责新端口。没有 Port 时，
+	# 把当前端口也显式写出来，否则 sshd 只监听新端口。
+	if [ "$port_count" = 1 ] && [ "${port_sites%%:*}" != "$SSHD_DROPIN" ]; then
+		printf 'Port %s\n' "$new" > "$SSHD_DROPIN"
+	else
+		printf 'Port %s\nPort %s\n' "$cur" "$new" > "$SSHD_DROPIN"
+	fi
+	if ! sshd -t; then
+		echo "sshd 配置校验失败，已回滚。"
+		ssh_restore_file "$SSHD_DROPIN" "$backup"
 		return 1
 	fi
-	if [ "$(ssh_current_ports)" != "$new" ]; then
-		echo "sshd 未识别新端口（sshd_config 可能未包含 sshd_config.d），已回滚。"
-		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+	now="$(ssh_current_ports)"
+	if ! printf '%s\n' "$now" | grep -qxF "$cur" || ! printf '%s\n' "$now" | grep -qxF "$new"; then
+		echo "sshd 未同时监听新旧端口，已回滚。"
+		ssh_restore_file "$SSHD_DROPIN" "$backup"
 		return 1
 	fi
 	if [ -f "$FIREWALL_FILE" ]; then
 		if ! firewall_change_port open tcp "$new" >/dev/null; then
 			echo "防火墙放行新端口失败，已回滚。"
-			ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+			ssh_restore_file "$SSHD_DROPIN" "$backup"
 			return 1
 		fi
 		fw=1
 	elif firewall_running; then
 		echo "防火墙正在运行但配置缺失，无法安全放行新端口，已取消。"
-		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" 0
+		ssh_restore_file "$SSHD_DROPIN" "$backup"
 		return 1
 	fi
-	if ! systemctl reload "$svc" 2>/dev/null; then
+	if ! systemctl reload ssh 2>/dev/null; then
 		echo "sshd 重载失败，已回滚。"
-		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" "$fw"
+		ssh_restore_file "$SSHD_DROPIN" "$backup"
+		[ "$fw" = 0 ] || firewall_change_port close tcp "$new" >/dev/null 2>&1
 		return 1
 	fi
-	for _ in {1..10}; do
-		ss -H -tlnp "sport = :$new" 2>/dev/null | grep -q sshd && break
-		sleep 1
+	for p in "$cur" "$new"; do
+		for _ in {1..10}; do
+			ss -H -tlnp "sport = :$p" 2>/dev/null | grep -q sshd && break
+			sleep 1
+		done
+		if ! ss -H -tlnp "sport = :$p" 2>/dev/null | grep -q sshd; then
+			echo "端口 $p 未在监听，已回滚。"
+			ssh_restore_file "$SSHD_DROPIN" "$backup"
+			[ "$fw" = 0 ] || firewall_change_port close tcp "$new" >/dev/null 2>&1
+			return 1
+		fi
 	done
-	if ! ss -H -tlnp "sport = :$new" 2>/dev/null | grep -q sshd; then
-		echo "新端口未在监听，已回滚。"
-		ssh_port_rollback "$SSHD_DROPIN" "$backup" "$svc" "$new" "$fw"
-		return 1
-	fi
 	[ -z "$backup" ] || rm -f -- "$backup"
 
-	# 上报元数据跟随 sshd 实际端口。
+	# 上报元数据切到最终端口；旧端口只是过渡期保留。
 	if [ -f "$SSH_REPORT_JAIL" ]; then
 		sed -i -E "s/(profile=ssh-bruteforce, transport=SSH, target_port=)[0-9]+/\1$new/" "$SSH_REPORT_JAIL"
 		fail2ban-client reload >/dev/null 2>&1 || echo "fail2ban 重载失败，SSH 上报端口可能未生效。" >&2
 	fi
-
-	echo "SSH 已切换到端口 $new，请用新端口重新登录确认。"
-	echo "旧端口 $cur 的防火墙放行已保留；确认新端口可登录后，可在防火墙管理中关闭。"
+	echo "新端口 $new 已开启，旧端口 $cur 仍监听。"
+	echo "请用新端口重新登录确认，然后到「防火墙管理」关闭旧端口。"
 }
 
-# SSH 管理入口：目前只放端口修改，后续登录方式与密钥管理也归到这里。
+# SSH 管理入口：目前只有端口切换，后续登录方式与密钥管理也归到这里。
 act_ssh() {
 	local choice ports
 	while true; do
@@ -667,6 +741,7 @@ act_ssh() {
 		ports="$(ssh_current_ports)"
 		[ -n "$ports" ] || ports="无法读取"
 		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
+		panel_row " 新旧端口并存时，确认新端口可登录后到防火墙管理关闭旧端口。"
 		panel_section "端口"
 		panel_option 1 "修改 SSH 端口"
 		panel_footer "返回首页"

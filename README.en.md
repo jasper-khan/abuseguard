@@ -112,7 +112,7 @@ validation before it is applied.
 
 ## The panel
 
-Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, and the home-screen ban count re-queries every jail every 30 minutes without requiring a menu action:
+Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, the runtime status shows the current SSH port, and the home-screen ban count re-queries every jail every 30 minutes without requiring a menu action:
 
 The home screen has six categories, with related actions grouped within each. Enter `0` in a submenu to return to its parent. Blue borders separate sections, colors highlight status, and the background follows the SSH client's theme:
 
@@ -131,7 +131,7 @@ Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/ca
 
 Installation and updates automatically apply the AbuseGuard firewall and enable boot restoration, without another confirmation. The initial configuration allows all detected SSH ports, TCP 443, and UDP 443, and drops other new inbound connections. TCP 80 is closed by default; allow it explicitly in the panel if HTTP access or redirects are needed. Existing configurations retain user-added and user-closed ports, with current SSH ports added as needed. Established connections, loopback, ICMP (including IPv6 neighbor discovery), and DHCP remain allowed; outbound traffic is unrestricted. The panel refuses to close detected SSH ports. Closing other ports affects new connections only.
 
-An SSH port change in `[6]` SSH runs `sshd -t` first, then allows the new port, reloads sshd, and confirms it is listening; any failure restores the previous configuration. On success it syncs Fail2Ban's SSH report port and keeps the old port's firewall rule; close it from the firewall menu after confirming the new port works. The setting is written to `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`; allow the new port in the cloud security group first. The panel refuses `ssh.socket` activation or an explicit `Port` in the main sshd config.
+An SSH port change in `[6]` SSH keeps both ports listening: it runs `sshd -t`, allows the new port, reloads sshd, and confirms both ports are listening; any failure restores the previous configuration. On success it syncs Fail2Ban's SSH report port. Reconnect on the new port, then close the old one from the firewall menu: the panel removes its `Port` directive and closes the old firewall rule; the current session port and the only SSH port are protected. Without a `Port` directive it writes both ports to `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`; with a single existing directive the original file is kept and the new port goes into that drop-in; multiple directives are refused. Allow the new port in the cloud security group first. The panel refuses `ssh.socket` activation.
 
 `/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot systemd service restores it at boot, without a new daemon. The menu can reapply saved rules; uninstalling removes only this project's table. IP bans retain the existing Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports.
 
