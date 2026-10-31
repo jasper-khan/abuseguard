@@ -622,6 +622,10 @@ ssh_port_remove() {
 		ssh_restore_file "$file" "$backup"
 		return 1
 	fi
+	if [ -z "$(ssh_current_ports)" ]; then
+		ssh_restore_file "$file" "$backup"
+		return 1
+	fi
 	if ! systemctl reload ssh 2>/dev/null; then
 		ssh_restore_file "$file" "$backup"
 		return 1
@@ -643,10 +647,11 @@ act_ssh_port() {
 		return 1
 	fi
 	command -v sshd >/dev/null 2>&1 || { echo "未找到 sshd，无法修改 SSH 端口。"; return 1; }
+	[ -d "$SSHD_DROPIN_DIR" ] || { echo "系统没有 $SSHD_DROPIN_DIR，面板不修改 SSH 端口。"; return 1; }
 	cur="$(ssh_current_ports)"
 	[ -n "$cur" ] || { echo "无法读取当前 SSH 端口，已取消。"; return 1; }
 	if [ "$(printf '%s\n' "$cur" | grep -c .)" -ne 1 ]; then
-		echo "当前 SSH 监听多个端口（$(printf '%s' "$cur" | tr '\n' ' ')），面板无法安全切换。"
+		echo "当前 SSH 监听多个端口（$(printf '%s' "$cur" | tr '\n' ' ')），请先在防火墙管理中关闭不需要的端口再切换。"
 		return 1
 	fi
 	echo "当前 SSH 端口：$cur"

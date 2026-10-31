@@ -178,6 +178,22 @@ if close_port 2222 >/dev/null 2>&1; then fail 'closed a port with no Port direct
 fw_open 2222 || fail 'refused close still changed the firewall'
 listening 2222 || fail 'refused close stopped the port'
 
+# Removing the last configured Port is rolled back, even if another port listens.
+reset_all
+printf 'Port 22\n' > "$SSHD_MAIN"
+printf '2222\n' >> "$TMP/listen"
+printf 'tcp 2222\n' >> "$FIREWALL_FILE"
+if close_port 22 >/dev/null 2>&1; then fail 'removed the last configured Port'; fi
+grep -qxF 'Port 22' "$SSHD_MAIN" || fail 'last-Port rollback did not restore the config'
+fw_open 22 || fail 'last-Port rollback changed the firewall'
+
+# A missing drop-in directory is refused before writing anything.
+reset_all
+SSHD_DROPIN_DIR="$TMP/missing"
+if run_ssh_port '2222\nyes\n' >/dev/null 2>&1; then fail 'accepted a missing drop-in directory'; fi
+[ -e "$TMP/missing" ] && fail 'created the drop-in directory'
+SSHD_DROPIN_DIR="$TMP/dropin"
+
 # Duplicate Port directives cannot be switched safely.
 reset_all
 printf 'Port 22\nPort 22\n' > "$SSHD_MAIN"
