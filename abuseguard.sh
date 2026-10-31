@@ -751,7 +751,6 @@ act_update() {
 			rm -f "$f"
 			echo "更新完成，正在重新加载控制面板..."
 			exec /usr/local/bin/ag
-			echo "无法重新加载控制面板，请退出后重新运行 ag。"
 		else
 			rm -f "$f"
 			echo "更新失败。"
