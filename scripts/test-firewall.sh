@@ -147,8 +147,9 @@ firewall_change_port close tcp 80 any >/dev/null
 if firewall_ports | grep -qx 'tcp 80 any'; then fail 'port was not closed'; fi
 firewall_ports | grep -qx 'udp 443 any' || fail 'unrelated UDP rule lost'
 cmp "$FIREWALL_FILE" "$TMP/live.nft" || fail 'port change was not applied'
-grep -qE '^[[:space:]]*tcp dport 22 accept' "$FIREWALL_FILE" && fail 'allow rule is not IPv4-only'
-grep -q 'meta nfproto ipv4 tcp dport 22 accept' "$FIREWALL_FILE" || fail 'allow rule is not IPv4-only'
+grep -qE '^[[:space:]]*tcp dport 22 accept' "$FIREWALL_FILE" || fail 'allow rule is not dual-stack'
+if grep -qE '^[[:space:]]*meta nfproto ipv4 tcp' "$FIREWALL_FILE"; then fail 'allow rule narrowed to IPv4'; fi
+grep -q 'meta nfproto ipv6 drop' "$FIREWALL_FILE" || fail 'IPv6 inbound is not closed by default'
 
 # Per-source rules: the same port can be limited to one address and removed alone.
 firewall_change_port open tcp 8443 any >/dev/null
@@ -177,7 +178,6 @@ for args in '' 'tcp' 'tcp 0' 'udp 65536' 'invalid 80' 'tcp 80;drop' 'tcp 80 extr
 done
 if run_cli --firewall-open tcp '' </dev/null >/dev/null 2>&1; then fail 'CLI accepted an empty port'; fi
 if firewall_change_port open tcp 8443 example.com >/dev/null 2>&1; then fail 'accepted a hostname source'; fi
-if firewall_change_port open tcp 8443 2001:db8::1 >/dev/null 2>&1; then fail 'accepted an IPv6 source'; fi
 for p in 22 2200 2222; do
 	if firewall_change_port close tcp "$p" any >/dev/null; then fail "closed SSH port $p"; fi
 done
@@ -237,5 +237,33 @@ if firewall_ports | grep -qx 'tcp 22 203.0.113.5/32'; then fail 'rollback close 
 if firewall_ports | grep -qx 'tcp 22 any'; then fail 'rollback close re-added the port'; fi
 firewall_apply </dev/null >/dev/null
 firewall_ports | grep -qx 'tcp 22 any' || fail 'apply did not restore the SSH port'
+
+# Family toggles persist in the first line and gate each family.
+firewall_set_policy ipv6 1 >/dev/null || fail 'could not enable IPv6 inbound'
+grep -q '^# policy ipv4-in=1 ipv6-in=1' "$FIREWALL_FILE" || fail 'IPv6 policy not saved'
+if grep -q 'meta nfproto ipv6 drop' "$FIREWALL_FILE"; then fail 'IPv6 drop remained after enabling'; fi
+firewall_set_policy ipv6 0 >/dev/null || fail 'could not disable IPv6 inbound'
+grep -q 'meta nfproto ipv6 drop' "$FIREWALL_FILE" || fail 'IPv6 drop missing after disabling'
+firewall_set_policy ipv4 0 >/dev/null || fail 'could not disable IPv4 inbound'
+grep -q '^# policy ipv4-in=0' "$FIREWALL_FILE" || fail 'IPv4 policy not saved'
+grep -q 'meta nfproto ipv4 drop' "$FIREWALL_FILE" || fail 'IPv4 drop missing after disabling'
+firewall_set_policy ipv4 1 >/dev/null || fail 'could not enable IPv4 inbound'
+if grep -q 'meta nfproto ipv4 drop' "$FIREWALL_FILE"; then fail 'IPv4 drop remained after enabling'; fi
+CHECK_FAIL=1
+if firewall_set_policy ipv4 0 >/dev/null 2>&1; then fail 'ignored an nft validation error on a policy change'; fi
+CHECK_FAIL=0
+grep -q '^# policy ipv4-in=1' "$FIREWALL_FILE" || fail 'a failed policy change altered the saved policy'
+RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"drop"}}]}'
+if firewall_set_policy ipv4 0 >/dev/null 2>&1; then fail 'policy change ignored a conflicting input policy'; fi
+RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
+grep -q '^# policy ipv4-in=1' "$FIREWALL_FILE" || fail 'a conflicting policy change altered the saved policy'
+
+# IPv6 source rules render and round-trip.
+firewall_change_port open tcp 8443 2001:db8::5 >/dev/null
+grep -q 'ip6 saddr 2001:db8::5 tcp dport 8443 accept' "$FIREWALL_FILE" || fail 'IPv6 source not rendered'
+firewall_ports | grep -qx 'tcp 8443 2001:db8::5' || fail 'IPv6 source not parsed'
+firewall_change_port close tcp 8443 2001:db8::5 >/dev/null
+if firewall_ports | grep -qx 'tcp 8443 2001:db8::5'; then fail 'IPv6 source not closed'; fi
+if grep -q 'hook output' "$FIREWALL_FILE"; then fail 'an output chain was added'; fi
 
 echo 'firewall panel tests: pass'

@@ -201,6 +201,15 @@ run_ssh_port '2222\ny\n' >/dev/null || fail 'source inheritance switch failed'
 called 'fw open tcp 2222 203.0.113.5/32' || fail 'new port did not inherit the source'
 if called 'fw open tcp 2222 any'; then fail 'inherited port was widened to any'; fi
 
+# IPv6 source restrictions are inherited too.
+reset_all
+printf 'tcp 22 2001:db8::5
+' > "$FIREWALL_FILE"
+run_ssh_port '2222
+y
+' >/dev/null || fail 'IPv6 source inheritance switch failed'
+called 'fw open tcp 2222 2001:db8::5' || fail 'new port did not inherit the IPv6 source'
+
 # Duplicate Port directives cannot be switched safely.
 reset_all
 printf 'Port 22\nPort 22\n' > "$SSHD_MAIN"

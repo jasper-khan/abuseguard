@@ -120,7 +120,7 @@ The home screen has six categories, with related actions grouped within each. En
 | --- | --- |
 | `[1]` Overview | Services, protected domains, ban counts per jail, scheduled tasks |
 | `[2]` Sites and certificates | List, add, or delete reverse-proxy sites; set the Cloudflare API Token |
-| `[3]` Firewall | Open/close TCP or UDP ports, optionally limited to a source IP/CIDR (allow rules match IPv4 only); list, ban, or unban IPs; manage the whitelist; inspect or reapply rules |
+| `[3]` Firewall | Open/close TCP or UDP ports, optionally limited to a source IP/CIDR; toggle IPv4/IPv6 inbound; list, ban, or unban IPs; manage the whitelist; inspect or reapply rules |
 | `[4]` Threat intel | Sync intel, send the report queue, set the AbuseIPDB API Key, toggle automatic reporting |
 | `[5]` Maintenance | Recent logs, update, uninstall |
 | `[6]` SSH | Change the SSH listening port |
@@ -133,7 +133,7 @@ Installation and updates automatically apply the AbuseGuard firewall and enable 
 
 An SSH port change in `[6]` SSH keeps both ports listening: it runs `sshd -t`, allows the new port, reloads sshd, and confirms both ports are listening; any failure restores the previous configuration. On success it syncs Fail2Ban's SSH report port. Reconnect on the new port, then close the old one from the firewall menu: the panel removes its `Port` directive and closes the old firewall rule; the current session port and the only SSH port are protected. Without a `Port` directive it writes both ports to `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`; with a single existing directive the original file is kept and the new port goes into that drop-in; multiple directives are refused. The new port inherits the old port's firewall source restrictions. Allow the new port in the cloud security group first. The panel refuses `ssh.socket` activation.
 
-When opening a port you can enter a source IPv4 address or CIDR; leave it empty to allow every source. One port can have several source rules, and the close action asks for the rule number. Allow rules match IPv4 only; IPv6 keeps only ICMPv6 (neighbor discovery) and DHCPv6, and drops other inbound traffic. Reapplying rules and reinstalling only add missing SSH ports and never widen an existing source restriction.
+When opening a port you can enter a source IPv4 or IPv6 address or CIDR; leave it empty to allow every source. One port can have several source rules, and the close action asks for the rule number. Two family switches control inbound: IPv4 is on by default, IPv6 is off by default. Turning a family off drops new inbound connections of that family while established connections, loopback, ICMP, and DHCP stay allowed. Turning off the family of the current SSH session asks for a `yes` confirmation and may require console recovery after the session ends. Reapplying rules and reinstalling only add missing SSH ports and never widen an existing source restriction.
 
 `/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot systemd service restores it at boot, without a new daemon. The menu can reapply saved rules; uninstalling removes only this project's table. IP bans retain the existing Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports.
 

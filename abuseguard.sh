@@ -394,7 +394,7 @@ firewall_ports() {
 	[ -f "$FIREWALL_FILE" ] || return 0
 	awk '
 		$1 == "meta" && $2 == "nfproto" && $3 == "ipv4" && ($4 == "tcp" || $4 == "udp") && $5 == "dport" && $7 == "accept" { print $4, $6, "any"; next }
-		$1 == "ip" && $2 == "saddr" && ($4 == "tcp" || $4 == "udp") && $5 == "dport" && $7 == "accept" { print $4, $6, $3; next }
+		($1 == "ip" || $1 == "ip6") && $2 == "saddr" && ($4 == "tcp" || $4 == "udp") && $5 == "dport" && $7 == "accept" { print $4, $6, $3; next }
 		NF == 4 && ($1 == "tcp" || $1 == "udp") && $2 == "dport" && $4 == "accept" { print $1, $3, "any" }
 	' "$FIREWALL_FILE"
 }
@@ -420,8 +420,25 @@ firewall_ssh_ports() {
 }
 
 # 单一持久配置；在一个 nft 事务中只替换本项目的表，不清空整个 ruleset。
+fw_ipv4_in=1
+fw_ipv6_in=0
+fw_policy_loaded=0
+
+firewall_policy_load() {
+	[ "$fw_policy_loaded" = 1 ] && return 0
+	local line=""
+	[ -f "$FIREWALL_FILE" ] && line="$(sed -n '1{/^# policy /p;}' "$FIREWALL_FILE")"
+	fw_ipv4_in=1
+	fw_ipv6_in=0
+	case "$line" in *ipv4-in=0*) fw_ipv4_in=0 ;; esac
+	case "$line" in *ipv6-in=1*) fw_ipv6_in=1 ;; esac
+	fw_policy_loaded=1
+}
+
 firewall_render() {
 	local proto port source
+	firewall_policy_load
+	printf '# policy ipv4-in=%s ipv6-in=%s\n' "$fw_ipv4_in" "$fw_ipv6_in"
 	cat <<'NFT'
 # Managed by ag. Change ports through the firewall menu.
 add table inet caddy_abuseguard
@@ -436,14 +453,19 @@ table inet caddy_abuseguard {
 		udp sport 67 udp dport 68 accept
 		udp sport 547 udp dport 546 accept
 NFT
+	if [ "$fw_ipv4_in" = 0 ]; then printf '\t\tmeta nfproto ipv4 drop\n'; fi
+	if [ "$fw_ipv6_in" = 0 ]; then printf '\t\tmeta nfproto ipv6 drop\n'; fi
 	while read -r proto port source; do
 		[ -n "$proto" ] || continue
 		case "$proto" in tcp|udp) ;; *) return 1 ;; esac
 		port_valid "$port" || return 1
 		if [ -n "$source" ] && [ "$source" != any ]; then
-			printf '\t\tip saddr %s %s dport %s accept\n' "$source" "$proto" "$port"
+			case "$source" in
+				*:*) printf '\t\tip6 saddr %s %s dport %s accept\n' "$source" "$proto" "$port" ;;
+				*) printf '\t\tip saddr %s %s dport %s accept\n' "$source" "$proto" "$port" ;;
+			esac
 		else
-			printf '\t\tmeta nfproto ipv4 %s dport %s accept\n' "$proto" "$port"
+			printf '\t\t%s dport %s accept\n' "$proto" "$port"
 		fi
 	done
 	printf '\t}\n}\n'
@@ -533,14 +555,14 @@ firewall_change_port() {
 	if [ "$interactive" = 1 ] && [ "$action" = open ]; then
 		read -r -p "端口（1–65535，留空取消）: " port || return 1
 		[ -n "$port" ] || return 0
-		read -r -p "来源 IPv4/CIDR（留空=所有来源）: " source || return 1
+		read -r -p "来源 IPv4/IPv6 或 CIDR（留空=所有来源）: " source || return 1
 		source="${source:-any}"
 	fi
 	[ "${#port}" -le 5 ] && port_valid "$port" || { echo "端口格式无效。"; return 1; }
 	port=$((10#$port))
 	source="${source:-any}"
 	case "$source" in *[[:space:]]*) echo "来源不能包含空白。"; return 1 ;; esac
-	case "$source" in any) ;; *[!0-9./]*) echo "来源必须是 IPv4 地址、CIDR 或留空。"; return 1 ;; esac
+	case "$source" in any) ;; *[!0-9a-fA-F.:/]*) echo "来源必须是 IPv4/IPv6 地址、CIDR 或留空。"; return 1 ;; esac
 
 	if [ "$skip_ssh" != no-ssh ]; then
 		ssh_ports="$(firewall_ssh_ports)" || return 1
@@ -589,11 +611,48 @@ firewall_change_port() {
 	fi
 }
 
+firewall_set_policy() {
+	local fam="$1" value="$2" ports old
+	firewall_policy_load
+	[ -f "$FIREWALL_FILE" ] || { echo "防火墙配置缺失，请先重新应用规则。"; return 1; }
+	firewall_check_conflicts || return 1
+	ports="$(firewall_ports)" || return 1
+	if [ "$fam" = ipv4 ]; then old=$fw_ipv4_in; fw_ipv4_in=$value; else old=$fw_ipv6_in; fw_ipv6_in=$value; fi
+	fw_policy_loaded=1
+	if firewall_save "$ports"; then return 0; fi
+	if [ "$fam" = ipv4 ]; then fw_ipv4_in=$old; else fw_ipv6_in=$old; fi
+	return 1
+}
+
+firewall_toggle_family() {
+	local fam="$1" now target warn answer srv
+	firewall_policy_load
+	if [ "$fam" = ipv4 ]; then now=$fw_ipv4_in; warn=IPv4; else now=$fw_ipv6_in; warn=IPv6; fi
+	if [ "$now" = 1 ]; then target=0; else target=1; fi
+	if [ "$target" = 0 ]; then
+		echo " 关闭后，新的 $warn 入站连接将被丢弃。"
+		if [ -n "${SSH_CONNECTION:-}" ]; then
+			set -- $SSH_CONNECTION
+			case "$3" in *:*) srv=IPv6 ;; *) srv=IPv4 ;; esac
+			[ "$srv" = "$warn" ] && echo " 当前 SSH 会话是 $warn；断开后需要控制台恢复。"
+		fi
+		read -r -p " 输入 yes 继续: " answer || return 1
+		[ "$answer" = yes ] || { echo " 已取消。"; return 1; }
+	fi
+	if firewall_set_policy "$fam" "$target"; then
+		if [ "$target" = 1 ]; then echo " 已开启 $warn 入站。"; else echo " 已关闭 $warn 入站。"; fi
+		firewall_running || echo " 防火墙未运行，重启或重新应用规则后生效。"
+	else
+		echo " 修改失败，规则保持不变。"
+	fi
+}
+
 act_firewall() {
-	local choice ports line warning state boot
+	local choice ports line warning state boot state4 state6
 	nft list tables >/dev/null || { echo "无法访问 nftables。"; pause; return; }
 	while true; do
 		panel_start "防火墙管理"
+		firewall_policy_load
 		panel_section "当前策略"
 		if firewall_running; then state="${C_G}运行中${C_0}"; else state="${C_Y}未就绪，请重新应用规则${C_0}"; fi
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="已开启"; else boot="未开启"; fi
@@ -619,8 +678,13 @@ act_firewall() {
 		panel_pair 5 "解封 IP" 6 "管理白名单"
 		panel_section "规则维护"
 		panel_pair 7 "查看全部规则" 8 "重新应用规则"
+		panel_section "协议族"
+		if [ "$fw_ipv4_in" = 1 ]; then state4="${C_G}已开启${C_0}"; else state4="${C_R}已关闭${C_0}"; fi
+		if [ "$fw_ipv6_in" = 1 ]; then state6="${C_G}已开启${C_0}"; else state6="${C_R}已关闭${C_0}"; fi
+		panel_option 9 "IPv4 入站" "$state4"
+		panel_option 10 "IPv6 入站" "$state6"
 		panel_footer "返回首页"
-		read -r -p "  选择 [0-8] > " choice || return
+		read -r -p "  选择 [0-10] > " choice || return
 		case "$choice" in
 			1) panel_title "防火墙管理 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
 			2) panel_title "防火墙管理 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
@@ -630,8 +694,10 @@ act_firewall() {
 			6) act_whitelist ;;
 			7) panel_title "防火墙管理 / 全部规则"; nft -a list ruleset; pause ;;
 			8) panel_title "防火墙管理 / 重新应用规则"; firewall_apply || echo "应用失败，请检查上方错误。"; pause ;;
+			9) panel_title "防火墙管理 / IPv4 入站"; firewall_toggle_family ipv4; pause ;;
+			10) panel_title "防火墙管理 / IPv6 入站"; firewall_toggle_family ipv6; pause ;;
 			0) return ;;
-			*) echo "请输入 0–8 之间的菜单编号。"; pause ;;
+			*) echo "请输入 0–10 之间的菜单编号。"; pause ;;
 		esac
 	done
 }

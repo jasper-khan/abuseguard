@@ -86,6 +86,8 @@ act_ban() { echo 'action:ban'; }
 act_unban() { echo 'action:unban'; }
 act_whitelist() { echo 'action:whitelist'; }
 firewall_apply() { echo 'action:apply'; }
+firewall_policy_load() { fw_ipv4_in=1; fw_ipv6_in=0; fw_policy_loaded=1; }
+firewall_toggle_family() { echo "action:family-$1"; }
 act_sync() { echo 'action:sync'; }
 act_flush() { echo 'action:flush'; }
 act_key() { echo 'action:key'; }
@@ -96,7 +98,7 @@ act_update() { echo 'action:update'; }
 act_uninstall() { echo 'action:uninstall'; }
 printf '1\n' | menu
 printf '2\n3\n0\n' | menu
-printf '3\n1\n2\n3\n4\n5\n6\n7\n8\n0\n' | menu
+printf '3\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n0\n' | menu
 printf '4\n1\n2\n3\n4\n0\n' | menu
 printf '5\n1\n2\n3\n0\n' | menu
 printf '6\n1\n0\n' | menu
@@ -109,7 +111,7 @@ done
 NAVIGATION
 )"
 actions="$(printf '%s\n' "$navigation" | sed -n 's/^action://p')"
-expected=$'status\ncftoken\nport-open\nport-close\nbanned\nban\nunban\nwhitelist\nrules\napply\nsync\nflush\nkey\ntoggle\nlogs\nupdate\nuninstall\nssh-port'
+expected=$'status\ncftoken\nport-open\nport-close\nbanned\nban\nunban\nwhitelist\nrules\napply\nfamily-ipv4\nfamily-ipv6\nsync\nflush\nkey\ntoggle\nlogs\nupdate\nuninstall\nssh-port'
 [ "$actions" = "$expected" ] || { printf 'unexpected menu actions:\n%s\n' "$actions" >&2; exit 1; }
 
 # Keep framed rows aligned and preserve long Chinese text with ANSI colors.
