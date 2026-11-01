@@ -916,29 +916,29 @@ act_ssh_port() {
 ssh_auth_sites() {
 	local pat='^[[:space:]]*(PasswordAuthentication|PubkeyAuthentication)[[:space:]]+(yes|no)'
 	[ -z "${1:-}" ] || pat='^[[:space:]]*'"$1"'[[:space:]]+(yes|no)'
-	grep -HnE "$pat" "$SSHD_MAIN" 2>/dev/null || true
-	grep -rnE --include='*.conf' "$pat" "$SSHD_DROPIN_DIR" 2>/dev/null || true
+	grep -HinE "$pat" "$SSHD_MAIN" 2>/dev/null || true
+	grep -rinE --include='*.conf' "$pat" "$SSHD_DROPIN_DIR" 2>/dev/null || true
 }
 
 # 真正压得过面板 drop-in 的指令位置（这些才拒绝修改）。sshd 首值生效，Include
 # 按文件名字典序展开；面板文件用 00- 排第一，主配置全局指令（Include 在主配置
 # 开头）和排序靠后的 drop-in 都被面板压住，不构成冲突。要拒绝的只有三种：
 #   1. 主配置没有 Include：drop-in 整体不生效
-#   2. 主配置 Match 块内的指令：对匹配的连接覆盖全局设置
+#   2. Match 块内的指令：对匹配的连接覆盖全局设置
 #   3. 排序在面板文件之前的外部 drop-in
 ssh_auth_conflicts() {
-	local directive="$1" row file rest fline inc mline name mine
+	local directive="$1" row file rest fline inc mline file_match name mine
 	mine="${SSHD_AUTH_DROPIN##*/}"
 	inc="$(grep -nE "^[[:space:]]*Include[[:space:]]+$SSHD_DROPIN_DIR" "$SSHD_MAIN" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
 	[ -n "$inc" ] || { echo "$SSHD_MAIN 缺少 Include $SSHD_DROPIN_DIR，面板配置不会生效"; return 0; }
-	mline="$(grep -nE '^[[:space:]]*Match[[:space:]]' "$SSHD_MAIN" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
+	mline="$(grep -niE '^[[:space:]]*Match[[:space:]]' "$SSHD_MAIN" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
 	mline="${mline:-0}"
 	while IFS= read -r row; do
 		[ -n "$row" ] || continue
 		file="${row%%:*}"
 		rest="${row#*:}"
+		fline="${rest%%:*}"
 		if [ "$file" = "$SSHD_MAIN" ]; then
-			fline="${rest%%:*}"
 			if [ "$mline" -gt 0 ] && [ "$fline" -gt "$mline" ]; then
 				echo "$row（Match 块内，会覆盖面板配置）"
 			elif [ "$fline" -lt "$inc" ]; then
@@ -946,7 +946,10 @@ ssh_auth_conflicts() {
 			fi
 		else
 			name="${file##*/}"
-			if [ "$name" != "$mine" ] && [ "$name" \< "$mine" ]; then
+			file_match="$(grep -niE '^[[:space:]]*Match[[:space:]]' "$file" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
+			if [ -n "$file_match" ] && [ "$fline" -gt "$file_match" ]; then
+				echo "$row（Match 块内，会覆盖面板配置）"
+			elif [ "$name" != "$mine" ] && [ "$name" \< "$mine" ]; then
 				echo "$row（drop-in 排序在面板之前）"
 			fi
 		fi
@@ -956,7 +959,7 @@ ssh_auth_conflicts() {
 # 生效的认证开关（sshd -T 的输出是小写 on/off）。
 ssh_auth_state() {
 	local key="$1" line
-	line="$(sshd -T 2>/dev/null | awk -v k="$key" '$1 == k { print $2; exit }')"
+	line="$(sshd -T 2>/dev/null | awk -v k="$key" '$1 == k && !found { print $2; found=1 }')" || line=""
 	case "$line" in
 		yes|on) echo on ;;
 		no|off) echo off ;;
@@ -964,15 +967,65 @@ ssh_auth_state() {
 	esac
 }
 
-# root 是否具备可用的密钥登录条件：authorized_keys 至少一条且权限正确。
-# sshd StrictModes 只要求目录和 authorized_keys 不被组/其他人写。
+# 检查公钥内容和权限；无法运行 ssh-keygen 时不能认为公钥可用。
 ssh_key_ready() {
-	local m
-	[ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ] || return 1
+	local file="${1:-$SSH_AUTH_KEYS}" m
+	[ -f "$file" ] && [ -s "$file" ] || return 1
+	command -v ssh-keygen >/dev/null 2>&1 || return 1
+	# 只确认没有限制选项的公钥；ssh-keygen 自身也会把私钥识别为有效输入。
+	awk '
+		/^[[:space:]]*#/ { next }
+		$1 ~ /^(ssh-|ecdsa-|sk-)/ && $2 ~ /^[A-Za-z0-9+\/=]+$/ { print $1, $2 }
+	' "$file" | ssh-keygen -lf - >/dev/null 2>&1 || return 1
 	m="$(stat -c %a "$SSH_ROOT_HOME" 2>/dev/null)" || return 1
 	[ "$(( 8#$m & 022 ))" -eq 0 ] || return 1
-	m="$(stat -c %a "$SSH_AUTH_KEYS" 2>/dev/null)" || return 1
+	m="$(stat -c %a "$file" 2>/dev/null)" || return 1
 	[ "$(( 8#$m & 022 ))" -eq 0 ] || return 1
+}
+
+# 根据当前 SSH 连接检查 root 的有效配置。无法确定来源时不假定备用方式可用。
+ssh_root_config() {
+	local client client_port local_ip local_port config
+	read -r client client_port local_ip local_port <<< "${SSH_CONNECTION:-}"
+	[ -n "$client" ] && [ -n "$client_port" ] && [ -n "$local_ip" ] && [ -n "$local_port" ] || return 1
+	config="$(sshd -T -C "user=root,host=$client,addr=$client,laddr=$local_ip,lport=$local_port" 2>/dev/null)" || return 1
+	# UseDNS=yes 时 host 是反向解析的名称，而非来源 IP，不能安全地猜测。
+	[ "$(printf '%s\n' "$config" | awk '$1 == "usedns" { print $2; exit }')" = no ] || return 1
+	printf '%s\n' "$config"
+}
+
+ssh_auth_allows_single() {
+	local config="$1" method="$2" methods
+	methods="$(printf '%s\n' "$config" | awk '$1 == "authenticationmethods" { for (i=2; i<=NF; i++) printf " %s", $i; exit }')"
+	case "$methods " in *" any "*|*" $method "*) return 0 ;; *) return 1 ;; esac
+}
+
+# 这里只能确认配置允许独立使用密码，不能证明操作者知道密码。
+root_password_login_ready() {
+	local config root_login password_auth password_status
+	config="$(ssh_root_config)" || return 1
+	root_login="$(printf '%s\n' "$config" | awk 'tolower($1) == "permitrootlogin" { print tolower($2); exit }')"
+	password_auth="$(printf '%s\n' "$config" | awk 'tolower($1) == "passwordauthentication" { print tolower($2); exit }')"
+	[ "$root_login" = yes ] || return 1
+	[ "$password_auth" = yes ] || return 1
+	ssh_auth_allows_single "$config" password || return 1
+	password_status="$(passwd -S root 2>/dev/null | awk '{ print $2; exit }')"
+	case "$password_status" in P|PS) return 0 ;; *) return 1 ;; esac
+}
+
+root_key_login_ready() {
+	local config root_login pubkey_auth files file
+	config="$(ssh_root_config)" || return 1
+	root_login="$(printf '%s\n' "$config" | awk '$1 == "permitrootlogin" { print $2; exit }')"
+	pubkey_auth="$(printf '%s\n' "$config" | awk '$1 == "pubkeyauthentication" { print $2; exit }')"
+	case "$root_login" in yes|prohibit-password) ;; *) return 1 ;; esac
+	[ "$pubkey_auth" = yes ] || return 1
+	ssh_auth_allows_single "$config" publickey || return 1
+	files="$(printf '%s\n' "$config" | awk '$1 == "authorizedkeysfile" { for (i=2; i<=NF; i++) printf " %s", $i; exit }')"
+	for file in $files; do
+		case "$file" in .ssh/authorized_keys|/root/.ssh/authorized_keys|%h/.ssh/authorized_keys) return 0 ;; esac
+	done
+	return 1
 }
 
 # 写入认证开关；调用者负责备份、校验与重载。
@@ -987,7 +1040,7 @@ ssh_auth_write() {
 
 # 开关某个认证方式（password|pubkey -> on|off）。
 act_ssh_auth() {
-	local key="$1" directive="$2" label="$3" cur target answer conflicts backup ysn ypw ypk
+	local key="$1" directive="$2" label="$3" cur target answer conflicts backup ysn ypw ypk root_target
 	[ -d "$SSHD_DROPIN_DIR" ] || { echo "系统没有 $SSHD_DROPIN_DIR，面板不修改 SSH 认证。"; return 1; }
 	command -v sshd >/dev/null 2>&1 || { echo "未找到 sshd，无法修改 SSH 认证。"; return 1; }
 	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
@@ -1016,14 +1069,22 @@ act_ssh_auth() {
 				echo "密钥登录未开启，关闭密码登录会锁死，已拒绝。"
 				return 1
 			fi
-			if ! ssh_key_ready; then
-				echo "root 没有可用的公钥（$SSH_AUTH_KEYS 为空或权限不对），关闭密码登录会锁死，已拒绝。"
-				echo "请先用「添加公钥」加入公钥，并用密钥实际登录一次。"
+			if ! ssh_key_ready || ! root_key_login_ready; then
+				echo "无法确认 root 可独立使用公钥登录，已拒绝关闭密码认证。"
+				echo "请检查公钥、ssh-keygen、SSH 连接及 root 认证配置，并先用新连接验证。"
 				return 1
 			fi
+		elif [ "$directive" = PubkeyAuthentication ] && ! root_password_login_ready; then
+			echo "无法确认 root 可独立使用密码登录，已拒绝关闭密钥认证。"
+			echo "请检查当前 SSH 连接、PermitRootLogin 和 AuthenticationMethods，并先用新连接验证。"
+			return 1
 		fi
-		echo " 关闭后，$label 将无法登录。请先保持当前会话不断开，并用新连接验证。"
-		read -r -p " 输入 yes 继续: " answer || return 1
+		if [ "$directive" = PasswordAuthentication ]; then
+			echo " 请保持当前会话，先用新连接验证 root 密钥登录。"
+		else
+			echo " 请保持当前会话，先用新连接验证 root 密码登录。"
+		fi
+		read -r -p " 确认备用登录已验证，输入 yes 继续: " answer || return 1
 		[ "$answer" = yes ] || { echo " 已取消。"; return 1; }
 	fi
 	backup=""
@@ -1041,8 +1102,13 @@ act_ssh_auth() {
 	[ "$(ssh_auth_state pubkeyauthentication)" = off ] && ypk=no
 	if [ "$directive" = PasswordAuthentication ]; then ypw="$ysn"; else ypk="$ysn"; fi
 	ssh_auth_write "$ypw" "$ypk"
+	root_target=""
+	if [ "$target" = off ]; then
+		root_target="$(ssh_root_config | awk -v k="$key" '$1 == k { print $2 }')" || root_target=""
+	fi
 	if ! sshd -t >/dev/null 2>&1 \
 		|| [ "$(ssh_auth_state "$key")" != "$target" ] \
+		|| { [ "$target" = off ] && [ "$root_target" != no ]; } \
 		|| ! systemctl reload ssh 2>/dev/null; then
 		echo "修改失败，已回滚。"
 		if [ -n "$backup" ]; then
@@ -1054,7 +1120,17 @@ act_ssh_auth() {
 		return 1
 	fi
 	[ -z "$backup" ] || rm -f -- "$backup"
-	if [ "$target" = on ]; then echo " $label 已开启。"; else echo " $label 已关闭。"; fi
+	if [ "$target" = on ]; then
+		echo " 全局 $label 认证已开启。"
+		if [ "$directive" = PasswordAuthentication ] && ! root_password_login_ready; then
+			echo " 这是全局密码认证；root 密码登录可能仍受 SSH 策略限制或无法确认。"
+		fi
+	else
+		echo " 全局 $label 认证已关闭。"
+		if [ "$directive" = PasswordAuthentication ] && [ "$(ssh_auth_state kbdinteractiveauthentication)" = on ]; then
+			echo " 键盘交互认证仍开启，可能仍允许密码，请检查 SSH 配置。"
+		fi
+	fi
 }
 
 # 添加公钥到 root 的 authorized_keys。
@@ -1070,6 +1146,18 @@ act_ssh_key_add() {
 		*) echo "公钥格式无效。"; return 1 ;;
 	esac
 	case "$kblob" in ''|*[!A-Za-z0-9+/=]*) echo "公钥格式无效。"; return 1 ;; esac
+	if ! command -v ssh-keygen >/dev/null 2>&1; then
+		echo "未找到 ssh-keygen，无法验证公钥。"
+		return 1
+	fi
+	tmp="$SSH_AUTH_KEYS.tmp"
+	printf '%s\n' "$key" > "$tmp"
+	if ! ssh-keygen -lf "$tmp" >/dev/null 2>&1; then
+		rm -f -- "$tmp"
+		echo "公钥格式无效。"
+		return 1
+	fi
+	rm -f -- "$tmp"
 	# 按类型+blob 去重，注释不同视为同一把钥匙。
 	if awk -v t="$ktype" -v b="$kblob" 'NF { if ($1 == t && $2 == b) { found=1; exit } } END { exit found ? 0 : 1 }' "$SSH_AUTH_KEYS" 2>/dev/null; then
 		echo "该公钥已存在。"
@@ -1077,7 +1165,15 @@ act_ssh_key_add() {
 	fi
 	# 原子追加：先写临时文件再整体替换，失败不破坏原文件。
 	tmp="$SSH_AUTH_KEYS.tmp"
-	{ [ -f "$SSH_AUTH_KEYS" ] && cat "$SSH_AUTH_KEYS"; printf '%s\n' "$key"; } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+	{
+		if [ -f "$SSH_AUTH_KEYS" ]; then
+			cat "$SSH_AUTH_KEYS"
+			if [ -s "$SSH_AUTH_KEYS" ] && [ "$(tail -c 1 "$SSH_AUTH_KEYS" | tr -d '\n')" ]; then
+				printf '\n'
+			fi
+		fi
+		printf '%s\n' "$key"
+	} > "$tmp" || { rm -f -- "$tmp"; return 1; }
 	chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
 	mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; return 1; }
 	chmod 700 "$SSH_ROOT_HOME"
@@ -1086,7 +1182,7 @@ act_ssh_key_add() {
 
 # 从 root 的 authorized_keys 删除一条公钥。
 act_ssh_key_remove() {
-	local keys idx=0 n target tmp remain
+	local keys idx=0 n target tmp remain answer
 	[ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ] || { echo "还没有公钥。"; return 1; }
 	keys="$(grep . "$SSH_AUTH_KEYS")"
 	echo
@@ -1098,22 +1194,22 @@ act_ssh_key_remove() {
 	[ -n "$n" ] || return 0
 	case "$n" in *[!0-9]*) echo "编号无效。"; return 1 ;; esac
 	[ "$n" -ge 1 ] && [ "$n" -le "$idx" ] || { echo "编号无效。"; return 1; }
-	# 关密码登录时禁止删到最后一把钥匙，否则会锁死。
-	if [ "$(ssh_auth_state passwordauthentication)" = off ] && [ "$idx" -le 1 ]; then
-		echo "密码登录已关闭，这是最后一把公钥，删除会锁死，已拒绝。"
-		return 1
-	fi
 	target="$n"
 	tmp="$SSH_AUTH_KEYS.tmp"
 	remain=0
-	awk -v t="$target" 'NF && ++i != t' "$SSH_AUTH_KEYS" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+	awk -v t="$target" 'length($0) && ++i == t { next } { print }' "$SSH_AUTH_KEYS" > "$tmp" || { rm -f -- "$tmp"; return 1; }
 	remain="$(awk 'NF{n++} END{print n+0}' "$tmp")"
-	if [ "$(ssh_auth_state passwordauthentication)" = off ] && [ "$remain" -eq 0 ]; then
-		rm -f -- "$tmp"
-		echo "密码登录已关闭，删空公钥会锁死，已拒绝。"
-		return 1
+	chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+	if ! ssh_key_ready "$tmp"; then
+		if ! root_password_login_ready; then
+			rm -f -- "$tmp"
+			echo "删除后无法确认有有效公钥或可独立使用的 root 密码，已拒绝。"
+			return 1
+		fi
+		echo "删除后将没有有效公钥。请保持当前会话，先用新连接验证 root 密码登录。"
+		read -r -p " 输入 yes 继续: " answer || { rm -f -- "$tmp"; return 1; }
+		[ "$answer" = yes ] || { rm -f -- "$tmp"; echo "已取消。"; return 1; }
 	fi
-	chmod 600 "$tmp"
 	mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; return 1; }
 	echo "已删除，剩余 $remain 条。"
 }
@@ -1138,7 +1234,7 @@ act_ssh_password() {
 
 # SSH 管理入口：端口切换与登录方式管理。
 act_ssh() {
-	local choice ports pw pk
+	local choice ports pw pk pw_display pk_display
 	while true; do
 		panel_start "SSH 管理"
 		panel_section "当前状态"
@@ -1147,12 +1243,20 @@ act_ssh() {
 		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
 		pw="$(ssh_auth_state passwordauthentication)"
 		pk="$(ssh_auth_state pubkeyauthentication)"
-		panel_row " 密码登录 $( [ "$pw" = on ] && echo "${C_G}开${C_0}" || echo "${C_R}关${C_0}" )   密钥登录 $( [ "$pk" = on ] && echo "${C_G}开${C_0}" || echo "${C_R}关${C_0}" )"
+		case "$pw" in on) pw_display="${C_G}开${C_0}" ;; off) pw_display="${C_R}关${C_0}" ;; *) pw_display="${C_Y}未知${C_0}" ;; esac
+		case "$pk" in on) pk_display="${C_G}开${C_0}" ;; off) pk_display="${C_R}关${C_0}" ;; *) pk_display="${C_Y}未知${C_0}" ;; esac
+		panel_row " 全局密码认证 $pw_display   全局密钥认证 $pk_display"
+		if [ "$pw" = on ] && ! root_password_login_ready; then
+			panel_row " root 能否独立使用密码：未确认（可能受 SSH 策略限制）"
+		fi
+		if [ "$pw" = off ] && [ "$(ssh_auth_state kbdinteractiveauthentication)" = on ]; then
+			panel_row " 键盘交互认证仍开启，可能仍允许密码"
+		fi
 		panel_section "端口"
 		panel_option 1 "修改 SSH 端口"
 		panel_section "登录方式"
-		panel_option 2 "密码登录 开/关"
-		panel_option 3 "密钥登录 开/关"
+		panel_option 2 "全局密码认证 开/关"
+		panel_option 3 "全局密钥认证 开/关"
 		panel_option 4 "添加公钥"
 		panel_option 5 "删除公钥"
 		panel_option 6 "修改 root 密码"

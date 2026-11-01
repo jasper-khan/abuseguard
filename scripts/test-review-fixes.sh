@@ -127,6 +127,11 @@ grep -q 'install_release_binary .*CADDY_BIN' "$ROOT/install.sh" \
 # Build the real engine so panel validation is tested against its parser.
 (cd "$ROOT/engine" && go build -o "$ENGINE_BUILD" .)
 
+# The engine removed the enqueue --mode flag; fail2ban must not keep sending it.
+if grep -q -- '--mode' "$ROOT/assets/fail2ban/action.d/caddy-abuseguard-queue.conf"; then
+	fail "stale enqueue --mode flag remains in fail2ban action"
+fi
+
 for name in validate_caddyfile wl_valid wl_candidate wl_commit; do
 	extract_function "$name" "$ROOT/abuseguard.sh" >> "$FUNCTIONS"
 done
