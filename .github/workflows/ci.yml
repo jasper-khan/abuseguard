@@ -65,6 +65,7 @@ jobs:
           bash ./scripts/test-site-migration.sh
           bash ./scripts/test-firewall.sh
           bash ./scripts/test-ssh-port.sh
+          bash ./scripts/test-ssh-auth.sh
       - name: Verify isolated nftables transactions
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq nftables

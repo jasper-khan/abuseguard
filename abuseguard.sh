@@ -20,6 +20,9 @@ FIREWALL_SERVICE=caddy-abuseguard-firewall.service
 SSHD_MAIN=/etc/ssh/sshd_config
 SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
 SSHD_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-port.conf"
+SSHD_AUTH_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-auth.conf"
+SSH_ROOT_HOME=/root/.ssh
+SSH_AUTH_KEYS="$SSH_ROOT_HOME/authorized_keys"
 SSH_REPORT_JAIL=/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
 REPO_FILE="$CONF_DIR/repo"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" || echo jasper-khan/abuseguard )}"
@@ -904,23 +907,225 @@ act_ssh_port() {
 	echo "请用新端口重新登录确认，然后到「防火墙管理」关闭旧端口。"
 }
 
-# SSH 管理入口：目前只有端口切换，后续登录方式与密钥管理也归到这里。
+# ---- SSH 登录方式 ----
+# 认证开关写入独立 drop-in；关闭密码登录前必须确认 root 有可用公钥。
+# 列出声明某认证指令的位置（可只匹配某指令），格式：文件:行:内容。
+ssh_auth_sites() {
+	local pat='^[[:space:]]*(PasswordAuthentication|PubkeyAuthentication)[[:space:]]+(yes|no)'
+	[ -z "${1:-}" ] || pat='^[[:space:]]*'"$1"'[[:space:]]+(yes|no)'
+	grep -HnE "$pat" "$SSHD_MAIN" 2>/dev/null
+	grep -rnE --include='*.conf' "$pat" "$SSHD_DROPIN_DIR" 2>/dev/null || true
+}
+
+# 生效的认证开关（sshd -T 的输出是小写 on/off）。
+ssh_auth_state() {
+	local key="$1" line
+	line="$(sshd -T 2>/dev/null | awk -v k="$key" '$1 == k { print $2; exit }')"
+	case "$line" in
+		yes|on) echo on ;;
+		no|off) echo off ;;
+		*) echo unknown ;;
+	esac
+}
+
+# root 是否具备可用的密钥登录条件：authorized_keys 至少一条且权限正确。
+# sshd StrictModes 只要求目录和 authorized_keys 不被组/其他人写。
+ssh_key_ready() {
+	local m
+	[ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ] || return 1
+	m="$(stat -c %a "$SSH_ROOT_HOME" 2>/dev/null)" || return 1
+	[ "$(( 8#$m & 022 ))" -eq 0 ] || return 1
+	m="$(stat -c %a "$SSH_AUTH_KEYS" 2>/dev/null)" || return 1
+	[ "$(( 8#$m & 022 ))" -eq 0 ] || return 1
+}
+
+# 写入认证开关；调用者负责备份、校验与重载。
+ssh_auth_write() {
+	local pw="$1" pk="$2" line=""
+	[ -f "$SSHD_AUTH_DROPIN" ] && grep -vE '^[[:space:]]*(PasswordAuthentication|PubkeyAuthentication)[[:space:]]' "$SSHD_AUTH_DROPIN" > "$SSHD_AUTH_DROPIN.tmp"
+	[ -n "$pw" ] && line="${line}PasswordAuthentication $pw"$'\n'
+	[ -n "$pk" ] && line="${line}PubkeyAuthentication $pk"$'\n'
+	printf '%s' "$line" >> "$SSHD_AUTH_DROPIN.tmp"
+	mv -f -- "$SSHD_AUTH_DROPIN.tmp" "$SSHD_AUTH_DROPIN"
+}
+
+# 开关某个认证方式（password|pubkey -> on|off）。
+act_ssh_auth() {
+	local key="$1" directive="$2" label="$3" cur target answer sites backup ysn ypw ypk
+	[ -d "$SSHD_DROPIN_DIR" ] || { echo "系统没有 $SSHD_DROPIN_DIR，面板不修改 SSH 认证。"; return 1; }
+	command -v sshd >/dev/null 2>&1 || { echo "未找到 sshd，无法修改 SSH 认证。"; return 1; }
+	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+		echo "系统使用 ssh.socket 激活 SSH，面板不修改其配置；请先恢复 ssh.service 再试。"
+		return 1
+	fi
+	cur="$(ssh_auth_state "$key")"
+	[ "$cur" != unknown ] || { echo "无法读取当前 SSH 认证状态，已取消。"; return 1; }
+	target=off; [ "$cur" = off ] && target=on
+	# 与自身 drop-in 之外的指令冲突时拒绝，避免被主配置覆盖而不生效。
+	sites="$(ssh_auth_sites "$directive" | grep -v "$SSHD_AUTH_DROPIN" | grep .)" || sites=""
+	if [ -n "$sites" ]; then
+		echo "以下位置已有 $directive 指令，面板不修改（优先级可能冲突）："
+		printf '  %s\n' "$sites"
+		echo "请先移除对应指令后重试。"
+		return 1
+	fi
+	if [ "$target" = off ]; then
+		if [ "$directive" = PasswordAuthentication ]; then
+			if [ "$(ssh_auth_state pubkeyauthentication)" != on ]; then
+				echo "密钥登录未开启，关闭密码登录会锁死，已拒绝。"
+				return 1
+			fi
+			if ! ssh_key_ready; then
+				echo "root 没有可用的公钥（$SSH_AUTH_KEYS 为空或权限不对），关闭密码登录会锁死，已拒绝。"
+				echo "请先用「添加公钥」加入公钥，并用密钥实际登录一次。"
+				return 1
+			fi
+		fi
+		echo " 关闭后，$label 将无法登录。请先保持当前会话不断开，并用新连接验证。"
+		read -r -p " 输入 yes 继续: " answer || return 1
+		[ "$answer" = yes ] || { echo " 已取消。"; return 1; }
+	fi
+	backup=""
+	if [ -f "$SSHD_AUTH_DROPIN" ]; then
+		backup="$(mktemp)" || return 1
+		cp -p -- "$SSHD_AUTH_DROPIN" "$backup" || { rm -f -- "$backup"; return 1; }
+	fi
+	# 内部状态用 on/off，sshd 配置只认 yes/no。写入时带上另一开关的现值，
+	# 因为 ssh_auth_write 会先滤掉两条旧指令，漏传就会丢行。
+	ysn=no; [ "$target" = on ] && ysn=yes
+	ypw=""; ypk=""
+	[ "$(ssh_auth_state passwordauthentication)" = on ] && ypw=yes
+	[ "$(ssh_auth_state passwordauthentication)" = off ] && ypw=no
+	[ "$(ssh_auth_state pubkeyauthentication)" = on ] && ypk=yes
+	[ "$(ssh_auth_state pubkeyauthentication)" = off ] && ypk=no
+	if [ "$directive" = PasswordAuthentication ]; then ypw="$ysn"; else ypk="$ysn"; fi
+	ssh_auth_write "$ypw" "$ypk"
+	if ! sshd -t >/dev/null 2>&1 \
+		|| [ "$(ssh_auth_state "$key")" != "$target" ] \
+		|| ! systemctl reload ssh 2>/dev/null; then
+		echo "修改失败，已回滚。"
+		if [ -n "$backup" ]; then
+			mv -f -- "$backup" "$SSHD_AUTH_DROPIN"
+		else
+			rm -f -- "$SSHD_AUTH_DROPIN"
+		fi
+		systemctl reload ssh 2>/dev/null
+		return 1
+	fi
+	[ -z "$backup" ] || rm -f -- "$backup"
+	if [ "$target" = on ]; then echo " $label 已开启。"; else echo " $label 已关闭。"; fi
+}
+
+# 添加公钥到 root 的 authorized_keys。
+act_ssh_key_add() {
+	local key tmp
+	[ -d "$SSH_ROOT_HOME" ] || mkdir -m 700 -p "$SSH_ROOT_HOME" || { echo "无法创建 $SSH_ROOT_HOME。"; return 1; }
+	read -r -p "  粘贴公钥（ssh-ed25519/ssh-rsa/...，留空取消）: " key || return 1
+	[ -n "$key" ] || return 0
+	local ktype kblob rest
+	read -r ktype kblob rest <<< "$key"
+	case "$ktype" in
+		ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com|sk-ecdsa-sha2-nistp384@openssh.com|sk-ecdsa-sha2-nistp521@openssh.com) ;;
+		*) echo "公钥格式无效。"; return 1 ;;
+	esac
+	case "$kblob" in ''|*[!A-Za-z0-9+/=]*) echo "公钥格式无效。"; return 1 ;; esac
+	# 按类型+blob 去重，注释不同视为同一把钥匙。
+	if awk -v t="$ktype" -v b="$kblob" 'NF { if ($1 == t && $2 == b) { found=1; exit } } END { exit found ? 0 : 1 }' "$SSH_AUTH_KEYS" 2>/dev/null; then
+		echo "该公钥已存在。"
+		return 0
+	fi
+	# 原子追加：先写临时文件再整体替换，失败不破坏原文件。
+	tmp="$SSH_AUTH_KEYS.tmp"
+	{ [ -f "$SSH_AUTH_KEYS" ] && cat "$SSH_AUTH_KEYS"; printf '%s\n' "$key"; } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+	chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+	mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; return 1; }
+	chmod 700 "$SSH_ROOT_HOME"
+	echo "公钥已添加（第 $(grep -c . "$SSH_AUTH_KEYS") 条）。请保持当前会话，用新会话验证密钥可登录。"
+}
+
+# 从 root 的 authorized_keys 删除一条公钥。
+act_ssh_key_remove() {
+	local keys idx=0 n target tmp remain
+	[ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ] || { echo "还没有公钥。"; return 1; }
+	keys="$(grep . "$SSH_AUTH_KEYS")"
+	echo
+	while IFS= read -r line; do
+		idx=$((idx + 1))
+		printf ' [%d] %.60s\n' "$idx" "$line"
+	done <<< "$keys"
+	read -r -p "  要删除的编号（留空取消）: " n || return 1
+	[ -n "$n" ] || return 0
+	case "$n" in *[!0-9]*) echo "编号无效。"; return 1 ;; esac
+	[ "$n" -ge 1 ] && [ "$n" -le "$idx" ] || { echo "编号无效。"; return 1; }
+	# 关密码登录时禁止删到最后一把钥匙，否则会锁死。
+	if [ "$(ssh_auth_state passwordauthentication)" = off ] && [ "$idx" -le 1 ]; then
+		echo "密码登录已关闭，这是最后一把公钥，删除会锁死，已拒绝。"
+		return 1
+	fi
+	target="$n"
+	tmp="$SSH_AUTH_KEYS.tmp"
+	remain=0
+	awk -v t="$target" 'NF && ++i != t' "$SSH_AUTH_KEYS" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+	remain="$(awk 'NF{n++} END{print n+0}' "$tmp")"
+	if [ "$(ssh_auth_state passwordauthentication)" = off ] && [ "$remain" -eq 0 ]; then
+		rm -f -- "$tmp"
+		echo "密码登录已关闭，删空公钥会锁死，已拒绝。"
+		return 1
+	fi
+	chmod 600 "$tmp"
+	mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; return 1; }
+	echo "已删除，剩余 $remain 条。"
+}
+
+# 修改 root 密码。
+act_ssh_password() {
+	local p1 p2
+	echo " 将修改 root 的登录密码（仅当密码登录开启时可用于 SSH）。"
+	read -r -s -p "  新密码: " p1 || return 1
+	echo
+	[ -n "$p1" ] || { echo "密码不能为空。"; return 1; }
+	read -r -s -p "  再输入一次: " p2 || return 1
+	echo
+	[ "$p1" = "$p2" ] || { echo "两次输入不一致。"; return 1; }
+	if printf 'root:%s\n' "$p1" | chpasswd >/dev/null 2>&1; then
+		echo "root 密码已更新。"
+	else
+		echo "密码修改失败。"
+		return 1
+	fi
+}
+
+# SSH 管理入口：端口切换与登录方式管理。
 act_ssh() {
-	local choice ports
+	local choice ports pw pk
 	while true; do
 		panel_start "SSH 管理"
 		panel_section "当前状态"
 		ports="$(ssh_current_ports)"
 		[ -n "$ports" ] || ports="无法读取"
 		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
+		pw="$(ssh_auth_state passwordauthentication)"
+		pk="$(ssh_auth_state pubkeyauthentication)"
+		panel_row " 密码登录 $( [ "$pw" = on ] && echo "${C_G}开${C_0}" || echo "${C_R}关${C_0}" )   密钥登录 $( [ "$pk" = on ] && echo "${C_G}开${C_0}" || echo "${C_R}关${C_0}" )"
 		panel_section "端口"
 		panel_option 1 "修改 SSH 端口"
+		panel_section "登录方式"
+		panel_option 2 "密码登录 开/关"
+		panel_option 3 "密钥登录 开/关"
+		panel_option 4 "添加公钥"
+		panel_option 5 "删除公钥"
+		panel_option 6 "修改 root 密码"
 		panel_footer "返回首页"
-		read -r -p "  选择 [0-1] > " choice || return
+		read -r -p "  选择 [0-6] > " choice || return
 		case "$choice" in
 			1) panel_title "SSH 管理 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
+			2) panel_title "SSH 管理 / 密码登录"; act_ssh_auth passwordauthentication PasswordAuthentication "密码登录" || echo "未完成修改。"; pause ;;
+			3) panel_title "SSH 管理 / 密钥登录"; act_ssh_auth pubkeyauthentication PubkeyAuthentication "密钥登录" || echo "未完成修改。"; pause ;;
+			4) panel_title "SSH 管理 / 添加公钥"; act_ssh_key_add; pause ;;
+			5) panel_title "SSH 管理 / 删除公钥"; act_ssh_key_remove; pause ;;
+			6) panel_title "SSH 管理 / 修改 root 密码"; act_ssh_password; pause ;;
 			0) return ;;
-			*) echo "请输入 0–1 之间的菜单编号。"; pause ;;
+			*) echo "请输入 0–6 之间的菜单编号。"; pause ;;
 		esac
 	done
 }
