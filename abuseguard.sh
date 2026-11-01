@@ -31,6 +31,8 @@ ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" |
 #   ABUSEGUARD_MIRROR unset -> direct first, then auto proxy-chain fallback
 #   ABUSEGUARD_MIRROR=cn    -> straight to the proxy chain
 #   ABUSEGUARD_MIRROR=<p>/  -> force that one prefix
+# The update/uninstall URLs carry ?v=<epoch> so a mirror cannot serve a
+# stale cached script (GitHub ignores the query; mirrors key on full URL).
 ABUSEGUARD_MIRROR="${ABUSEGUARD_MIRROR:-}"
 AG_GH_MIRRORS="https://gh-proxy.com/ https://gh.ddlc.top/ https://ghproxy.net/ https://ghfast.top/"
 AG_CURL="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
@@ -1322,7 +1324,7 @@ act_logs() {
 act_update() {
 	echo "正在从 $ABUSEGUARD_REPO 重新运行安装器..."
 	local f=/tmp/abuseguard-install.sh
-	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh" "$f"; then
+	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh?v=$(date +%s)" "$f"; then
 		if ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
 			rm -f "$f"
 			echo "更新完成，正在重新加载控制面板..."
@@ -1339,7 +1341,7 @@ act_update() {
 
 act_uninstall() {
 	local f=/tmp/abuseguard-uninstall.sh
-	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/uninstall.sh" "$f"; then
+	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/uninstall.sh?v=$(date +%s)" "$f"; then
 		bash "$f"
 		rm -f "$f"
 	else
