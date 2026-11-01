@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 cleanup() {
 	rm -f -- "$TMP/panel.sh" "$TMP/sshd_config" "$TMP/calls"
-	rm -f -- "$TMP/auth/99-abuseguard-auth.conf" "$TMP/auth/99-abuseguard-auth.conf.tmp"
+	rm -f -- "$TMP/auth/00-abuseguard-auth.conf" "$TMP/auth/00-abuseguard-auth.conf.tmp"
+	rm -f -- "$TMP/auth/99-abuseguard-auth.conf" "$TMP/auth/00-aaa-hardening.conf" "$TMP/auth/50-cloud-init.conf"
 	rm -f -- "$TMP/root/.ssh/authorized_keys" "$TMP/root/.ssh/authorized_keys.tmp"
 	rmdir -- "$TMP/auth" "$TMP/root/.ssh" "$TMP/root" 2>/dev/null || true
 	rmdir -- "$TMP" 2>/dev/null || true
@@ -18,12 +19,13 @@ source "$TMP/panel.sh"
 
 SSHD_MAIN="$TMP/sshd_config"
 SSHD_DROPIN_DIR="$TMP/auth"
-SSHD_AUTH_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-auth.conf"
+SSHD_AUTH_DROPIN="$SSHD_DROPIN_DIR/00-abuseguard-auth.conf"
+SSHD_AUTH_DROPIN_OLD="$SSHD_DROPIN_DIR/99-abuseguard-auth.conf"
 SSHD_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-port.conf"
 SSH_ROOT_HOME="$TMP/root/.ssh"
 SSH_AUTH_KEYS="$SSH_ROOT_HOME/authorized_keys"
 mkdir -p "$SSHD_DROPIN_DIR" "$SSH_ROOT_HOME"
-: > "$SSHD_MAIN"
+printf 'Include %s/*.conf\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
 
 fail() { echo "ssh auth test failed: $*" >&2; exit 1; }
 
@@ -36,12 +38,19 @@ perm_keys=600
 : > "$TMP/calls"
 
 sshd_T() {
-	# 模拟 sshd 首值生效：主配置在前，drop-in 在后，取第一条。
+	# 模拟 sshd 首值生效：主配置有 Include 时，drop-in 按字典序先读，主配置在后；
+	# 没有 Include 则 drop-in 不生效。每个关键字取第一条。
 	local pw pk
-	pw="$({ grep -hsE '^[[:space:]]*PasswordAuthentication[[:space:]]+(yes|no)' "$SSHD_MAIN" 2>/dev/null || true
-		grep -hsE '^[[:space:]]*PasswordAuthentication[[:space:]]+(yes|no)' "$SSHD_DROPIN_DIR"/*.conf 2>/dev/null || true; } | head -n 1 | awk '{print $2}')"
-	pk="$({ grep -hsE '^[[:space:]]*PubkeyAuthentication[[:space:]]+(yes|no)' "$SSHD_MAIN" 2>/dev/null || true
-		grep -hsE '^[[:space:]]*PubkeyAuthentication[[:space:]]+(yes|no)' "$SSHD_DROPIN_DIR"/*.conf 2>/dev/null || true; } | head -n 1 | awk '{print $2}')"
+	if grep -qE '^[[:space:]]*Include[[:space:]]' "$SSHD_MAIN" 2>/dev/null; then
+		pw="$(grep -hsE '^[[:space:]]*PasswordAuthentication[[:space:]]+(yes|no)' "$SSHD_DROPIN_DIR"/*.conf 2>/dev/null | head -n 1 || true)"
+		pk="$(grep -hsE '^[[:space:]]*PubkeyAuthentication[[:space:]]+(yes|no)' "$SSHD_DROPIN_DIR"/*.conf 2>/dev/null | head -n 1 || true)"
+	else
+		pw=""; pk=""
+	fi
+	pw="$({ [ -n "$pw" ] && printf '%s\n' "$pw" || true
+		grep -hsE '^[[:space:]]*PasswordAuthentication[[:space:]]+(yes|no)' "$SSHD_MAIN" 2>/dev/null || true; } | awk 'NF{print $2; exit}')"
+	pk="$({ [ -n "$pk" ] && printf '%s\n' "$pk" || true
+		grep -hsE '^[[:space:]]*PubkeyAuthentication[[:space:]]+(yes|no)' "$SSHD_MAIN" 2>/dev/null || true; } | awk 'NF{print $2; exit}')"
 	printf 'passwordauthentication %s\n' "${pw:-yes}"
 	printf 'pubkeyauthentication %s\n' "${pk:-yes}"
 	printf 'port 22\n'
@@ -74,8 +83,9 @@ chpasswd() { printf 'chpasswd\n' >> "$TMP/calls"; [ "$CHPASSWD_FAIL" = 0 ]; }
 pause() { :; }
 
 reset_all() {
-	: > "$SSHD_MAIN"
-	rm -f -- "$SSHD_AUTH_DROPIN" "$SSHD_AUTH_DROPIN.tmp"
+	printf 'Include %s/*.conf\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
+	rm -f -- "$SSHD_AUTH_DROPIN" "$SSHD_AUTH_DROPIN.tmp" "$SSHD_AUTH_DROPIN_OLD"
+	rm -f -- "$SSHD_DROPIN_DIR/00-aaa-hardening.conf" "$SSHD_DROPIN_DIR/50-cloud-init.conf"
 	rm -f -- "$SSH_AUTH_KEYS" "$SSH_AUTH_KEYS.tmp"
 	SOCKET_ACTIVE=0; RELOAD_FAIL=0; SSHD_T_FAIL=0; CHPASSWD_FAIL=0
 	: > "$TMP/calls"
@@ -123,13 +133,14 @@ if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication �
 fi
 perm_home=700
 
-# 主配置已有 PasswordAuthentication 指令时拒绝（会被 sshd 首值覆盖，改了也不生效）。
-printf 'PasswordAuthentication yes\n' >> "$SSHD_MAIN"
-if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then
-	fail 'password off accepted despite conflicting directive'
-fi
-[ ! -e "$SSHD_AUTH_DROPIN" ] || fail 'dropin written despite conflicting directive'
-: > "$SSHD_MAIN"
+# 主配置全局指令被面板 drop-in 压住（Include 在前、00- 排第一），照常开关不拒绝。
+printf 'Include %s/*.conf\nPasswordAuthentication yes\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
+if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then :; else fail 'password off rejected despite dominated body directive'; fi
+grep -qx 'PasswordAuthentication no' "$SSHD_AUTH_DROPIN" || fail 'dropin missing with body directive present'
+[ "$(ssh_auth_state passwordauthentication)" = off ] || fail 'state should follow dropin over body'
+# 重开回到 on，后续测试从这里继续。
+if act_ssh_auth passwordauthentication PasswordAuthentication 密码登录 </dev/null; then :; else fail 'password on after body test failed'; fi
+: > "$TMP/calls"
 
 # 有钥且无冲突：关闭成功，drop-in 与 sshd -T 一致。
 if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then :; else fail 'password off failed'; fi
@@ -184,6 +195,49 @@ if printf 'yes\n' | act_ssh_auth pubkeyauthentication PubkeyAuthentication 密�
 	fail 'pubkey toggle accepted with ssh.socket'
 fi
 SOCKET_ACTIVE=0
+
+# —— 真正压不过面板的指令仍要拒绝 ——
+
+# 主配置 Match 块内的指令：按条件覆盖面板，拒绝。
+cp -p "$SSHD_MAIN" "$TMP/sshd_config.keep"
+printf 'Include %s/*.conf\nMatch User bot\n  PasswordAuthentication no\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
+if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then
+	fail 'Match-block directive not refused'
+fi
+grep -qx 'PubkeyAuthentication yes' "$SSHD_AUTH_DROPIN" || fail 'dropin touched on Match refusal'
+
+# 主配置缺少 Include：drop-in 不生效，拒绝。
+printf 'PasswordAuthentication yes\n' > "$SSHD_MAIN"
+if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then
+	fail 'missing Include not refused'
+fi
+
+# 排序在面板文件之前的外部 drop-in：拒绝。
+printf 'Include %s/*.conf\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
+printf 'PasswordAuthentication no\n' > "$SSHD_DROPIN_DIR/00-aaa-hardening.conf"
+if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then
+	fail 'earlier-sorting foreign dropin not refused'
+fi
+out="$(printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录 2>&1)" || true
+printf '%s\n' "$out" | grep -q '00-aaa-hardening.conf' || fail 'refusal does not name the conflicting file'
+rm -f -- "$SSHD_DROPIN_DIR/00-aaa-hardening.conf"
+
+# 排序靠后的 drop-in（如 50-cloud-init.conf）被面板压住：不拒绝，照常关。
+printf 'PasswordAuthentication no\n' > "$SSHD_DROPIN_DIR/50-cloud-init.conf"
+if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then :; else fail 'password off rejected despite dominated 50- dropin'; fi
+[ "$(ssh_auth_state passwordauthentication)" = off ] || fail 'state should follow our 00- over 50- dropin'
+rm -f -- "$SSHD_DROPIN_DIR/50-cloud-init.conf"
+
+# 旧版 99- 文件自动迁移到 00-：内容保留，旧名消失。
+rm -f -- "$SSHD_AUTH_DROPIN"
+printf 'PasswordAuthentication no\nPubkeyAuthentication yes\n' > "$SSHD_AUTH_DROPIN_OLD"
+if act_ssh_auth passwordauthentication PasswordAuthentication 密码登录 </dev/null; then :; else fail 'password on with migration failed'; fi
+[ ! -e "$SSHD_AUTH_DROPIN_OLD" ] || fail 'old 99- dropin not migrated away'
+[ -f "$SSHD_AUTH_DROPIN" ] || fail 'migrated 00- dropin missing'
+grep -qx 'PasswordAuthentication yes' "$SSHD_AUTH_DROPIN" || fail 'migrated dropin lost password line'
+grep -qx 'PubkeyAuthentication yes' "$SSHD_AUTH_DROPIN" || fail 'migrated dropin lost pubkey line'
+rm -f -- "$SSHD_AUTH_DROPIN" "$TMP/sshd_config.keep"
+printf 'Include %s/*.conf\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
 
 # 删除公钥：关密码时禁止删最后一把；正常删除按编号。
 reset_all

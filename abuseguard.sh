@@ -20,7 +20,8 @@ FIREWALL_SERVICE=caddy-abuseguard-firewall.service
 SSHD_MAIN=/etc/ssh/sshd_config
 SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
 SSHD_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-port.conf"
-SSHD_AUTH_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-auth.conf"
+SSHD_AUTH_DROPIN="$SSHD_DROPIN_DIR/00-abuseguard-auth.conf"
+SSHD_AUTH_DROPIN_OLD="$SSHD_DROPIN_DIR/99-abuseguard-auth.conf"
 SSH_ROOT_HOME=/root/.ssh
 SSH_AUTH_KEYS="$SSH_ROOT_HOME/authorized_keys"
 SSH_REPORT_JAIL=/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
@@ -915,8 +916,41 @@ act_ssh_port() {
 ssh_auth_sites() {
 	local pat='^[[:space:]]*(PasswordAuthentication|PubkeyAuthentication)[[:space:]]+(yes|no)'
 	[ -z "${1:-}" ] || pat='^[[:space:]]*'"$1"'[[:space:]]+(yes|no)'
-	grep -HnE "$pat" "$SSHD_MAIN" 2>/dev/null
+	grep -HnE "$pat" "$SSHD_MAIN" 2>/dev/null || true
 	grep -rnE --include='*.conf' "$pat" "$SSHD_DROPIN_DIR" 2>/dev/null || true
+}
+
+# 真正压得过面板 drop-in 的指令位置（这些才拒绝修改）。sshd 首值生效，Include
+# 按文件名字典序展开；面板文件用 00- 排第一，主配置全局指令（Include 在主配置
+# 开头）和排序靠后的 drop-in 都被面板压住，不构成冲突。要拒绝的只有三种：
+#   1. 主配置没有 Include：drop-in 整体不生效
+#   2. 主配置 Match 块内的指令：对匹配的连接覆盖全局设置
+#   3. 排序在面板文件之前的外部 drop-in
+ssh_auth_conflicts() {
+	local directive="$1" row file rest fline inc mline name mine
+	mine="${SSHD_AUTH_DROPIN##*/}"
+	inc="$(grep -nE "^[[:space:]]*Include[[:space:]]+$SSHD_DROPIN_DIR" "$SSHD_MAIN" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
+	[ -n "$inc" ] || { echo "$SSHD_MAIN 缺少 Include $SSHD_DROPIN_DIR，面板配置不会生效"; return 0; }
+	mline="$(grep -nE '^[[:space:]]*Match[[:space:]]' "$SSHD_MAIN" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
+	mline="${mline:-0}"
+	while IFS= read -r row; do
+		[ -n "$row" ] || continue
+		file="${row%%:*}"
+		rest="${row#*:}"
+		if [ "$file" = "$SSHD_MAIN" ]; then
+			fline="${rest%%:*}"
+			if [ "$mline" -gt 0 ] && [ "$fline" -gt "$mline" ]; then
+				echo "$row（Match 块内，会覆盖面板配置）"
+			elif [ "$fline" -lt "$inc" ]; then
+				echo "$row（在 Include 之前，先于面板生效）"
+			fi
+		else
+			name="${file##*/}"
+			if [ "$name" != "$mine" ] && [ "$name" \< "$mine" ]; then
+				echo "$row（drop-in 排序在面板之前）"
+			fi
+		fi
+	done < <(ssh_auth_sites "$directive")
 }
 
 # 生效的认证开关（sshd -T 的输出是小写 on/off）。
@@ -953,21 +987,26 @@ ssh_auth_write() {
 
 # 开关某个认证方式（password|pubkey -> on|off）。
 act_ssh_auth() {
-	local key="$1" directive="$2" label="$3" cur target answer sites backup ysn ypw ypk
+	local key="$1" directive="$2" label="$3" cur target answer conflicts backup ysn ypw ypk
 	[ -d "$SSHD_DROPIN_DIR" ] || { echo "系统没有 $SSHD_DROPIN_DIR，面板不修改 SSH 认证。"; return 1; }
 	command -v sshd >/dev/null 2>&1 || { echo "未找到 sshd，无法修改 SSH 认证。"; return 1; }
 	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
 		echo "系统使用 ssh.socket 激活 SSH，面板不修改其配置；请先恢复 ssh.service 再试。"
 		return 1
 	fi
+	# 旧版本把面板 drop-in 放在 99-，升级后迁到 00-（排序第一，压过外部指令）。
+	if [ -f "$SSHD_AUTH_DROPIN_OLD" ]; then
+		if [ -f "$SSHD_AUTH_DROPIN" ]; then rm -f -- "$SSHD_AUTH_DROPIN_OLD"
+		else mv -f -- "$SSHD_AUTH_DROPIN_OLD" "$SSHD_AUTH_DROPIN"; fi
+	fi
 	cur="$(ssh_auth_state "$key")"
 	[ "$cur" != unknown ] || { echo "无法读取当前 SSH 认证状态，已取消。"; return 1; }
 	target=off; [ "$cur" = off ] && target=on
-	# 与自身 drop-in 之外的指令冲突时拒绝，避免被主配置覆盖而不生效。
-	sites="$(ssh_auth_sites "$directive" | grep -v "$SSHD_AUTH_DROPIN" | grep .)" || sites=""
-	if [ -n "$sites" ]; then
-		echo "以下位置已有 $directive 指令，面板不修改（优先级可能冲突）："
-		printf '  %s\n' "$sites"
+	# 只拒绝真正压不过面板的指令（见 ssh_auth_conflicts）。
+	conflicts="$(ssh_auth_conflicts "$directive")"
+	if [ -n "$conflicts" ]; then
+		echo "以下位置的 $directive 指令优先级高于面板配置，面板不修改："
+		printf '  %s\n' "$conflicts"
 		echo "请先移除对应指令后重试。"
 		return 1
 	fi

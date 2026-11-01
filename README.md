@@ -101,7 +101,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 「SSH 管理」中的「修改 SSH 端口」会让新旧端口同时监听：校验 `sshd -t`，放行新端口，重载 sshd 并确认新旧端口都在监听，任一步失败恢复原配置；成功后同步 fail2ban 的 SSH 上报端口。请先用新端口重新登录确认，再到「防火墙管理」关闭旧端口：面板会删除对应的 `Port` 指令并关闭旧端口的防火墙放行；当前会话端口和唯一的 SSH 端口不允许关闭。没有 `Port` 指令时，在 `/etc/ssh/sshd_config.d/99-abuseguard-port.conf` 写入新旧两个端口；已有一个 `Port` 指令时保留原文件，新端口写入该 drop-in；出现多个 `Port` 指令时拒绝。新端口继承旧端口在防火墙中的来源限制；若新端口已有不兼容的来源规则，需先在防火墙管理中调整。切换前需先在云安全组或上游防火墙放行新端口。`ssh.socket` 激活方式下面板会拒绝修改。
 
-「登录方式」通过 `/etc/ssh/sshd_config.d/99-abuseguard-auth.conf` 管理密码登录和密钥登录的开关：关闭任一方式需要输入 `yes` 确认；关闭密码登录前校验密钥登录已开启且 root 有权限正确的 authorized_keys，否则拒绝；主配置或其他 drop-in 已有同名指令时拒绝修改（sshd 首值生效，改了也不可靠）。`ssh.socket` 激活方式下同样拒绝。「添加公钥」写入 root 的 authorized_keys（按类型+blob 去重、自动修权限，支持 ssh-ed25519、ssh-rsa、ECDSA 和 sk- 硬件密钥）；密码登录关闭时禁止删除最后一把公钥。「修改 root 密码」调用 `chpasswd`，两次输入一致才生效。
+「登录方式」通过 `/etc/ssh/sshd_config.d/00-abuseguard-auth.conf` 管理密码登录和密钥登录的开关：文件名以 `00-` 开头排序第一，sshd 首值生效，天然压过主配置全局指令和 `50-cloud-init.conf` 之类排序靠后的 drop-in。关闭任一方式需要输入 `yes` 确认；关闭密码登录前校验密钥登录已开启且 root 有权限正确的 authorized_keys，否则拒绝。只有真正压不过面板的指令才拒绝修改：排序更靠前的 `00-` 外部 drop-in、主配置 Match 块内的指令、或主配置缺少 `Include`（此时 drop-in 不生效）；旧版本的 `99-abuseguard-auth.conf` 会自动迁移到新名字。`ssh.socket` 激活方式下同样拒绝。「添加公钥」写入 root 的 authorized_keys（按类型+blob 去重、自动修权限，支持 ssh-ed25519、ssh-rsa、ECDSA 和 sk- 硬件密钥）；密码登录关闭时禁止删除最后一把公钥。「修改 root 密码」调用 `chpasswd`，两次输入一致才生效。
 
 开放端口时可填写来源 IPv4/IPv6 地址或 CIDR，留空表示所有来源；同一端口可以有多条来源规则，关闭端口时按编号选择要移除的那条。协议族有两个开关：IPv4 入站默认开启，IPv6 入站默认关闭；关闭某个协议族后，新的该协议族入站连接会被丢弃，已建立连接、回环、ICMP 和 DHCP 仍然保留。关闭当前 SSH 会话所在的协议族需要输入 `yes` 确认，会话断开后需要控制台恢复。重新应用规则和安装更新只会补齐缺失的 SSH 端口，不会把已有来源限制加宽为所有来源。SSH 改端口时，新端口继承旧端口的所有来源规则。
 
