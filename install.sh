@@ -241,6 +241,15 @@ EOF
 	log "已记录安装清单（供卸载时对称回滚）"
 fi
 
+# release_asset NAME -- URL of a latest-release asset. The version query is a
+# cache buster: GitHub ignores it, but download mirrors key their cache on the
+# full URL, so they stop serving a stale copy cached under the previous
+# release (a checksum mismatch that aborted installs).
+release_asset() {
+	printf 'https://github.com/%s/releases/latest/download/%s?v=%s' \
+		"$ABUSEGUARD_REPO" "$1" "${TARGET_VERSION:-dev}"
+}
+
 # --- integrity: verify downloaded binaries against the release SHA256SUMS -----
 # engine + Caddy come through third-party GitHub proxies, so every downloaded
 # binary MUST match the release checksums. Verification is MANDATORY, not
@@ -257,7 +266,7 @@ SUMS_FILE=""
 # install if it cannot be had; it never degrades to "skip verification".
 sums_require() {
 	if [ -n "$SUMS_FILE" ]; then return 0; fi
-	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/SHA256SUMS.txt"
+	local url; url="$(release_asset SHA256SUMS.txt)"
 	local f; f="$(mktemp)"
 	log "正在获取 SHA256SUMS（校验二进制用）..."
 	if { $AG_CURL_SUMS -o "$f" "$url" 2>/dev/null || gh_fetch "$url" "$f" "$AG_CURL_SUMS"; } && [ -s "$f" ]; then
@@ -323,7 +332,7 @@ install_engine() {
 		return
 	fi
 	local fn="caddy-abuseguard-linux-$ARCH"
-	local url="https://github.com/$ABUSEGUARD_REPO/releases/latest/download/$fn"
+	local url; url="$(release_asset "$fn")"
 	log "正在下载引擎（linux-$ARCH，自动选择线路，稍候）..."
 	install_release_binary "$url" "$ENGINE_BIN" "$fn" "引擎" \
 		|| die "引擎下载、校验或启动检查失败。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
@@ -373,7 +382,7 @@ fi
 if [ "$need_caddy" = "1" ]; then
 	caddy_fn="caddy-linux-$ARCH"
 	log "正在下载带 cloudflare 模块的 Caddy（linux-$ARCH，自动选择线路，稍候）..."
-	install_release_binary "https://github.com/$ABUSEGUARD_REPO/releases/latest/download/$caddy_fn" "$CADDY_BIN" "$caddy_fn" "Caddy" \
+	install_release_binary "$(release_asset "$caddy_fn")" "$CADDY_BIN" "$caddy_fn" "Caddy" \
 		|| die "Caddy 下载、校验或启动检查失败。可预置一个带 cloudflare 模块的 caddy 到 $CADDY_BIN 后重试。"
 else
 	log "已有的 Caddy 已包含 cloudflare 模块"
