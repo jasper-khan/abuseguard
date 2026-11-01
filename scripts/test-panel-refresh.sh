@@ -93,38 +93,57 @@ act_flush() { echo 'action:flush'; }
 act_key() { echo 'action:key'; }
 act_toggle() { echo 'action:toggle'; }
 act_logs() { echo 'action:logs'; }
+ssh_current_ports() { echo 22; }
+ssh_auth_state() { echo on; }
+root_password_login_ready() { return 0; }
 act_ssh_port() { echo 'action:ssh-port'; }
+act_ssh_auth() { echo "action:ssh-$1"; }
+act_ssh_key_add() { echo 'action:ssh-key-add'; }
+act_ssh_key_remove() { echo 'action:ssh-key-remove'; }
+act_ssh_password() { echo 'action:ssh-password'; }
 act_update() { echo 'action:update'; }
 act_uninstall() { echo 'action:uninstall'; }
 printf '1\n' | menu
 printf '2\n3\n0\n' | menu
 printf '3\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n0\n' | menu
-printf '4\n1\n2\n3\n4\n0\n' | menu
-printf '5\n1\n2\n3\n0\n' | menu
-printf '6\n1\n0\n' | menu
+printf '4\n1\n2\n3\n4\n5\n6\n0\n' | menu
+printf '5\n1\n2\n3\n4\n0\n' | menu
+printf '6\n1\n2\n3\n0\n' | menu
 for category in 2 3 4 5 6; do
 	printf '%s\n0\n' "$category" | menu
 done
-for screen in act_sites act_firewall act_intel act_system; do
+for screen in act_sites act_firewall act_ssh act_intel act_system; do
 	"$screen" </dev/null || true
 done
 NAVIGATION
 )"
 actions="$(printf '%s\n' "$navigation" | sed -n 's/^action://p')"
-expected=$'status\ncftoken\nport-open\nport-close\nbanned\nban\nunban\nwhitelist\nrules\napply\nfamily-ipv4\nfamily-ipv6\nsync\nflush\nkey\ntoggle\nlogs\nupdate\nuninstall\nssh-port'
+expected=$'status\ncftoken\nport-open\nport-close\nfamily-ipv4\nfamily-ipv6\nbanned\nban\nunban\nwhitelist\nrules\napply\nssh-port\nssh-passwordauthentication\nssh-pubkeyauthentication\nssh-key-add\nssh-key-remove\nssh-password\nsync\nflush\nkey\ntoggle\nlogs\nupdate\nuninstall'
 [ "$actions" = "$expected" ] || { printf 'unexpected menu actions:\n%s\n' "$actions" >&2; exit 1; }
 
-# Keep framed rows aligned and preserve long Chinese text with ANSI colors.
+# Preserve long Chinese text and align paired actions without box borders.
 bash --noprofile --norc -s -- "$PANEL_SOURCE" <<'LAYOUT'
 set -euo pipefail
 source "$1"
 sample='中文对齐与长文本换行测试：TCP443,63052,33121；UDP443,58209；完整保留内容。'
 rows="$(panel_row "${C_G}${sample}${C_0}" | sed $'s/\033\\[[0-9;]*m//g')"
 while IFS= read -r row; do
-	[ "$(printf '%s' "$row" | LC_ALL=C.UTF-8 wc -L)" -eq "$PANEL_WIDTH" ]
+	[ "$(printf '%s' "$row" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
 done <<< "$rows"
-joined="$(printf '%s\n' "$rows" | sed 's/^│ //; s/ │$//; s/ *$//' | tr -d '\n')"
+joined="$(printf '%s\n' "$rows" | sed 's/^  //' | tr -d '\n')"
 [ "$joined" = "$sample" ]
+pair="$(panel_pair 3 "IPv4 入站  ${C_G}已开启${C_0}" 4 "IPv6 入站  ${C_D}已关闭${C_0}" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s\n' "$pair" | wc -l)" -eq 1 ]
+[ "$(printf '%s' "${pair%%\[4\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 38 ]
+[ "$(printf '%s' "$pair" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
+
+# The home navigation contains category names only, with no descriptions.
+header() { :; }
+panel_section() { :; }
+panel_footer() { :; }
+home="$(printf '0\n' | menu | sed $'s/\033\\[[0-9;]*m//g')"
+expected=$'   [1] 运行概览\n   [2] 站点与证书\n   [3] 防火墙\n   [4] SSH 与登录\n   [5] 情报与上报\n   [6] 系统维护'
+[ "$home" = "$expected" ]
 LAYOUT
 
 echo "panel refresh, navigation and layout tests passed"

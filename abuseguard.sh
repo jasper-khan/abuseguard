@@ -69,18 +69,18 @@ caddy_restart_active() {
 	[ "$(systemctl is-active caddy 2>/dev/null)" = active ]
 }
 
-C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;34m'; C_H=$'\033[1m'; C_0=$'\033[0m'
+C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[90m'; C_H=$'\033[1m'; C_0=$'\033[0m'
 PANEL_WIDTH=76
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
 panel_line() {
 	local fill
-	printf -v fill '%*s' "$((PANEL_WIDTH - 2))" ''
-	printf '%s%s%s%s%s\n' "$C_B" "$1" "${fill// /─}" "$2" "$C_0"
+	printf -v fill '%*s' "$((PANEL_WIDTH - 4))" ''
+	printf '  %s%s%s\n' "$C_D" "${fill// /─}" "$C_0"
 }
 
-# 固定宽度框线：汉字和全角标点占两列，ANSI 颜色不占列。
+# 长文本按终端列宽换行：汉字和全角标点占两列，ANSI 颜色不占列。
 panel_row() {
 	local LC_ALL=C.UTF-8 text="$1" line='' color='' used=0 char size seq
 	local limit=$((PANEL_WIDTH - 4)) sgr=$'\033''\[[0-9;]*m'
@@ -93,30 +93,31 @@ panel_row() {
 		char="${text:0:1}"; text="${text:1}"
 		case "$char" in [㐀-鿿　-〿！-～]) size=2 ;; *) size=1 ;; esac
 		if (( used + size > limit )) || [ "$char" = $'\n' ]; then
-			printf '%s│%s %s%*s %s│%s\n' "$C_B" "$C_0" "$line" "$((limit - used))" '' "$C_B" "$C_0"
+			printf '  %s%s\n' "$line" "$C_0"
 			line="$color"; used=0
 			[ "$char" != $'\n' ] || continue
 		fi
 		line+="$char"; used=$((used + size))
 	done
-	printf '%s│%s %s%*s %s│%s\n' "$C_B" "$C_0" "$line" "$((limit - used))" '' "$C_B" "$C_0"
+	printf '  %s%s\n' "$line" "$C_0"
 }
 
 panel_start() {
 	clear 2>/dev/null || true
-	panel_line '╭' '╮'
 	panel_row " ${C_B}AbuseGuard${C_0}  /  ${C_H}$1${C_0}"
+	panel_line
 }
 
-panel_end() { panel_line '╰' '╯'; }
-panel_title() { panel_start "$1"; panel_end; }
-panel_section() { panel_line '├' '┤'; panel_row " ${C_H}$1${C_0}"; }
+panel_end() { panel_line; }
+panel_title() { panel_start "$1"; echo; }
+panel_section() { echo; panel_row " ${C_B}$1${C_0}"; }
 
 panel_option() {
 	local width gap=''
 	if [ -n "${3:-}" ]; then
-		width="$(printf '%s' "$2" | LC_ALL=C.UTF-8 wc -L)"
-		printf -v gap '%*s' "$((14 - width))" ''
+		width="$(printf ' [%s] %s' "$1" "$2" | sed $'s/\033\\[[0-9;]*m//g' | LC_ALL=C.UTF-8 wc -L)"
+		width=$((36 - width)); [ "$width" -gt 0 ] || width=1
+		printf -v gap '%*s' "$width" ''
 	fi
 	panel_row " ${C_B}[$1]${C_0} ${C_H}$2${C_0}${gap}${3:-}"
 }
@@ -124,9 +125,9 @@ panel_option() {
 panel_pair() { panel_option "$1" "$2" "${C_B}[$3]${C_0} ${C_H}$4${C_0}"; }
 
 panel_footer() {
-	panel_line '├' '┤'
+	panel_line
 	panel_option 0 "$1" "${2:-}"
-	panel_end
+	echo
 }
 
 count_banned() {
@@ -166,21 +167,23 @@ header() {
 	version="$("$ENGINE" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
 	[ -n "$version" ] || version="?"
 	age="$(intel_age_h)"
-	if [ -z "$age" ]; then fresh="（未同步）"
-	elif [ "$age" -gt 12 ]; then fresh="$(printf '（最后同步 %b%sh 前，建议检查%b）' "$C_Y" "$age" "$C_0")"
-	else fresh="（最后同步 ${age}h 前）"; fi
+	if [ -z "$age" ]; then fresh="情报未同步"
+	elif [ "$age" -gt 12 ]; then fresh="${C_Y}情报最后同步 ${age}h 前，建议检查${C_0}"
+	else fresh="情报最后同步 ${age}h 前"; fi
 	if [ "$rep" = on ]; then
 		[ -s "$KEYFILE" ] && report_status="${C_G}已开启${C_0}" || report_status="${C_Y}未配置 API Key${C_0}"
 	else
-		report_status="${C_Y}已关闭${C_0}"
+		report_status="${C_D}已关闭${C_0}"
 	fi
 	if firewall_running; then firewall_status="${C_G}运行中${C_0}"
 	else firewall_status="${C_Y}未就绪${C_0}"; fi
 	panel_start "控制中心 · v${version}"
 	panel_section "运行状态"
-	panel_row " Caddy $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )   Fail2Ban $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )   SSH 端口 ${C_H}${ssh_ports}${C_0}"
-	panel_row " 防火墙 ${firewall_status}   封禁记录 ${C_H}${banned}${C_0}   上报 ${report_status}"
-	panel_row " 情报 IP ${C_H}${intel}${C_0}  ${fresh}"
+	panel_row " Caddy      $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )          Fail2Ban  $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
+	panel_row " 防火墙     ${firewall_status}          SSH 端口  ${C_H}${ssh_ports}${C_0}"
+	panel_row "$(printf ' 封禁记录   %-16s情报 IP   %s' "$banned" "$intel")"
+	panel_row " ${C_D}封禁记录按 jail 累加 · ${fresh}${C_0}"
+	panel_row " 自动上报   ${report_status}"
 }
 
 act_status() {
@@ -298,7 +301,7 @@ act_whitelist() {
 	local -a items
 	local line ip num target tmp c i
 	while true; do
-		panel_start "防火墙管理 / IP 白名单"
+		panel_start "防火墙 / IP 白名单"
 		panel_section "当前白名单"
 		panel_row " 白名单 IP 不会被封禁或上报，仍受端口规则限制。"
 		items=()
@@ -315,7 +318,7 @@ act_whitelist() {
 		panel_option 1 "添加 IP 或网段（支持批量）"
 		panel_option 2 "删除白名单条目"
 		panel_option 3 "用编辑器打开"
-		panel_footer "返回防火墙管理"
+		panel_footer "返回防火墙"
 		read -r -p "  选择 [0-3] > " c || return
 		case "$c" in
 			1)
@@ -662,51 +665,50 @@ act_firewall() {
 	local choice ports line warning state boot state4 state6
 	nft list tables >/dev/null || { echo "无法访问 nftables。"; pause; return; }
 	while true; do
-		panel_start "防火墙管理"
+		panel_start "防火墙"
 		firewall_policy_load
 		panel_section "当前策略"
 		if firewall_running; then state="${C_G}运行中${C_0}"; else state="${C_Y}未就绪，请重新应用规则${C_0}"; fi
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="已开启"; else boot="未开启"; fi
 		panel_row " 防火墙 $state   开机恢复 $boot"
-		panel_row " 仅开放下列入站端口，保留已建立连接。"
+		panel_row " ${C_D}默认拒绝未放行的入站连接，保留已建立连接。${C_0}"
 		ports="$(firewall_ports)"
 		if [ -n "$ports" ]; then
+			panel_row " ${C_D}协议  端口     来源${C_0}"
 			while IFS= read -r line; do panel_row "$line"; done < <(printf '%s\n' "$ports" | awk '
-				$1 == "tcp" { tcp = tcp ts $2 ($3 != "" && $3 != "any" ? "(" $3 ")" : ""); ts = ", " }
-				$1 == "udp" { udp = udp us $2 ($3 != "" && $3 != "any" ? "(" $3 ")" : ""); us = ", " }
-				END { printf " TCP   %s\n UDP   %s\n", tcp ? tcp : "（无）", udp ? udp : "（无）" }
+				{ printf " %-5s %-8s %s\n", toupper($1), $2, ($3 != "" && $3 != "any" ? $3 : "所有来源") }
 			')
 		else panel_row " （配置缺失）"; fi
 		warning="$(firewall_check_conflicts 2>&1)" || true
 		if [ -n "$warning" ]; then
 			while IFS= read -r line; do panel_row "${C_Y}$line${C_0}"; done <<< "$warning"
 		fi
-		panel_row " 云安全组及容器转发规则需在对应平台管理。"
-		panel_section "端口放行"
+		panel_section "端口与协议"
 		panel_pair 1 "开放端口" 2 "关闭端口"
+		if [ "$fw_ipv4_in" = 1 ]; then state4="${C_G}已开启${C_0}"; else state4="${C_D}已关闭${C_0}"; fi
+		if [ "$fw_ipv6_in" = 1 ]; then state6="${C_G}已开启${C_0}"; else state6="${C_D}已关闭${C_0}"; fi
+		panel_pair 3 "IPv4 入站  $state4" 4 "IPv6 入站  $state6"
 		panel_section "IP 访问控制"
-		panel_pair 3 "查看封禁列表" 4 "封禁 IP"
-		panel_pair 5 "解封 IP" 6 "管理白名单"
+		panel_pair 5 "查看封禁列表" 6 "封禁 IP"
+		panel_pair 7 "解封 IP" 8 "管理白名单"
 		panel_section "规则维护"
-		panel_pair 7 "查看全部规则" 8 "重新应用规则"
-		panel_section "协议族"
-		if [ "$fw_ipv4_in" = 1 ]; then state4="${C_G}已开启${C_0}"; else state4="${C_R}已关闭${C_0}"; fi
-		if [ "$fw_ipv6_in" = 1 ]; then state6="${C_G}已开启${C_0}"; else state6="${C_R}已关闭${C_0}"; fi
-		panel_option 9 "IPv4 入站" "$state4"
-		panel_option 10 "IPv6 入站" "$state6"
+		panel_pair 9 "查看全部规则" 10 "重新应用规则"
+		echo
+		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
+		panel_row " ${C_D}云安全组及容器转发规则需在对应平台管理。${C_0}"
 		panel_footer "返回首页"
 		read -r -p "  选择 [0-10] > " choice || return
 		case "$choice" in
-			1) panel_title "防火墙管理 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
-			2) panel_title "防火墙管理 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
-			3) panel_title "防火墙管理 / 封禁列表"; act_banned ;;
-			4) panel_title "防火墙管理 / 封禁 IP"; act_ban ;;
-			5) panel_title "防火墙管理 / 解封 IP"; act_unban ;;
-			6) act_whitelist ;;
-			7) panel_title "防火墙管理 / 全部规则"; nft -a list ruleset; pause ;;
-			8) panel_title "防火墙管理 / 重新应用规则"; firewall_apply || echo "应用失败，请检查上方错误。"; pause ;;
-			9) panel_title "防火墙管理 / IPv4 入站"; firewall_toggle_family ipv4; pause ;;
-			10) panel_title "防火墙管理 / IPv6 入站"; firewall_toggle_family ipv6; pause ;;
+			1) panel_title "防火墙 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
+			2) panel_title "防火墙 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
+			3) panel_title "防火墙 / IPv4 入站"; firewall_toggle_family ipv4; pause ;;
+			4) panel_title "防火墙 / IPv6 入站"; firewall_toggle_family ipv6; pause ;;
+			5) panel_title "防火墙 / 封禁列表"; act_banned ;;
+			6) panel_title "防火墙 / 封禁 IP"; act_ban ;;
+			7) panel_title "防火墙 / 解封 IP"; act_unban ;;
+			8) act_whitelist ;;
+			9) panel_title "防火墙 / 全部规则"; nft -a list ruleset; pause ;;
+			10) panel_title "防火墙 / 重新应用规则"; firewall_apply || echo "应用失败，请检查上方错误。"; pause ;;
 			0) return ;;
 			*) echo "请输入 0–10 之间的菜单编号。"; pause ;;
 		esac
@@ -799,7 +801,7 @@ act_ssh_port() {
 	cur="$(ssh_current_ports)"
 	[ -n "$cur" ] || { echo "无法读取当前 SSH 端口，已取消。"; return 1; }
 	if [ "$(printf '%s\n' "$cur" | grep -c .)" -ne 1 ]; then
-		echo "当前 SSH 监听多个端口（$(printf '%s' "$cur" | tr '\n' ' ')），请先在防火墙管理中关闭不需要的端口再切换。"
+		echo "当前 SSH 监听多个端口（$(printf '%s' "$cur" | tr '\n' ' ')），请先在「防火墙」中关闭不需要的端口再切换。"
 		return 1
 	fi
 	echo "当前 SSH 端口：$cur"
@@ -827,7 +829,7 @@ act_ssh_port() {
 	if [ "$old_sources" != any ]; then
 		for src in $target_sources; do
 			if ! printf '%s\n' "$old_sources" | grep -qxF "$src"; then
-				echo "新端口已有不同来源的防火墙规则，请先在防火墙管理中调整。"
+				echo "新端口已有不同来源的防火墙规则，请先在「防火墙」中调整。"
 				return 1
 			fi
 		done
@@ -907,7 +909,7 @@ act_ssh_port() {
 		fail2ban-client reload >/dev/null 2>&1 || echo "fail2ban 重载失败，SSH 上报端口可能未生效。" >&2
 	fi
 	echo "新端口 $new 已开启，旧端口 $cur 仍监听。"
-	echo "请用新端口重新登录确认，然后到「防火墙管理」关闭旧端口。"
+	echo "请用新端口重新登录确认，然后到「防火墙」关闭旧端口。"
 }
 
 # ---- SSH 登录方式 ----
@@ -1236,39 +1238,42 @@ act_ssh_password() {
 act_ssh() {
 	local choice ports pw pk pw_display pk_display
 	while true; do
-		panel_start "SSH 管理"
+		panel_start "SSH 与登录"
 		panel_section "当前状态"
 		ports="$(ssh_current_ports)"
 		[ -n "$ports" ] || ports="无法读取"
 		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
 		pw="$(ssh_auth_state passwordauthentication)"
 		pk="$(ssh_auth_state pubkeyauthentication)"
-		case "$pw" in on) pw_display="${C_G}开${C_0}" ;; off) pw_display="${C_R}关${C_0}" ;; *) pw_display="${C_Y}未知${C_0}" ;; esac
-		case "$pk" in on) pk_display="${C_G}开${C_0}" ;; off) pk_display="${C_R}关${C_0}" ;; *) pk_display="${C_Y}未知${C_0}" ;; esac
+		case "$pw" in on) pw_display="${C_G}已开启${C_0}" ;; off) pw_display="${C_D}已关闭${C_0}" ;; *) pw_display="${C_Y}未知${C_0}" ;; esac
+		case "$pk" in on) pk_display="${C_G}已开启${C_0}" ;; off) pk_display="${C_D}已关闭${C_0}" ;; *) pk_display="${C_Y}未知${C_0}" ;; esac
 		panel_row " 全局密码认证 $pw_display   全局密钥认证 $pk_display"
 		if [ "$pw" = on ] && ! root_password_login_ready; then
-			panel_row " root 能否独立使用密码：未确认（可能受 SSH 策略限制）"
+			panel_row " ${C_Y}root 能否独立使用密码：未确认（可能受 SSH 策略限制）${C_0}"
 		fi
 		if [ "$pw" = off ] && [ "$(ssh_auth_state kbdinteractiveauthentication)" = on ]; then
-			panel_row " 键盘交互认证仍开启，可能仍允许密码"
+			panel_row " ${C_Y}键盘交互认证仍开启，可能仍允许密码${C_0}"
 		fi
-		panel_section "端口"
+		panel_section "连接设置"
 		panel_option 1 "修改 SSH 端口"
-		panel_section "登录方式"
+		panel_section "认证方式"
 		panel_option 2 "全局密码认证 开/关"
 		panel_option 3 "全局密钥认证 开/关"
-		panel_option 4 "添加公钥"
-		panel_option 5 "删除公钥"
+		panel_section "root 凭据"
+		panel_pair 4 "添加公钥" 5 "删除公钥"
 		panel_option 6 "修改 root 密码"
+		echo
+		panel_row " ${C_D}新端口验证登录后，再到防火墙关闭旧端口。${C_0}"
+		panel_row " ${C_D}关闭认证方式前，请确认备用登录方式可用。${C_0}"
 		panel_footer "返回首页"
 		read -r -p "  选择 [0-6] > " choice || return
 		case "$choice" in
-			1) panel_title "SSH 管理 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
-			2) panel_title "SSH 管理 / 密码登录"; act_ssh_auth passwordauthentication PasswordAuthentication "密码登录" || echo "未完成修改。"; pause ;;
-			3) panel_title "SSH 管理 / 密钥登录"; act_ssh_auth pubkeyauthentication PubkeyAuthentication "密钥登录" || echo "未完成修改。"; pause ;;
-			4) panel_title "SSH 管理 / 添加公钥"; act_ssh_key_add; pause ;;
-			5) panel_title "SSH 管理 / 删除公钥"; act_ssh_key_remove; pause ;;
-			6) panel_title "SSH 管理 / 修改 root 密码"; act_ssh_password; pause ;;
+			1) panel_title "SSH 与登录 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
+			2) panel_title "SSH 与登录 / 密码登录"; act_ssh_auth passwordauthentication PasswordAuthentication "密码登录" || echo "未完成修改。"; pause ;;
+			3) panel_title "SSH 与登录 / 密钥登录"; act_ssh_auth pubkeyauthentication PubkeyAuthentication "密钥登录" || echo "未完成修改。"; pause ;;
+			4) panel_title "SSH 与登录 / 添加公钥"; act_ssh_key_add; pause ;;
+			5) panel_title "SSH 与登录 / 删除公钥"; act_ssh_key_remove; pause ;;
+			6) panel_title "SSH 与登录 / 修改 root 密码"; act_ssh_password; pause ;;
 			0) return ;;
 			*) echo "请输入 0–6 之间的菜单编号。"; pause ;;
 		esac
@@ -1496,13 +1501,13 @@ act_uninstall() {
 act_intel() {
 	local choice
 	while true; do
-		panel_start "威胁情报"
+		panel_start "情报与上报"
 		panel_section "情报与上报状态"
 		if [ "$(reporting_state)" = on ]; then
 			if [ -s "$KEYFILE" ]; then panel_row " AbuseIPDB 自动上报：${C_G}已开启${C_0}"
 			else panel_row " AbuseIPDB 自动上报：${C_Y}等待配置 API Key${C_0}"; fi
 		else
-			panel_row " AbuseIPDB 自动上报：${C_Y}已关闭${C_0}"
+			panel_row " AbuseIPDB 自动上报：${C_D}已关闭${C_0}"
 		fi
 		panel_section "情报同步"
 		panel_option 1 "立即同步威胁情报"
@@ -1513,10 +1518,10 @@ act_intel() {
 		panel_footer "返回首页"
 		read -r -p "  选择 [0-4] > " choice || return
 		case "$choice" in
-			1) panel_title "威胁情报 / 同步情报"; act_sync ;;
-			2) panel_title "威胁情报 / 发送上报队列"; act_flush ;;
-			3) panel_title "威胁情报 / AbuseIPDB API Key"; act_key ;;
-			4) panel_title "威胁情报 / 自动上报"; act_toggle ;;
+			1) panel_title "情报与上报 / 同步情报"; act_sync ;;
+			2) panel_title "情报与上报 / 发送上报队列"; act_flush ;;
+			3) panel_title "情报与上报 / AbuseIPDB API Key"; act_key ;;
+			4) panel_title "情报与上报 / 自动上报"; act_toggle ;;
 			0) return ;;
 			*) echo "请输入 0–4 之间的菜单编号。"; pause ;;
 		esac
@@ -1549,13 +1554,13 @@ menu() {
 	local choice read_status
 	header
 	panel_section "功能导航"
-	panel_option 1 "运行概览" "服务状态 · 站点 · 防护任务"
-	panel_option 2 "站点与证书" "站点管理 · Cloudflare 证书"
-	panel_option 3 "防火墙管理" "端口 · IP 封禁/解封 · 白名单"
-	panel_option 4 "威胁情报" "情报同步 · 上报 · API 设置"
-	panel_option 5 "系统维护" "日志 · 更新 · 卸载"
-	panel_option 6 "SSH 管理" "修改监听端口"
-	panel_footer "退出面板" "每 30 分钟刷新状态"
+	panel_option 1 "运行概览"
+	panel_option 2 "站点与证书"
+	panel_option 3 "防火墙"
+	panel_option 4 "SSH 与登录"
+	panel_option 5 "情报与上报"
+	panel_option 6 "系统维护"
+	panel_footer "退出面板" "${C_D}首页每 30 分钟刷新${C_0}"
 	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 [0-6] > " choice
 	read_status=$?
 	case "$read_status" in
@@ -1568,9 +1573,9 @@ menu() {
 		1) act_status ;;
 		2) act_sites ;;
 		3) act_firewall ;;
-		4) act_intel ;;
-		5) act_system ;;
-		6) act_ssh ;;
+		4) act_ssh ;;
+		5) act_intel ;;
+		6) act_system ;;
 		0) exit 0 ;;
 		*) echo "请输入 0–6 之间的菜单编号。"; pause ;;
 	esac
