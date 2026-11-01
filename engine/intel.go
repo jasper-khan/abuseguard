@@ -116,7 +116,6 @@ func resolveCommit(c *Config, token string) (string, error) {
 	return "", fmt.Errorf("could not parse commit sha from %s", c.Intel.CommitURL)
 }
 
-
 // warnStaleIntel logs a warning if the existing intel list is older than
 // max_age. It never blocks the sync or refuses to use the list.
 func warnStaleIntel(c *Config) {
@@ -144,6 +143,7 @@ func warnStaleIntel(c *Config) {
 			age.Round(time.Hour), c.Intel.MaxAge)
 	}
 }
+
 // cmdSyncIntel refreshes intel.txt from the configured blocklist source.
 func cmdSyncIntel(c *Config) int {
 	warnStaleIntel(c)
