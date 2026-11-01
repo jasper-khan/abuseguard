@@ -16,7 +16,6 @@ type reportItem struct {
 	Window    string `json:"window"`
 	Transport string `json:"transport"`
 	Port      int    `json:"port"`
-	Mode      string `json:"mode"`
 	TS        string `json:"ts"`
 }
 

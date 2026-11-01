@@ -128,8 +128,8 @@ if [ -z "$MODE" ]; then
 		echo "  [0] 取消"
 		read -r -p "请选择: " a <&3; exec 3<&-
 		case "$a" in 1) MODE=conservative ;; 2) MODE=thorough ;; *) echo "已取消"; exit 0 ;; esac
-	fi
 fi
+	fi
 
 # --- ask about AbuseGuard-managed sites (only if any exist) -----------------
 if [ "$site_count" -gt 0 ] && [ -z "$KEEP_SITES" ]; then
@@ -149,8 +149,8 @@ if [ "$site_count" -gt 0 ] && [ -z "$KEEP_SITES" ]; then
 		read -r -p "请选择: " a <&3; exec 3<&-
 		case "$a" in 2) KEEP_SITES=drop ;; *) KEEP_SITES=keep ;; esac
 	fi
-fi
 [ -z "$KEEP_SITES" ] && KEEP_SITES=keep
+fi
 
 # --- confirm -----------------------------------------------------------------
 if [ "$YES" != 1 ] && [ "$DRY" != 1 ]; then
@@ -170,20 +170,21 @@ fi
 clean_caddyfile() {
 	[ -f "$CADDYFILE" ] || return 0
 	local drop_sites=0; [ "$KEEP_SITES" = drop ] && drop_sites=1
+	local strip_snippet=0; [ "$MODE" = thorough ] && strip_snippet=1
 	if [ "$DRY" = 1 ]; then echo "  would: 清理 $CADDYFILE（摘除 import abuseguard / snippet$([ "$drop_sites" = 1 ] && echo ' / import sites') / 自检站点块）"; return 0; fi
 	local tmp; tmp="$(mktemp)"
-	awk -v drop_sites="$drop_sites" '
+	awk -v drop_sites="$drop_sites" -v strip_snippet="$strip_snippet" '
 		/^[[:space:]]*http:\/\/127\.0\.0\.1:8080[[:space:]]*\{/ { insb=1; d=1; next }
 		insb==1 { o=gsub(/\{/,"{"); c=gsub(/\}/,"}"); d+=o-c; if (d<=0) insb=0; next }
-		/^[[:space:]]*import[[:space:]]+[^ ]*abuseguard\.caddy[[:space:]]*$/ { next }
+		strip_snippet == "1" && /^[[:space:]]*import[[:space:]]+[^ ]*abuseguard\.caddy[[:space:]]*$/ { next }
 		/^[[:space:]]*import[[:space:]]+[^ ]*\/sites\/\*\.caddy[[:space:]]*$/ { if (drop_sites) next; else { print; next } }
-		/^[[:space:]]*import[[:space:]]+abuseguard[[:space:]]*$/ { next }
+		strip_snippet == "1" && /^[[:space:]]*import[[:space:]]+abuseguard[[:space:]]*$/ { next }
 		{ print }
 	' "$CADDYFILE" > "$tmp" && cat "$tmp" > "$CADDYFILE"
 	remove_file "$tmp"
 }
-
-# strip `import abuseguard` from each managed site file, keeping the reverse proxy
+# strip `import abuseguard` from each managed site file (thorough mode only,
+# where the snippet file is removed and site files would otherwise break).
 clean_sites_keep() {
 	[ -d "$SITES_DIR" ] || return 0
 	local f
@@ -191,9 +192,11 @@ clean_sites_keep() {
 		[ -e "$f" ] || continue
 		[ "$(basename "$f")" = "_placeholder.caddy" ] && continue
 		if [ "$DRY" = 1 ]; then echo "  would: 从 $f 去掉 import abuseguard（保留反代）"; continue; fi
-		sed -i '/^[[:space:]]*import[[:space:]]\+abuseguard[[:space:]]*$/d' "$f"
+		sed -i "/^[[:space:]]*import[[:space:]]\+abuseguard[[:space:]]*\$/d" "$f"
 	done
 }
+
+
 
 # --- 1) stop + remove AbuseGuard's own components (both modes) ----------------
 log "停止并移除 AbuseGuard 组件"
@@ -222,12 +225,12 @@ remove_file "$PANEL_BIN"
 if [ -f "$LEGACY_PANEL_BIN" ] && head -n 2 "$LEGACY_PANEL_BIN" | grep -q 'AbuseGuard 控制面板'; then
 	remove_file "$LEGACY_PANEL_BIN"
 fi
-remove_file "$SNIPPET"
 
+if [ "$MODE" = thorough ] && [ "$KEEP_SITES" = keep ]; then
+	clean_sites_keep
+fi
 # --- 2) sites + Caddyfile ----------------------------------------------------
-if [ "$KEEP_SITES" = keep ]; then
-	clean_sites_keep            # de-protect panel sites, keep the reverse proxy
-else
+if [ "$KEEP_SITES" = drop ]; then
 	remove_owned_tree "$SITES_DIR" || exit 1
 fi
 clean_caddyfile                 # strip AbuseGuard's imports / self-test block
@@ -239,6 +242,7 @@ if [ "$MODE" = thorough ]; then
 		remove_file /etc/systemd/system/caddy.service
 	fi
 	[ "$m_caddy_bin" = 0 ]  && remove_file "$CADDY_BIN"
+	remove_file "$SNIPPET"
 	# only delete the Caddyfile if AbuseGuard created it (else we kept the user's, just cleaned)
 	if [ "$m_caddyfile" = 0 ]; then
 		remove_file "$CADDYFILE"
@@ -252,7 +256,8 @@ if [ "$MODE" = thorough ]; then
 		else
 			log "已保留 /var/lib/caddy（你原有的 Caddy 数据/证书目录）"
 		fi
-	fi
+	
+fi
 	remove_owned_tree "$CONF_DIR" || exit 1
 	remove_owned_tree "$STATE_DIR" || exit 1
 	# Only remove the log dir if AbuseGuard created it. A pre-existing
@@ -284,8 +289,9 @@ if [ "$MODE" = thorough ]; then
 			elif [ -d "$CADDY_ETC" ]; then
 				warn "保留 $CADDY_ETC（非空，其中的文件不是 AbuseGuard 创建的）：$(ls -A "$CADDY_ETC" | tr '\n' ' ')"
 			fi
-		fi
 	fi
+	
+fi
 	log "彻底卸载完成（按安装清单，只删了 AbuseGuard 安装的部分）。"
 else
 	log "保守卸载完成：已保留 Caddy、账户、配置；Caddyfile 中的 AbuseGuard 配置已摘除。"
@@ -301,8 +307,8 @@ if [ "$DRY" != 1 ] && [ -x "$CADDY_BIN" ] && [ -f "$CADDYFILE" ]; then
 	else
 		warn "清理后的 Caddyfile 未通过校验，已保留原样，请手动检查 $CADDYFILE（原始备份见 $CADDY_ETC/Caddyfile.pre-abuseguard，若存在）。"
 	fi
-fi
 
+fi
 # If a packaged Caddy unit exists, ours shadowed it and has now been removed;
 # systemd needs a nudge and the service needs re-enabling.
 if [ "$DRY" != 1 ] && [ -e /lib/systemd/system/caddy.service ]; then

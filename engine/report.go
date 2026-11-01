@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +12,7 @@ import (
 )
 
 type dedupeStore struct {
-	Entries map[string]string `json:"entries"` // sha256(ip) -> RFC3339 timestamp
+	Entries map[string]string `json:"entries"` // IP -> RFC3339 timestamp
 }
 
 type dailyUsage struct {
@@ -272,7 +270,7 @@ reportLoop:
 			skipped++
 			continue // never report a whitelisted IP
 		}
-		k := hashKey(it.IP)
+		k := it.IP
 		if ts, ok := dedupe.Entries[k]; ok {
 			if t, err := time.Parse(time.RFC3339, ts); err == nil && itemNow.Sub(t) < window {
 				remaining = append(remaining, raw[idx])
@@ -343,11 +341,6 @@ reportLoop:
 		return 1
 	}
 	return 0
-}
-
-func hashKey(ip string) string {
-	sum := sha256.Sum256([]byte(ip))
-	return hex.EncodeToString(sum[:])
 }
 
 func reportWindowLabel(raw string) (string, error) {

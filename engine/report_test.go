@@ -441,7 +441,7 @@ func TestReporterPersistsConfirmedProgressBeforeNextRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := dedupe.Entries[hashKey(firstIP)]; !ok {
+	if _, ok := dedupe.Entries[firstIP]; !ok {
 		t.Fatal("confirmed first report was not persisted in dedupe state")
 	}
 	daily, err := loadDaily(env.c)
@@ -505,7 +505,7 @@ func TestReporterRecoversCheckpointBeforeSending(t *testing.T) {
 		Version:   reportCheckpointVersion,
 		Remaining: raw[1:],
 		Dedupe: dedupeStore{Entries: map[string]string{
-			hashKey(firstIP): now.Format(time.RFC3339),
+			firstIP: now.Format(time.RFC3339),
 		}},
 		Daily: dailyUsage{Day: now.Format("2006-01-02"), Attempts: 1},
 	}
@@ -611,7 +611,7 @@ func TestReporterDefersSecondProfileForSameIP(t *testing.T) {
 	}
 
 	dedupe := &dedupeStore{Entries: map[string]string{
-		hashKey(ip): time.Now().UTC().Add(-16 * time.Minute).Format(time.RFC3339),
+		ip: time.Now().UTC().Add(-16 * time.Minute).Format(time.RFC3339),
 	}}
 	if err := saveJSON(dedupePath(env.c), dedupe, 0640); err != nil {
 		t.Fatal(err)
@@ -639,7 +639,7 @@ func TestReporterUsesCurrentTimeForEachDedupeDecision(t *testing.T) {
 
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := saveJSON(dedupePath(env.c), &dedupeStore{Entries: map[string]string{
-		hashKey(firstIP): start.Add(-30 * time.Second).Format(time.RFC3339),
+		firstIP: start.Add(-30 * time.Second).Format(time.RFC3339),
 	}}, 0640); err != nil {
 		t.Fatal(err)
 	}
@@ -681,10 +681,10 @@ func TestReporterUsesCurrentTimeForEachDedupeDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := dedupe.Entries[hashKey(secondIP)]; got != start.Add(70*time.Second).Format(time.RFC3339) {
+	if got := dedupe.Entries[secondIP]; got != start.Add(70*time.Second).Format(time.RFC3339) {
 		t.Fatalf("second IP dedupe timestamp=%q; want %q", got, start.Add(70*time.Second).Format(time.RFC3339))
 	}
-	if got := dedupe.Entries[hashKey(firstIP)]; got != start.Add(71*time.Second).Format(time.RFC3339) {
+	if got := dedupe.Entries[firstIP]; got != start.Add(71*time.Second).Format(time.RFC3339) {
 		t.Fatalf("first IP dedupe timestamp=%q; want %q", got, start.Add(71*time.Second).Format(time.RFC3339))
 	}
 	daily, err := loadDaily(env.c)
@@ -738,7 +738,7 @@ func TestReporterResetsDailyUsageAfterUtcMidnight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := dedupe.Entries[hashKey(ip)]; got != start.Add(2*time.Second).Format(time.RFC3339) {
+	if got := dedupe.Entries[ip]; got != start.Add(2*time.Second).Format(time.RFC3339) {
 		t.Fatalf("dedupe timestamp=%q; want %q", got, start.Add(2*time.Second).Format(time.RFC3339))
 	}
 }

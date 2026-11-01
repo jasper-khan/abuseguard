@@ -86,14 +86,13 @@ func runEnqueue(args []string) {
 	window := fs.String("window", "", "detection window")
 	transport := fs.String("transport", "", "transport")
 	port := fs.Int("port", 443, "target port")
-	mode := fs.String("mode", "auto", "mode")
 	fs.Parse(args)
 	if *ip == "" {
 		fatalf("enqueue: --ip required")
 	}
 	os.Exit(cmdEnqueue(mustConfig(), reportItem{
 		IP: *ip, Profile: *profile, Failures: *failures, Window: *window,
-		Transport: *transport, Port: *port, Mode: *mode,
+		Transport: *transport, Port: *port,
 	}))
 }
 
