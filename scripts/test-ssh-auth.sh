@@ -115,7 +115,7 @@ stat() {
 		*) return 1 ;;
 	esac
 }
-chpasswd() { printf 'chpasswd\n' >> "$TMP/calls"; [ "$CHPASSWD_FAIL" = 0 ]; }
+chpasswd() { cat >/dev/null; printf 'chpasswd\n' >> "$TMP/calls"; [ "$CHPASSWD_FAIL" = 0 ]; }
 passwd() { [ "$1" = -S ] && [ "$2" = root ] || return 1; printf 'root %s 01/01/2026 0 99999 7 -1\n' "$ROOT_PASSWORD_STATUS"; }
 pause() { :; }
 
@@ -401,6 +401,21 @@ if printf 'yes\n' | act_ssh_auth pubkeyauthentication PubkeyAuthentication 密�
 ROOT_PASSWORD_STATUS=P
 SSH_CONNECTION=""
 if root_password_login_ready; then fail 'missing connection was assumed safe'; fi
+
+# sshd -T 会把 prohibit-password 输出为 without-password：仍允许公钥，不允许密码。
+for root_policy in prohibit-password without-password; do
+	reset_all
+	ROOT_PERMIT_ROOT_LOGIN="$root_policy"
+	printf '%s user@host\n' "$valid_key" > "$SSH_AUTH_KEYS"
+	if root_password_login_ready; then fail "$root_policy was mistaken for root password access"; fi
+	if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then
+		:
+	else
+		fail "password shutdown rejected with working keys and $root_policy"
+	fi
+	[ "$(ssh_auth_state passwordauthentication)" = off ] || fail "$root_policy did not disable password authentication"
+	[ "$(ssh_auth_state pubkeyauthentication)" = on ] || fail "$root_policy changed public-key authentication"
+done
 
 # 如果当前连接的 Match 规则覆盖了面板，关闭必须回滚。
 reset_all

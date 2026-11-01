@@ -1018,7 +1018,7 @@ root_key_login_ready() {
 	config="$(ssh_root_config)" || return 1
 	root_login="$(printf '%s\n' "$config" | awk '$1 == "permitrootlogin" { print $2; exit }')"
 	pubkey_auth="$(printf '%s\n' "$config" | awk '$1 == "pubkeyauthentication" { print $2; exit }')"
-	case "$root_login" in yes|prohibit-password) ;; *) return 1 ;; esac
+	case "$root_login" in yes|prohibit-password|without-password) ;; *) return 1 ;; esac
 	[ "$pubkey_auth" = yes ] || return 1
 	ssh_auth_allows_single "$config" publickey || return 1
 	files="$(printf '%s\n' "$config" | awk '$1 == "authorizedkeysfile" { for (i=2; i<=NF; i++) printf " %s", $i; exit }')"
