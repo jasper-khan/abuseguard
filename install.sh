@@ -158,7 +158,7 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	AG_TMP="$(mktemp -d)"
 	trap 'cleanup_temp_tree "$AG_TMP" || true' EXIT
 	log "正在获取仓库 $ABUSEGUARD_REPO@$AG_REF ..."
-	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz" "$AG_TMP/repo.tar.gz" \
+	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz?v=$(date +%s)" "$AG_TMP/repo.tar.gz" \
 		|| die "自举下载失败（可设置 ABUSEGUARD_REPO / ABUSEGUARD_REF，或克隆仓库后运行 ./install.sh）。"
 	tar -xzf "$AG_TMP/repo.tar.gz" -C "$AG_TMP" --strip-components=1 \
 		|| die "自举解压失败。"
