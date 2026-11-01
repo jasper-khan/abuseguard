@@ -114,7 +114,7 @@ validation before it is applied.
 
 Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, the runtime status shows the current SSH port, and the home-screen ban count re-queries every jail every 30 minutes without requiring a menu action:
 
-The home screen shows only six category names. Section headings group related actions inside each category without adding another menu level. Enter `0` in a submenu to return to its parent. Cyan navigation, simple separators, and status colors keep the panel readable; disabled options are gray, and the background follows the SSH client's theme:
+The home screen shows only six category names. Section headings group related actions inside each category without adding another menu level. Enter `0` in a submenu to return to its parent. The panel uses cyan navigation, simple separators, and status colors. Supporting text, disabled states, and separators use the terminal's default foreground for both light and dark backgrounds; the background and navigation/status palette follow the SSH client's theme:
 
 | Home entry | Available actions |
 | --- | --- |

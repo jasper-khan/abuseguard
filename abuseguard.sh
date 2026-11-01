@@ -69,7 +69,8 @@ caddy_restart_active() {
 	[ "$(systemctl is-active caddy 2>/dev/null)" = active ]
 }
 
-C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[90m'; C_H=$'\033[1m'; C_0=$'\033[0m'
+# 辅助文字跟随终端默认前景色，避免固定亮灰色在浅色主题下难以辨认。
+C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[22;39m'; C_H=$'\033[1m'; C_0=$'\033[0m'
 PANEL_WIDTH=76
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
