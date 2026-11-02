@@ -45,6 +45,8 @@ sudo ./install.sh                 # 从最新 release 下载预编译引擎
 sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go）
 ```
 
+默认安装和面板更新会先确定 GitHub 最新已发布 release，再使用该版本的源码、配置和引擎；从克隆目录运行默认安装也遵循此规则。引擎在临时文件中通过校验和、启动及目标版本检查后才替换旧文件。`--from-source` 和 `ABUSEGUARD_ENGINE_BIN` 仍使用本地源码及配置。
+
 安装器是幂等的：已有的 config、whitelist、key 和无关 Caddy 配置都会保留。旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；主配置、已有站点和防护片段先在候选副本上处理，完整配置通过校验后才替换正式文件，替换失败会回滚。
 
 安装器会自动补齐 `fail2ban`、`rsyslog`、`nftables` 等运行依赖；`rsyslog` 为 Debian/Ubuntu 默认的 `sshd` jail 提供 `/var/log/auth.log`，AbuseGuard 的网站防护仍使用独立的 Caddy JSON 日志。已有 Caddy 服务中的 Cloudflare token 会安全写入 AbuseGuard 的 `/etc/caddy/.env`，不会在终端显示。

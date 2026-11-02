@@ -45,6 +45,8 @@ sudo ./install.sh                 # download the prebuilt engine from the latest
 sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
 ```
 
+Default installs and panel updates resolve the latest published GitHub release once, then use its source, configuration, and engine, including when launched from a clone. The staged engine must pass checksum, startup, and target-version checks before replacing the old binary. `--from-source` and `ABUSEGUARD_ENGINE_BIN` continue to use the local source and configuration.
+
 The installer is idempotent: existing config, whitelist, key, and unrelated Caddy configuration are preserved. Protected AbuseGuard sites from an older release, or sites written directly in the main Caddyfile, are migrated to the canonical `/etc/caddy/sites/<domain>.caddy` layout with `import abuseguard`. The main config, existing sites, and protection snippet are prepared in candidate copies and validated together before replacement; a failed replacement rolls back the originals.
 
 The installer supplies runtime dependencies such as `fail2ban`, `rsyslog`, and `nftables` automatically. `rsyslog` provides `/var/log/auth.log` for the Debian/Ubuntu default `sshd` jail; AbuseGuard's web protection continues to use its separate Caddy JSON log. A Cloudflare token already present in a running Caddy service is written safely to AbuseGuard's `/etc/caddy/.env` and is never printed.

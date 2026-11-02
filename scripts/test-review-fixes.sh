@@ -50,6 +50,7 @@ cleanup() {
 	rm -f -- "$WHITELIST_EXPECTED"
 	rm -f -- "$CONF_TEST/whitelist"
 	rmdir -- "$CONF_TEST" 2>/dev/null || true
+	rmdir -- "$TMP/bootstrap" 2>/dev/null || true
 	rmdir -- "$TMP"
 }
 trap cleanup EXIT
@@ -71,6 +72,8 @@ fail() {
 # The generic installer helper must stage, verify, probe, and only then replace.
 extract_function verify_sha256 "$ROOT/install.sh" > "$FUNCTIONS"
 extract_function install_release_binary "$ROOT/install.sh" >> "$FUNCTIONS"
+extract_function latest_release_tag "$ROOT/install.sh" >> "$FUNCTIONS"
+extract_function release_asset "$ROOT/install.sh" >> "$FUNCTIONS"
 # shellcheck disable=SC1090
 source "$FUNCTIONS"
 log() { :; }
@@ -84,6 +87,57 @@ gh_fetch() {
 write_sum() {
 	sha256sum "$1" | awk -v name=test-name '{print $1 "  " name}' > "$SUMS_FILE"
 }
+
+# Resolve latest once, then use the same tag even if latest moves meanwhile.
+ABUSEGUARD_REPO=jasper-khan/abuseguard
+ABUSEGUARD_MIRROR=""
+AG_GH_MIRRORS=https://mirror.example/
+curl() { printf '%s' "$LATEST_URL"; return "${CURL_RESULT:-0}"; }
+LATEST_URL="https://github.com/$ABUSEGUARD_REPO/releases/tag/v0.3.33"
+RELEASE_TAG="$(latest_release_tag)" || fail "latest release was not resolved"
+[ "$RELEASE_TAG" = v0.3.33 ] || fail "wrong release tag"
+TARGET_VERSION=0.3.33
+LATEST_URL="https://github.com/$ABUSEGUARD_REPO/releases/tag/v0.3.34"
+[ "$(release_asset test-name)" = "https://github.com/$ABUSEGUARD_REPO/releases/download/v0.3.33/test-name?v=0.3.33" ] \
+	|| fail "asset download followed a moving latest release"
+LATEST_URL="https://github.com/$ABUSEGUARD_REPO/releases"
+if latest_release_tag; then fail "missing release tag was accepted"; fi
+CURL_RESULT=1
+if latest_release_tag; then fail "failed latest lookup was accepted"; fi
+curl() {
+	case "${!#}" in
+		"https://mirror.example/https://github.com/$ABUSEGUARD_REPO/releases/latest")
+			printf 'https://mirror.example/https://github.com/%s/releases/tag/v0.3.33' "$ABUSEGUARD_REPO" ;;
+		*) return 1 ;;
+	esac
+}
+[ "$(latest_release_tag)" = v0.3.33 ] || fail "latest lookup did not fall back to the mirror"
+unset -f curl
+
+# Exercise the actual bootstrap with a local checkout present. It must still
+# choose release source, and pass the selected tag into the child installer.
+mkdir "$TMP/bootstrap"
+(
+	SRC_DIR="$ROOT"
+	FROM_SOURCE=0
+	unset ABUSEGUARD_RELEASE_TAG ABUSEGUARD_ENGINE_BIN
+	latest_release_tag() { printf v0.3.33; }
+	mktemp() { printf '%s\n' "$TMP/bootstrap"; }
+	cleanup_temp_tree() { :; }
+	gh_fetch() {
+		case "$1" in "https://github.com/$ABUSEGUARD_REPO/archive/refs/tags/v0.3.33.tar.gz?v="*) return 0 ;; esac
+		fail "bootstrap did not select the release archive"
+	}
+	tar() { :; }
+	bash() {
+		[ "$ABUSEGUARD_RELEASE_TAG" = v0.3.33 ] || fail "child installer lost the selected release"
+		[ "$1" = "$TMP/bootstrap/install.sh" ] || fail "wrong child installer"
+	}
+	die() { fail "$*"; }
+	source <(awk '/^RELEASE_TAG=/{printing=1} /^# --- OS /{exit} printing {print}' "$ROOT/install.sh")
+	fail "default install used the local checkout"
+) || fail "release bootstrap failed"
+rmdir "$TMP/bootstrap"
 
 printf '#!/usr/bin/env bash\nprintf "old\\n"\n' > "$OLD_BIN"
 cp -- "$OLD_BIN" "$OLD_EXPECTED"
@@ -114,9 +168,18 @@ cmp "$OLD_EXPECTED" "$OLD_BIN" || fail "startup-check failure replaced the old b
 
 write_sum "$GOOD_BIN"
 DOWNLOAD_SOURCE="$GOOD_BIN"
+if install_release_binary test-url "$OLD_BIN" test-name test-label 0.3.33; then
+	fail "wrong engine version was accepted"
+fi
+cmp "$OLD_EXPECTED" "$OLD_BIN" || fail "version mismatch replaced the old binary"
 install_release_binary test-url "$OLD_BIN" test-name test-label \
 	|| fail "valid binary was not installed"
 [ "$("$OLD_BIN" version)" = new ] || fail "valid binary did not replace the old binary"
+printf '#!/usr/bin/env bash\nprintf "abuseguard-engine 0.3.33\\n"\n' > "$GOOD_BIN"
+write_sum "$GOOD_BIN"
+install_release_binary test-url "$OLD_BIN" test-name test-label 0.3.33 \
+	|| fail "matching engine version was rejected"
+[ "$("$OLD_BIN" version)" = 'abuseguard-engine 0.3.33' ] || fail "matching engine was not installed"
 find "$TMP" -maxdepth 1 -name '.*.tmp.*' -print -quit | grep -q . \
 	&& fail "installer left a staged binary behind"
 grep -q 'install_release_binary .*ENGINE_BIN' "$ROOT/install.sh" \
@@ -209,8 +272,17 @@ export TOKEN_CAPTURE
 SYSTEMCTL_RELOAD_RC=0
 SYSTEMCTL_RESTART_RC=0
 SYSTEMCTL_ACTIVE_RC=0
+RESTORE_SUCCEEDS=0
 systemctl() {
 	printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+	# In recovery cases, the first restart fails and a second one can succeed
+	# only after the original files are back in place.
+	if [ "$RESTORE_SUCCEEDS" = 1 ] && [ "$(grep -c '^restart caddy$' "$SYSTEMCTL_LOG")" -ge 2 ]; then
+		cmp -s "$CADDY_ENV_EXPECTED" "$CADDY_ENV_TEST" || return 1
+		[ ! -e "$SITES_TEST/example.com.caddy" ] || return 1
+		if [ -e "$SITE_EXPECTED" ]; then cmp -s "$SITE_EXPECTED" "$SITES_TEST/existing.example.com.caddy" || return 1; fi
+		case "$*" in 'restart caddy') return 0 ;; 'is-active caddy') echo active; return 0 ;; esac
+	fi
 	case "$*" in
 		"reload caddy") return "$SYSTEMCTL_RELOAD_RC" ;;
 		"restart caddy") return "$SYSTEMCTL_RESTART_RC" ;;
@@ -224,6 +296,7 @@ clear() { :; }
 panel_start() { :; }
 panel_title() { :; }
 panel_section() { :; }
+panel_sep() { :; }
 panel_row() { :; }
 panel_option() { :; }
 panel_footer() { :; }
@@ -250,6 +323,7 @@ grep -q '^restart caddy$' "$SYSTEMCTL_LOG" && fail "token validation failure res
 reset_caddy_env
 CADDY_VALIDATE_RC=0
 SYSTEMCTL_RESTART_RC=1
+RESTORE_SUCCEEDS=1
 : > "$SYSTEMCTL_LOG"
 if token_output="$(act_cftoken <<< 'new-token' 2>&1)"; then
 	fail "token restart failure was accepted"
@@ -258,8 +332,11 @@ cmp "$CADDY_ENV_EXPECTED" "$CADDY_ENV_TEST" || fail "token restart failure did n
 case "$token_output" in *"已保存 token"*) fail "token restart failure displayed success" ;; esac
 grep -q '^restart caddy$' "$SYSTEMCTL_LOG" || fail "token update did not explicitly restart caddy"
 grep -q '^reload caddy$' "$SYSTEMCTL_LOG" && fail "token update used reload"
+[ "$(grep -c '^restart caddy$' "$SYSTEMCTL_LOG")" -eq 2 ] || fail "token rollback did not restart the old service"
+case "$token_output" in *"Caddy 已恢复运行"*) ;; *) fail "token rollback did not confirm service recovery" ;; esac
 
 reset_caddy_env
+RESTORE_SUCCEEDS=0
 SYSTEMCTL_RESTART_RC=0
 SYSTEMCTL_ACTIVE_RC=1
 : > "$SYSTEMCTL_LOG"
@@ -269,6 +346,7 @@ fi
 cmp "$CADDY_ENV_EXPECTED" "$CADDY_ENV_TEST" || fail "inactive caddy did not restore .env"
 case "$token_output" in *"已保存 token"*) fail "inactive caddy displayed token success" ;; esac
 grep -q '^is-active caddy$' "$SYSTEMCTL_LOG" || fail "token update did not verify caddy active state"
+case "$token_output" in *"Caddy 服务未恢复"*) ;; *) fail "failed service recovery was not reported" ;; esac
 
 reset_caddy_env
 SYSTEMCTL_ACTIVE_RC=0
@@ -296,11 +374,15 @@ grep -q '^restart caddy$' "$SYSTEMCTL_LOG" || fail "site update did not fall bac
 
 rm -f -- "$SITES_TEST/example.com.caddy"
 SYSTEMCTL_RESTART_RC=1
+RESTORE_SUCCEEDS=1
+reset_caddy_env
 : > "$SYSTEMCTL_LOG"
 site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)"
 [ ! -e "$SITES_TEST/example.com.caddy" ] || fail "failed site add kept the new site"
 case "$site_output" in *"已添加 example.com"*) fail "failed site add displayed success" ;; esac
 case "$site_output" in *"新站点配置已移除"*) ;; *) fail "failed site add did not report rollback" ;; esac
+[ "$(grep -c '^restart caddy$' "$SYSTEMCTL_LOG")" -eq 2 ] || fail "site add rollback did not restart the old service"
+case "$site_output" in *"Caddy 已恢复运行"*) ;; *) fail "site add rollback did not recover the service" ;; esac
 
 printf 'existing.example.com {\n\treverse_proxy localhost:8080\n}\n' > "$SITES_TEST/existing.example.com.caddy"
 cp -- "$SITES_TEST/existing.example.com.caddy" "$SITE_EXPECTED"
@@ -311,5 +393,7 @@ site_output="$(printf '2\n1\n0\n' | act_sites 2>&1)"
 cmp "$SITE_EXPECTED" "$SITES_TEST/existing.example.com.caddy" || fail "failed site delete did not restore the site"
 case "$site_output" in *"已删除 existing.example.com"*) fail "failed site delete displayed success" ;; esac
 case "$site_output" in *"已恢复原站点配置"*) ;; *) fail "failed site delete did not report rollback" ;; esac
+[ "$(grep -c '^restart caddy$' "$SYSTEMCTL_LOG")" -eq 2 ] || fail "site delete rollback did not restart the old service"
+case "$site_output" in *"Caddy 已恢复运行"*) ;; *) fail "site delete rollback did not recover the service" ;; esac
 
 echo "review fix tests: pass"

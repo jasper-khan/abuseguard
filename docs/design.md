@@ -83,6 +83,8 @@ Bans/reports target Caddy's `client_ip`, so Caddy must trust the edge proxy (`tr
 
 Prebuilt binaries (engine + cloudflare-enabled Caddy) ship from the repo's GitHub release. Because downloads may traverse third-party GitHub proxies (the mainland-China fallback), `install.sh` verifies each binary against the release `SHA256SUMS.txt`, fetching that sums file over every available route (direct GitHub first, then the mirror chain, with retries). Verification is mandatory: if the sums cannot be obtained, or a checksum is missing or mismatched, the install aborts rather than proceeding unverified. Each download is staged beside its destination; checksum, executable mode, and a `version` startup check must pass before an atomic replacement, so a failed update keeps the installed binary. The sums are fetched lazily, only when a binary is actually downloaded. This defeats a passive/caching mirror; a single forced mirror carrying both the sums and the binaries is outside the guarantee. `--from-source` and a caller-supplied `ABUSEGUARD_ENGINE_BIN` skip verification (locally trusted).
 
+Default installs and panel updates resolve the latest published release once, then bootstrap from that tag and fetch its assets and checksums using tag-specific URLs. The staged engine must report the expected version before replacing the installed binary. Explicit local source/preset-binary installs keep using the local checkout.
+
 An engine is built only for a version tag and remains immutable under that release. Scheduled/manual refreshes download those existing engine assets, rebuild only Caddy against upstream, and regenerate the combined checksums plus metadata while preserving engine provenance.
 
 ## Non-goals

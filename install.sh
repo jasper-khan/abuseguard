@@ -83,6 +83,28 @@ log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Resolve once before changing the host; bootstrap and assets share this tag.
+# The redirect avoids requiring jq before dependencies have been installed.
+latest_release_tag() {
+	local url tag pfx
+	local -a prefixes
+	case "$ABUSEGUARD_MIRROR" in
+		""|0|off|no) prefixes=("" $AG_GH_MIRRORS) ;;
+		cn|1|yes|on) prefixes=($AG_GH_MIRRORS) ;;
+		*) prefixes=("$ABUSEGUARD_MIRROR") ;;
+	esac
+	for pfx in "${prefixes[@]}"; do
+		url="$(curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null -w '%{url_effective}' \
+			"${pfx}https://github.com/$ABUSEGUARD_REPO/releases/latest")" || continue
+		case "$url" in *"https://github.com/$ABUSEGUARD_REPO/releases/tag/"*) ;; *) continue ;; esac
+		tag="${url##*/}"
+		[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+		printf '%s' "$tag"
+		return 0
+	done
+	return 1
+}
+
 # detect_ssh_port -- print the TCP port sshd actually listens on. Prefer the
 # live listener (covers custom and socket-activated ports), fall back to the
 # effective sshd config. Prints nothing when neither source is usable.
@@ -149,16 +171,24 @@ cleanup_temp_tree() {
 [ "$(id -u)" = "0" ] || die "请以 root 运行（sudo）。"
 
 # --- self-bootstrap ----------------------------------------------------------
-# When run detached from the repo (e.g. `curl ... install.sh | bash`), the
-# asset/engine trees are missing next to this script. Fetch the repo tarball
-# into a temp dir and re-exec from there so the one-command install works.
-if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
+# Default installs, including those from a clone, use the latest published
+# release. Only explicit source/preset-binary installs use the local checkout.
+RELEASE_TAG="${ABUSEGUARD_RELEASE_TAG:-}"
+unset ABUSEGUARD_RELEASE_TAG
+fetch_release=0
+if [ "$FROM_SOURCE" = 0 ] && [ -z "${ABUSEGUARD_ENGINE_BIN:-}" ] && [ -z "$RELEASE_TAG" ]; then
+	RELEASE_TAG="$(latest_release_tag)" || die "无法确定最新 release，安装未开始。请检查网络后重试。"
+	fetch_release=1
+fi
+if [ "$fetch_release" = 1 ] || [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	command -v tar >/dev/null 2>&1 || die "自举需要 tar 命令。"
 	AG_REF="${ABUSEGUARD_REF:-main}"
+	archive_ref="heads/$AG_REF"
+	if [ -n "$RELEASE_TAG" ]; then AG_REF="$RELEASE_TAG"; archive_ref="tags/$RELEASE_TAG"; fi
 	AG_TMP="$(mktemp -d)"
 	trap 'cleanup_temp_tree "$AG_TMP" || true' EXIT
 	log "正在获取仓库 $ABUSEGUARD_REPO@$AG_REF ..."
-	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/heads/$AG_REF.tar.gz?v=$(date +%s)" "$AG_TMP/repo.tar.gz" \
+	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/$archive_ref.tar.gz?v=$(date +%s)" "$AG_TMP/repo.tar.gz" \
 		|| die "自举下载失败（可设置 ABUSEGUARD_REPO / ABUSEGUARD_REF，或克隆仓库后运行 ./install.sh）。"
 	tar -xzf "$AG_TMP/repo.tar.gz" -C "$AG_TMP" --strip-components=1 \
 		|| die "自举解压失败。"
@@ -166,12 +196,15 @@ if [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	export ABUSEGUARD_REPO ABUSEGUARD_REF
 	# Run (not exec) the unpacked installer so the EXIT trap above still fires
 	# and cleans the temp checkout; propagate its exit code.
-	bash "$AG_TMP/install.sh" "$@"
+	ABUSEGUARD_RELEASE_TAG="$RELEASE_TAG" bash "$AG_TMP/install.sh" "$@"
 	exit $?
 fi
 
 TARGET_VERSION="$(tr -d '[:space:]' < "$SRC_DIR/VERSION" 2>/dev/null || true)"
 [ -n "$TARGET_VERSION" ] || TARGET_VERSION=dev
+if [ -n "$RELEASE_TAG" ] && [ "$RELEASE_TAG" != "v$TARGET_VERSION" ]; then
+	die "release 源码版本不匹配：$RELEASE_TAG / $TARGET_VERSION。"
+fi
 
 # --- OS + arch guard ---------------------------------------------------------
 . /etc/os-release 2>/dev/null || die "无法读取 /etc/os-release。"
@@ -241,13 +274,15 @@ EOF
 	log "已记录安装清单（供卸载时对称回滚）"
 fi
 
-# release_asset NAME -- URL of a latest-release asset. The version query is a
+# release_asset NAME -- URL of an asset from the selected release. The query is a
 # cache buster: GitHub ignores it, but download mirrors key their cache on the
 # full URL, so they stop serving a stale copy cached under the previous
 # release (a checksum mismatch that aborted installs).
 release_asset() {
-	printf 'https://github.com/%s/releases/latest/download/%s?v=%s' \
-		"$ABUSEGUARD_REPO" "$1" "${TARGET_VERSION:-dev}"
+	local route=latest/download
+	[ -z "${RELEASE_TAG:-}" ] || route="download/$RELEASE_TAG"
+	printf 'https://github.com/%s/releases/%s/%s?v=%s' \
+		"$ABUSEGUARD_REPO" "$route" "$1" "${TARGET_VERSION:-dev}"
 }
 
 # --- integrity: verify downloaded binaries against the release SHA256SUMS -----
@@ -290,8 +325,8 @@ verify_sha256() {  # FILE BASENAME -- return failure unless the release checksum
 # Stage a release binary beside its destination, then verify and probe it before
 # an atomic rename. A failed download, checksum, or startup check leaves the
 # currently installed binary untouched.
-install_release_binary() {  # URL DEST BASENAME LABEL
-	local url="$1" dest="$2" fn="$3" label="$4" tmp
+install_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
+	local url="$1" dest="$2" fn="$3" label="$4" expected="${5:-}" tmp version_output
 	sums_require
 	tmp="$(mktemp "$(dirname "$dest")/.${fn}.tmp.XXXXXX")" \
 		|| { warn "$label：无法创建临时下载文件。"; return 1; }
@@ -304,9 +339,14 @@ install_release_binary() {  # URL DEST BASENAME LABEL
 		rm -f -- "$tmp"
 		return 1
 	fi
-	if ! chmod 0755 "$tmp" || ! "$tmp" version >/dev/null 2>&1; then
+	if ! chmod 0755 "$tmp" || ! version_output="$("$tmp" version 2>/dev/null)"; then
 		rm -f -- "$tmp"
 		warn "$label 启动检查失败，保留当前版本。"
+		return 1
+	fi
+	if [ -n "$expected" ] && [ "$(awk 'NR == 1 { print $2 }' <<< "$version_output")" != "$expected" ]; then
+		rm -f -- "$tmp"
+		warn "$label 版本不匹配（需要 $expected），保留当前版本。"
 		return 1
 	fi
 	if ! mv -f -- "$tmp" "$dest"; then
@@ -334,7 +374,7 @@ install_engine() {
 	local fn="caddy-abuseguard-linux-$ARCH"
 	local url; url="$(release_asset "$fn")"
 	log "正在下载引擎（linux-$ARCH，自动选择线路，稍候）..."
-	install_release_binary "$url" "$ENGINE_BIN" "$fn" "引擎" \
+	install_release_binary "$url" "$ENGINE_BIN" "$fn" "引擎" "$TARGET_VERSION" \
 		|| die "引擎下载、校验或启动检查失败。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
 }
 install_engine
