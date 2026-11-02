@@ -71,17 +71,14 @@ caddy_restart_active() {
 
 # 辅助文字跟随终端默认前景色，避免固定亮灰色在浅色主题下难以辨认。
 C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[22;39m'; C_H=$'\033[1m'; C_0=$'\033[0m'
-C_BAR_BG=$'\033[100m'; C_BAR_FG=$'\033[97m'; C_BAR_MUTED=$'\033[37m'
-PILL_G=$'\033[42;30m'; PILL_Y=$'\033[43;30m'; PILL_R=$'\033[41;97m'
 PANEL_WIDTH=76
-PANEL_VERSION=''
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
-panel_line() {
+panel_sep() {
 	local fill
 	printf -v fill '%*s' "$((PANEL_WIDTH - 4))" ''
-	printf '  %s%s%s\n' "$C_D" "${fill// /─}" "$C_0"
+	printf '  %s\n' "${fill// /=}"
 }
 
 # 长文本按终端列宽换行：汉字和全角标点占两列，ANSI 颜色不占列。
@@ -124,7 +121,7 @@ panel_width() {
 panel_pad() {
 	local text="$1" target="$2" width pad
 	width=$(panel_width "$text")
-	width=$((target - width)); [ "$width" -gt 0 ] || width=1
+	width=$((target - width)); [ "$width" -gt 0 ] || width=0
 	printf -v pad '%*s' "$width" ''
 	printf '%s%s' "$text" "$pad"
 }
@@ -139,87 +136,32 @@ thousands() {
 	printf '%s%s' "$n" "$out"
 }
 
-panel_rule() {
-	local text="$1" target="$2" char="${3:- }" width pad
-	width=$(panel_width "$text")
-	pad=$((target - width)); [ "$pad" -gt 0 ] || pad=0
+panel_center() {
+	local width pad
+	width=$(panel_width "$1")
+	pad=$(((PANEL_WIDTH - 4 - width) / 2)); [ "$pad" -gt 0 ] || pad=0
 	printf -v pad '%*s' "$pad" ''
-	printf '%s%s' "$text" "${pad// /$char}"
-}
-
-panel_kpi_top() { printf '╭%s╮' "$(panel_rule "─ ${C_B}$1${C_0} " 21 '─')"; }
-panel_kpi_mid() { printf '│ %s │' "$(panel_pad "$1" 19)"; }
-panel_kpi_bot() { printf '╰%s╯' "$(panel_rule '' 21 '─')"; }
-
-panel_kpi_row() {
-	panel_row "$(panel_kpi_top "$1") $(panel_kpi_top "$4") $(panel_kpi_top "$7")"
-	panel_row "$(panel_kpi_mid "$2") $(panel_kpi_mid "$5") $(panel_kpi_mid "$8")"
-	panel_row "$(panel_kpi_mid "$3") $(panel_kpi_mid "$6") $(panel_kpi_mid "$9")"
-	panel_row "$(panel_kpi_bot) $(panel_kpi_bot) $(panel_kpi_bot)"
-}
-
-panel_launch_top() { printf '╭%s╮' "$(panel_rule "─ ${C_B}[$1]${C_0} ${C_H}$2${C_0} " 21 '─')"; }
-panel_launch_mid() { printf '│ %s │' "$(panel_pad "$1" 19)"; }
-panel_launch_bot() { printf '╰%s╯' "$(panel_rule '' 21 '─')"; }
-
-panel_launch_row() {
-	panel_row "$(panel_launch_top "$1" "$2") $(panel_launch_top "$4" "$5") $(panel_launch_top "$7" "$8")"
-	panel_row "$(panel_launch_mid "$3") $(panel_launch_mid "$6") $(panel_launch_mid "$9")"
-	panel_row "$(panel_launch_bot) $(panel_launch_bot) $(panel_launch_bot)"
-}
-
-panel_pill() {
-	printf '%s %s %s' "$1" "$2" "$C_0"
-}
-
-panel_bar_split() {
-	local left="$1" right="$2" gap
-	gap=$((PANEL_WIDTH - 4 - $(panel_width "$left") - $(panel_width "$right")))
-	[ "$gap" -gt 0 ] || gap=1
-	printf -v gap '%*s' "$gap" ''
-	printf '  %s%s%s%s%s%s\n' "$C_BAR_BG" "$C_BAR_FG" "$left" "$gap" "$right" "$C_0"
-}
-
-panel_home_start() {
-	clear 2>/dev/null || true
-	panel_bar_split "${C_B}AbuseGuard${C_BAR_FG} · 控制中心" "${C_BAR_MUTED}v${PANEL_VERSION} "
-	panel_line
+	printf '  %s%s\n' "$pad" "$1"
 }
 
 panel_start() {
-	local ver=''
 	clear 2>/dev/null || true
-	[ -z "$PANEL_VERSION" ] || ver="${C_BAR_MUTED}v${PANEL_VERSION} "
-	panel_bar_split "${C_B}AbuseGuard${C_BAR_FG} · 控制中心 / ${C_H}$1" "$ver"
-	panel_line
+	panel_sep
+	panel_center "${C_H}$1${C_0}"
+	panel_sep
 }
 
 panel_pause() {
-	panel_line
-	panel_bar_split "${C_BAR_FG}按回车返回" "${C_BAR_MUTED}查看完毕 "
-	echo
-	read -r -p "  " _
+	panel_sep
+	read -r -p "  按回车返回..." _
 }
+
 panel_title() { panel_start "$1"; echo; }
-panel_section() { echo; panel_row " ${C_B}│${C_0} ${C_H}$1${C_0}"; }
-
-panel_option() {
-	local width gap=''
-	if [ -n "${3:-}" ]; then
-		width=$((36 - $(panel_width " [$1] $2")))
-		[ "$width" -gt 0 ] || width=1
-		printf -v gap '%*s' "$width" ''
-	fi
-	panel_row " ${C_B}[$1]${C_0} ${C_H}$2${C_0}${gap}${3:-}"
-}
-
-panel_pair() { panel_option "$1" "$2" "${C_B}[$3]${C_0} ${C_H}$4${C_0}"; }
-
-panel_footer() {
-	local hint="${2:-输入编号后回车}"
-	panel_line
-	panel_bar_split "${C_B}[0]${C_BAR_FG} ${C_H}$1" "${C_BAR_MUTED}${hint} "
-}
+panel_kv() { panel_row " $(panel_pad "$1" 8) : $2"; }
+panel_section() { echo; panel_row " ${C_H}$1${C_0}"; }
+panel_option() { panel_row " $1. $2"; }
+panel_pair() { panel_option "$1" "$2"; panel_option "$3" "$4"; }
+panel_footer() { panel_option 0 "$1"; panel_sep; }
 
 count_banned() {
 	local total=0 n
@@ -248,9 +190,7 @@ intel_age_h() {
 
 header() {
 	local caddy f2b intel banned rep age version ssh_ports sites
-	local firewall_ok=0 issue_text='' protect_bg protect_text protect_detail
-	local report_bg='' report_text='' ban_value ban_detail intel_value intel_detail
-	local access_value access_detail fw_badge='' intel_badge=''
+	local firewall_ok=0 issue_text='' protect_value report_value intel_note
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
@@ -260,9 +200,8 @@ header() {
 	ssh_ports="${ssh_ports% }"
 	version="$("$ENGINE" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
 	[ -n "$version" ] || version="?"
-	PANEL_VERSION="$version"
 	sites="$(sites_lines | wc -l | tr -d ' ')"
-	if firewall_running; then firewall_ok=1; else fw_badge=" ${C_Y}!${C_0}"; fi
+	if firewall_running; then firewall_ok=1; fi
 
 	if [ "$caddy" != active ]; then issue_text='Caddy 未运行'; fi
 	if [ "$f2b" != active ]; then
@@ -274,50 +213,32 @@ header() {
 		issue_text+='防火墙未就绪'
 	fi
 	if [ -z "$issue_text" ]; then
-		protect_bg="$PILL_G"; protect_text='● 正常'
-		protect_detail="${C_D}Caddy · Fail2Ban · 防火墙${C_0}"
+		protect_value="${C_G}正常${C_0}（Caddy / Fail2Ban / 防火墙）"
 	else
-		protect_bg="$PILL_R"; protect_text='● 异常'
-		protect_detail="${C_R}${issue_text}${C_0}"
+		protect_value="${C_R}异常${C_0}（${issue_text}）"
 	fi
 
 	if [ "$rep" = on ]; then
-		if [ -s "$KEYFILE" ]; then report_bg="$PILL_G"; report_text='已开启'
-		else
-			report_bg="$PILL_Y"; report_text='未配置'
-			intel_badge=" ${C_Y}!${C_0}"
+		if [ -s "$KEYFILE" ]; then report_value="${C_G}已开启${C_0}"
+		else report_value="${C_Y}未配置 API Key${C_0}"
 		fi
 	else
-		report_text='已关闭'
-	fi
-	if [ -n "$report_bg" ]; then
-		ban_detail="${C_D}上报${C_0} $(panel_pill "$report_bg" "$report_text")"
-	else
-		ban_detail="${C_D}上报 已关闭${C_0}"
+		report_value='已关闭'
 	fi
 	age="$(intel_age_h)"
-	if [ -z "$age" ]; then
-		intel_detail="${C_Y}尚未同步${C_0}"
-		intel_badge=" ${C_Y}!${C_0}"
-	elif [ "$age" -gt 12 ]; then
-		intel_detail="${C_Y}${age}h 前 · 需检查${C_0}"
-		intel_badge=" ${C_Y}!${C_0}"
-	else
-		intel_detail="${C_D}${age}h 前同步${C_0}"
+	if [ -z "$age" ]; then intel_note="${C_Y}尚未同步${C_0}"
+	elif [ "$age" -gt 12 ]; then intel_note="${C_Y}${age} 小时前，建议检查${C_0}"
+	else intel_note="${age} 小时前同步"
 	fi
 
-	ban_value="${C_H}$(thousands "$banned")${C_0} 个 IP"
-	intel_value="${C_H}$(thousands "$intel")${C_0} 条"
-	access_value="${C_D}SSH${C_0} ${C_H}${ssh_ports}${C_0}"
-	access_detail="${C_D}站点${C_0} ${C_H}${sites}${C_0}"
-
-	panel_home_start
-	panel_row " $(panel_pill "$protect_bg" "$protect_text")  ${protect_detail}"
-	panel_kpi_row "封禁与上报" "$ban_value" "$ban_detail" "情报" "$intel_value" "$intel_detail" "接入" "$access_value" "$access_detail"
-	panel_section "功能导航"
-	panel_launch_row 1 "运行概览" "${C_D}状态、令牌与端口${C_0}" 2 "站点与证书" "${C_D}站点、证书与 DNS${C_0}" 3 "防火墙${fw_badge}" "${C_D}规则、封禁与白名单${C_0}"
-	echo
-	panel_launch_row 4 "SSH 与登录" "${C_D}端口、密钥与认证${C_0}" 5 "情报与上报${intel_badge}" "${C_D}同步、上报与密钥${C_0}" 6 "系统维护" "${C_D}日志、更新与卸载${C_0}"
+	panel_start "AbuseGuard 控制中心"
+	panel_kv "防护状态" "$protect_value"
+	panel_kv "当前封禁" "${C_H}$(thousands "$banned")${C_0} 个 IP"
+	panel_kv "情报库" "${C_H}$(thousands "$intel")${C_0} 条（${intel_note}）"
+	panel_kv "自动上报" "$report_value"
+	panel_kv "SSH 端口" "${C_H}${ssh_ports}${C_0}"
+	panel_kv "保护站点" "${C_H}${sites}${C_0}"
+	panel_kv "版本" "$version"
 }
 
 act_status() {
@@ -447,12 +368,13 @@ act_whitelist() {
 		else
 			for line in "${items[@]}"; do panel_row " $line"; done
 		fi
+		panel_sep
 		panel_section "白名单操作"
 		panel_option 1 "添加 IP 或网段（支持批量）"
 		panel_option 2 "删除白名单条目"
 		panel_option 3 "用编辑器打开"
 		panel_footer "返回防火墙"
-		read -r -p "  选择 ${C_B}[0-3]${C_0} > " c || return
+		read -r -p "  请输入选项 [0-3]: " c || return
 		case "$c" in
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
@@ -816,6 +738,7 @@ act_firewall() {
 		if [ -n "$warning" ]; then
 			while IFS= read -r line; do panel_row "${C_Y}$line${C_0}"; done <<< "$warning"
 		fi
+		panel_sep
 		panel_section "端口与协议"
 		panel_pair 1 "开放端口" 2 "关闭端口"
 		if [ "$fw_ipv4_in" = 1 ]; then state4="${C_G}已开启${C_0}"; else state4="${C_D}已关闭${C_0}"; fi
@@ -830,7 +753,7 @@ act_firewall() {
 		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
 		panel_row " ${C_D}云安全组及容器转发规则需在对应平台管理。${C_0}"
 		panel_footer "返回首页"
-		read -r -p "  选择 ${C_B}[0-10]${C_0} > " choice || return
+		read -r -p "  请输入选项 [0-10]: " choice || return
 		case "$choice" in
 			1) panel_title "防火墙 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
 			2) panel_title "防火墙 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
@@ -1387,6 +1310,7 @@ act_ssh() {
 		if [ "$pw" = off ] && [ "$(ssh_auth_state kbdinteractiveauthentication)" = on ]; then
 			panel_row " ${C_Y}键盘交互认证仍开启，可能仍允许密码${C_0}"
 		fi
+		panel_sep
 		panel_section "连接设置"
 		panel_option 1 "修改 SSH 端口"
 		panel_section "认证方式"
@@ -1399,7 +1323,7 @@ act_ssh() {
 		panel_row " ${C_D}新端口验证登录后，再到防火墙关闭旧端口。${C_0}"
 		panel_row " ${C_D}关闭认证方式前，请确认备用登录方式可用。${C_0}"
 		panel_footer "返回首页"
-		read -r -p "  选择 ${C_B}[0-6]${C_0} > " choice || return
+		read -r -p "  请输入选项 [0-6]: " choice || return
 		case "$choice" in
 			1) panel_title "SSH 与登录 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
 			2) panel_title "SSH 与登录 / 密码登录"; act_ssh_auth passwordauthentication PasswordAuthentication "密码登录" || echo "未完成修改。"; pause ;;
@@ -1451,13 +1375,14 @@ act_sites() {
 		else
 			panel_row " 证书方式：Caddy 自动 HTTPS（需 443/tcp 可直达）"
 		fi
+		panel_sep
 		panel_section "站点管理"
 		panel_option 1 "添加站点"
 		panel_option 2 "删除站点"
 		panel_section "证书设置"
 		panel_option 3 "设置 Cloudflare API Token"
 		panel_footer "返回首页"
-		read -r -p "  选择 ${C_B}[0-3]${C_0} > " choice || return
+		read -r -p "  请输入选项 [0-3]: " choice || return
 		case "$choice" in
 			1)
 				panel_title "站点与证书 / 添加站点"
@@ -1642,6 +1567,7 @@ act_intel() {
 		else
 			panel_row " AbuseIPDB 自动上报：${C_D}已关闭${C_0}"
 		fi
+		panel_sep
 		panel_section "情报同步"
 		panel_option 1 "立即同步威胁情报"
 		panel_section "AbuseIPDB 上报"
@@ -1649,7 +1575,7 @@ act_intel() {
 		panel_option 3 "设置 AbuseIPDB API Key"
 		panel_option 4 "开关自动上报"
 		panel_footer "返回首页"
-		read -r -p "  选择 ${C_B}[0-4]${C_0} > " choice || return
+		read -r -p "  请输入选项 [0-4]: " choice || return
 		case "$choice" in
 			1) panel_title "情报与上报 / 同步情报"; act_sync ;;
 			2) panel_title "情报与上报 / 发送上报队列"; act_flush ;;
@@ -1672,7 +1598,7 @@ act_system() {
 		panel_section "卸载"
 		panel_option 3 "${C_R}卸载 AbuseGuard${C_0}"
 		panel_footer "返回首页"
-		read -r -p "  选择 ${C_B}[0-3]${C_0} > " choice || return
+		read -r -p "  请输入选项 [0-3]: " choice || return
 		case "$choice" in
 			1) panel_title "系统维护 / 最近日志"; act_logs ;;
 			2) panel_title "系统维护 / 更新"; act_update ;;
@@ -1686,8 +1612,15 @@ act_system() {
 menu() {
 	local choice read_status
 	header
+	panel_sep
+	panel_option 1 "运行概览"
+	panel_option 2 "站点与证书"
+	panel_option 3 "防火墙"
+	panel_option 4 "SSH 与登录"
+	panel_option 5 "情报与上报"
+	panel_option 6 "系统维护"
 	panel_footer "退出面板"
-	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 ${C_B}[0-6]${C_0} > " choice
+	read -r -t "$PANEL_REFRESH_SECONDS" -p "  请输入选项 [0-6]: " choice
 	read_status=$?
 	case "$read_status" in
 		0) ;;

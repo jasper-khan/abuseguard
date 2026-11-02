@@ -133,40 +133,32 @@ done <<< "$rows"
 joined="$(printf '%s\n' "$rows" | sed 's/^  //' | tr -d '\n')"
 [ "$joined" = "$sample" ]
 pair="$(panel_pair 3 "IPv4 入站  ${C_G}已开启${C_0}" 4 "IPv6 入站  ${C_D}已关闭${C_0}" | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$pair" | wc -l)" -eq 1 ]
-[ "$(printf '%s' "${pair%%\[4\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 38 ]
-[ "$(printf '%s' "$pair" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
+[ "$(printf '%s\n' "$pair" | wc -l)" -eq 2 ]
+[ "$(printf '%s\n' "$pair" | sed -n '1p' | sed -E 's/^ +//; s/ +/ /g')" = '3. IPv4 入站 已开启' ]
+[ "$(printf '%s\n' "$pair" | sed -n '2p' | sed -E 's/^ +//; s/ +/ /g')" = '4. IPv6 入站 已关闭' ]
 
-# Preserve long Chinese text and align paired actions; cards use the same display-width math.
-kpi="$(panel_kpi_row "封禁与上报" "1,407 个 IP" "上报 已开启" "情报" "95,627 条" "5h 前同步" "接入" "SSH 60174" "站点 3" | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$kpi" | wc -l)" -eq 4 ]
-while IFS= read -r row; do
-	[ "$(printf '%s' "$row" | LC_ALL=C.UTF-8 wc -L)" -eq 73 ]
-done <<< "$kpi"
-case "$kpi" in *"封禁与上报"*"情报"*"接入"*) ;; *) exit 1 ;; esac
-case "$kpi" in *"1,407 个 IP"*"95,627 条"*"SSH 60174"*) ;; *) exit 1 ;; esac
-case "$kpi" in *"╭"*"╮"*"╰"*"╯"*) ;; *) exit 1 ;; esac
+kv1="$(panel_kv "防护状态" "正常" | sed $'s/\033\\[[0-9;]*m//g')"
+kv2="$(panel_kv "SSH 端口" "22" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s' "${kv1%%:*}" | LC_ALL=C.UTF-8 wc -L)" -eq 12 ]
+[ "$(printf '%s' "${kv2%%:*}" | LC_ALL=C.UTF-8 wc -L)" -eq 12 ]
+case "$kv1" in *"防护状态"*"正常"*) ;; *) exit 1 ;; esac
+case "$kv2" in *"SSH 端口"*"22"*) ;; *) exit 1 ;; esac
 
-launch="$(panel_launch_row 1 "运行概览" "状态、令牌与端口" 2 "站点与证书" "站点、证书与 DNS" 3 "防火墙" "规则、封禁与白名单" | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$launch" | wc -l)" -eq 3 ]
-while IFS= read -r row; do
-	[ "$(printf '%s' "$row" | LC_ALL=C.UTF-8 wc -L)" -eq 73 ]
-done <<< "$launch"
-case "$launch" in *"[1] 运行概览"*"[2] 站点与证书"*"[3] 防火墙"*) ;; *) exit 1 ;; esac
-case "$launch" in *"状态、令牌与端口"*"站点、证书与 DNS"*"规则、封禁与白名单"*) ;; *) exit 1 ;; esac
+sep="$(panel_sep)"
+[ "$(printf '%s' "$sep" | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
+[ -z "$(printf '%s' "$sep" | tr -d ' =')" ]
 
-bar="$(panel_bar_split "AbuseGuard · 控制中心" "v0.3.23 " | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s' "$bar" | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
-case "$bar" in *"AbuseGuard · 控制中心"*"v0.3.23"*) ;; *) exit 1 ;; esac
+opt="$(panel_option 1 "运行概览" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s' "$opt" | sed -E 's/^ +//; s/ +/ /g')" = '1. 运行概览' ]
 
 footer="$(panel_footer "返回首页" | sed $'s/\033\\[[0-9;]*m//g')"
 [ "$(printf '%s\n' "$footer" | wc -l)" -eq 2 ]
+[ "$(printf '%s\n' "$footer" | sed -n '1p' | sed -E 's/^ +//; s/ +/ /g')" = '0. 返回首页' ]
 [ "$(printf '%s\n' "$footer" | sed -n '2p' | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
-case "$(printf '%s\n' "$footer" | sed -n '2p')" in *"[0] 返回首页"*"输入编号后回车"*) ;; *) exit 1 ;; esac
 
-section="$(panel_section "功能导航" | sed $'s/\033\\[[0-9;]*m//g')"
+section="$(panel_section "服务状态" | sed $'s/\033\\[[0-9;]*m//g')"
 [ "$(printf '%s\n' "$section" | wc -l)" -eq 2 ]
-[ "$(printf '%s\n' "$section" | sed -n '2p')" = '   │ 功能导航' ]
+[ "$(printf '%s\n' "$section" | sed -n '2p')" = '   服务状态' ]
 [ "$(thousands 1407)" = 1,407 ]
 [ "$(thousands 95627)" = 95,627 ]
 LAYOUT

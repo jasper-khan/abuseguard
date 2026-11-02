@@ -114,7 +114,7 @@ validation before it is applied.
 
 Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, the home screen shows the current SSH ports and protected-site count, and the home-screen ban count re-queries every jail every 30 minutes without requiring a menu action:
 
-The panel uses a dark title bar and footer bar. The home screen shows protection as a status pill, presents bans/reporting, intel sync, and SSH/site data in three cards, then offers six launcher cards with one-line descriptions. Subpages reuse the same shell and cyan section markers, with headings grouping related actions inside each category without adding another menu level; enter `0` in a submenu to return to its parent. Color is reserved for status and interaction cues, while body and supporting text follow the terminal's foreground for both light and dark backgrounds:
+The panel uses `=` rules, aligned `label : value` status rows, and a single-column numbered menu. The home screen shows protection, ban count, intel size, reporting state, SSH ports, site count, and version; subpages reuse the same structure. Status values use color (green = healthy/on, yellow = warning/unconfigured, red = failed); all other text follows the terminal's foreground for both light and dark backgrounds:
 
 | Home entry | Available actions |
 | --- | --- |
