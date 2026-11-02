@@ -137,27 +137,38 @@ pair="$(panel_pair 3 "IPv4 入站  ${C_G}已开启${C_0}" 4 "IPv6 入站  ${C_D}
 [ "$(printf '%s' "${pair%%\[4\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 38 ]
 [ "$(printf '%s' "$pair" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
 
-metrics="$(panel_metric_row "当前封禁" "1,407" "情报库" "95,627" | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$metrics" | wc -l)" -eq 1 ]
-[ "$(printf '%s' "${metrics%%情报库*}" | LC_ALL=C.UTF-8 wc -L)" -eq 27 ]
-[ "$(printf '%s' "$metrics" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
+# Preserve long Chinese text and align paired actions; cards use the same display-width math.
+kpi="$(panel_kpi_row "封禁与上报" "1,407 个 IP" "上报 已开启" "情报" "95,627 条" "5h 前同步" "接入" "SSH 60174" "站点 3" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s\n' "$kpi" | wc -l)" -eq 4 ]
+while IFS= read -r row; do
+	[ "$(printf '%s' "$row" | LC_ALL=C.UTF-8 wc -L)" -eq 73 ]
+done <<< "$kpi"
+case "$kpi" in *"封禁与上报"*"情报"*"接入"*) ;; *) exit 1 ;; esac
+case "$kpi" in *"1,407 个 IP"*"95,627 条"*"SSH 60174"*) ;; *) exit 1 ;; esac
+case "$kpi" in *"╭"*"╮"*"╰"*"╯"*) ;; *) exit 1 ;; esac
+
+launch="$(panel_launch_row 1 "运行概览" "状态、令牌与端口" 2 "站点与证书" "站点、证书与 DNS" 3 "防火墙" "规则、封禁与白名单" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s\n' "$launch" | wc -l)" -eq 3 ]
+while IFS= read -r row; do
+	[ "$(printf '%s' "$row" | LC_ALL=C.UTF-8 wc -L)" -eq 73 ]
+done <<< "$launch"
+case "$launch" in *"[1] 运行概览"*"[2] 站点与证书"*"[3] 防火墙"*) ;; *) exit 1 ;; esac
+case "$launch" in *"状态、令牌与端口"*"站点、证书与 DNS"*"规则、封禁与白名单"*) ;; *) exit 1 ;; esac
+
+bar="$(panel_bar_split "AbuseGuard · 控制中心" "v0.3.23 " | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s' "$bar" | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
+case "$bar" in *"AbuseGuard · 控制中心"*"v0.3.23"*) ;; *) exit 1 ;; esac
+
+footer="$(panel_footer "返回首页" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s\n' "$footer" | wc -l)" -eq 2 ]
+[ "$(printf '%s\n' "$footer" | sed -n '2p' | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
+case "$(printf '%s\n' "$footer" | sed -n '2p')" in *"[0] 返回首页"*"输入编号后回车"*) ;; *) exit 1 ;; esac
+
+section="$(panel_section "功能导航" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s\n' "$section" | wc -l)" -eq 2 ]
+[ "$(printf '%s\n' "$section" | sed -n '2p')" = '   │ 功能导航' ]
 [ "$(thousands 1407)" = 1,407 ]
 [ "$(thousands 95627)" = 95,627 ]
-
-nav="$(panel_nav_row 1 "运行概览" 2 "站点与证书" 3 "防火墙" | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$nav" | wc -l)" -eq 1 ]
-[ "$(printf '%s' "${nav%%\[2\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 27 ]
-[ "$(printf '%s' "${nav%%\[3\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 51 ]
-[ "$(printf '%s' "$nav" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
-
-# The home navigation lists the six category names only, three per row.
-header() { :; }
-panel_section() { :; }
-panel_footer() { :; }
-home="$(printf '0\n' | menu | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$home" | wc -l)" -eq 2 ]
-expected=$'[1] 运行概览 [2] 站点与证书 [3] 防火墙\n[4] SSH 与登录 [5] 情报与上报 [6] 系统维护'
-[ "$(printf '%s\n' "$home" | sed -E 's/^ +//; s/ +/ /g')" = "$expected" ]
 LAYOUT
 
 echo "panel refresh, navigation and layout tests passed"
