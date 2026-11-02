@@ -156,6 +156,11 @@ footer="$(panel_footer "返回首页" | sed $'s/\033\\[[0-9;]*m//g')"
 [ "$(printf '%s\n' "$footer" | sed -n '1p' | sed -E 's/^ +//; s/ +/ /g')" = '0. 返回首页' ]
 [ "$(printf '%s\n' "$footer" | sed -n '2p' | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
 
+spaced_footer="$(panel_footer "返回首页" 1 | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s\n' "$spaced_footer" | wc -l)" -eq 3 ]
+[ -z "$(printf '%s\n' "$spaced_footer" | sed -n '2p')" ]
+[ "$(printf '%s\n' "$spaced_footer" | sed -n '3p' | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
+
 section="$(panel_section "服务状态" | sed $'s/\033\\[[0-9;]*m//g')"
 [ "$(printf '%s\n' "$section" | wc -l)" -eq 2 ]
 [ "$(printf '%s\n' "$section" | sed -n '2p')" = '   服务状态' ]

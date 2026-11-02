@@ -152,6 +152,7 @@ panel_start() {
 }
 
 panel_pause() {
+	echo
 	panel_sep
 	read -r -p "  按回车返回..." _
 }
@@ -161,7 +162,11 @@ panel_kv() { panel_row " $(panel_pad "$1" 8) : $2"; }
 panel_section() { echo; panel_row " ${C_H}$1${C_0}"; }
 panel_option() { panel_row " $1. $2"; }
 panel_pair() { panel_option "$1" "$2"; panel_option "$3" "$4"; }
-panel_footer() { panel_option 0 "$1"; panel_sep; }
+panel_footer() {
+	panel_option 0 "$1"
+	if [ "${2:-0}" = 1 ]; then echo; fi
+	panel_sep
+}
 
 count_banned() {
 	local total=0 n
@@ -373,7 +378,7 @@ act_whitelist() {
 		panel_option 1 "添加 IP 或网段（支持批量）"
 		panel_option 2 "删除白名单条目"
 		panel_option 3 "用编辑器打开"
-		panel_footer "返回防火墙"
+		panel_footer "返回防火墙" 1
 		read -r -p "  请输入选项 [0-3]: " c || return
 		case "$c" in
 			1)
@@ -752,7 +757,7 @@ act_firewall() {
 		echo
 		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
 		panel_row " ${C_D}云安全组及容器转发规则需在对应平台管理。${C_0}"
-		panel_footer "返回首页"
+		panel_footer "返回首页" 1
 		read -r -p "  请输入选项 [0-10]: " choice || return
 		case "$choice" in
 			1) panel_title "防火墙 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
@@ -1322,7 +1327,7 @@ act_ssh() {
 		echo
 		panel_row " ${C_D}新端口验证登录后，再到防火墙关闭旧端口。${C_0}"
 		panel_row " ${C_D}关闭认证方式前，请确认备用登录方式可用。${C_0}"
-		panel_footer "返回首页"
+		panel_footer "返回首页" 1
 		read -r -p "  请输入选项 [0-6]: " choice || return
 		case "$choice" in
 			1) panel_title "SSH 与登录 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
@@ -1381,7 +1386,7 @@ act_sites() {
 		panel_option 2 "删除站点"
 		panel_section "证书设置"
 		panel_option 3 "设置 Cloudflare API Token"
-		panel_footer "返回首页"
+		panel_footer "返回首页" 1
 		read -r -p "  请输入选项 [0-3]: " choice || return
 		case "$choice" in
 			1)
@@ -1574,7 +1579,7 @@ act_intel() {
 		panel_option 2 "立即发送上报队列"
 		panel_option 3 "设置 AbuseIPDB API Key"
 		panel_option 4 "开关自动上报"
-		panel_footer "返回首页"
+		panel_footer "返回首页" 1
 		read -r -p "  请输入选项 [0-4]: " choice || return
 		case "$choice" in
 			1) panel_title "情报与上报 / 同步情报"; act_sync ;;
@@ -1597,7 +1602,7 @@ act_system() {
 		panel_option 2 "更新 AbuseGuard"
 		panel_section "卸载"
 		panel_option 3 "${C_R}卸载 AbuseGuard${C_0}"
-		panel_footer "返回首页"
+		panel_footer "返回首页" 1
 		read -r -p "  请输入选项 [0-3]: " choice || return
 		case "$choice" in
 			1) panel_title "系统维护 / 最近日志"; act_logs ;;
