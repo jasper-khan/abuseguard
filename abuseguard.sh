@@ -104,9 +104,23 @@ panel_row() {
 }
 
 # 按显示列宽补齐单元格，汉字与全角标点占两列，ANSI 颜色不占列。
+panel_width() {
+	local LC_ALL=C.UTF-8 text="$1" width=0 char size seq
+	local sgr=$'\033''\[[0-9;]*m'
+	while [ -n "$text" ]; do
+		if [[ "$text" =~ ^($sgr) ]]; then
+			seq="${BASH_REMATCH[1]}"; text="${text:${#seq}}"; continue
+		fi
+		char="${text:0:1}"; text="${text:1}"
+		case "$char" in [㐀-鿿　-〿！-～]) size=2 ;; *) size=1 ;; esac
+		width=$((width + size))
+	done
+	printf '%s' "$width"
+}
+
 panel_pad() {
 	local text="$1" target="$2" width pad
-	width="$(printf '%s' "$text" | sed $'s/\033\\[[0-9;]*m//g' | LC_ALL=C.UTF-8 wc -L)"
+	width=$(panel_width "$text")
 	width=$((target - width)); [ "$width" -gt 0 ] || width=1
 	printf -v pad '%*s' "$width" ''
 	printf '%s%s' "$text" "$pad"
@@ -122,10 +136,17 @@ thousands() {
 	printf '%s%s' "$n" "$out"
 }
 
-panel_metric() {
+panel_metric_row() {
 	local cell
-	cell="$(panel_pad " $(panel_pad "$1" 12)$2" 36)"
-	panel_row "${cell}$(panel_pad "$3" 12)$4"
+	cell="$(panel_pad " $(panel_pad "$1" 10)$2" 24)"
+	panel_row "${cell} $(panel_pad "$3" 10)$4"
+}
+
+panel_nav_row() {
+	local first second
+	first="$(panel_pad " ${C_B}[$1]${C_0} ${C_H}$2${C_0}" 24)"
+	second="$(panel_pad " ${C_B}[$3]${C_0} ${C_H}$4${C_0}" 24)"
+	panel_row "${first}${second} ${C_B}[$5]${C_0} ${C_H}$6${C_0}"
 }
 
 panel_start() {
@@ -183,7 +204,7 @@ intel_age_h() {
 
 header() {
 	local caddy f2b intel banned rep age report_text intel_text version ssh_ports sites
-	local firewall_ok=0 issue_text='' protection fw_badge='' intel_badge=''
+	local firewall_ok=0 issue_text='' protection_value protection_detail fw_badge='' intel_badge=''
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
@@ -206,9 +227,11 @@ header() {
 		issue_text+='防火墙未就绪'
 	fi
 	if [ -z "$issue_text" ]; then
-		protection="${C_G}● 防护正常${C_0}   ${C_D}Caddy · Fail2Ban · 防火墙${C_0}"
+		protection_value="${C_G}正常${C_0}"
+		protection_detail="${C_D}Caddy · Fail2Ban · 防火墙${C_0}"
 	else
-		protection="${C_R}! 防护异常${C_0}   ${C_R}${issue_text}${C_0}"
+		protection_value="${C_R}异常${C_0}"
+		protection_detail="${C_R}${issue_text}${C_0}"
 	fi
 
 	if [ "$rep" = on ]; then
@@ -233,11 +256,11 @@ header() {
 
 	panel_start "控制中心 · v${version}"
 	echo
-	panel_row " ${protection}"
-	panel_row " ${C_D}自动上报${C_0}  ${report_text}  ${C_D}·${C_0}  ${C_D}情报同步${C_0}  ${intel_text}"
+	panel_row "$(panel_pad " $(panel_pad "${C_D}防护状态${C_0}" 10)${protection_value}" 24) ${protection_detail}"
+	panel_row "$(panel_pad " $(panel_pad "${C_D}自动上报${C_0}" 10)${report_text}" 24) $(panel_pad "${C_D}情报同步${C_0}" 10)${intel_text}"
 	echo
-	panel_metric "当前封禁" "${C_H}$(thousands "$banned")${C_0}" "情报库" "${C_H}$(thousands "$intel")${C_0}"
-	panel_metric "SSH 端口" "${C_H}${ssh_ports}${C_0}" "受保护站点" "${C_H}${sites}${C_0}"
+	panel_metric_row "当前封禁" "${C_H}$(thousands "$banned")${C_0}" "情报库" "${C_H}$(thousands "$intel")${C_0}"
+	panel_metric_row "SSH 端口" "${C_H}${ssh_ports}${C_0}" "站点" "${C_H}${sites}${C_0}"
 	NAV_FW_BADGE="$fw_badge"
 	NAV_INTEL_BADGE="$intel_badge"
 }
@@ -1610,11 +1633,10 @@ menu() {
 	local choice read_status
 	header
 	panel_section "功能导航"
-	panel_pair 1 "运行概览" 4 "SSH 与登录"
-	panel_pair 2 "站点与证书" 5 "情报与上报${NAV_INTEL_BADGE:-}"
-	panel_pair 3 "防火墙${NAV_FW_BADGE:-}" 6 "系统维护"
-	panel_footer "退出面板" "${C_D}输入编号选择${C_0}"
-	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 [0-6] > " choice
+	panel_nav_row 1 "运行概览" 2 "站点与证书" 3 "防火墙${NAV_FW_BADGE:-}"
+	panel_nav_row 4 "SSH 与登录" 5 "情报与上报${NAV_INTEL_BADGE:-}" 6 "系统维护"
+	panel_footer "退出面板"
+	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 ${C_B}[0-6]${C_0} > " choice
 	read_status=$?
 	case "$read_status" in
 		0) ;;

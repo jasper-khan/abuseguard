@@ -137,20 +137,26 @@ pair="$(panel_pair 3 "IPv4 入站  ${C_G}已开启${C_0}" 4 "IPv6 入站  ${C_D}
 [ "$(printf '%s' "${pair%%\[4\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 38 ]
 [ "$(printf '%s' "$pair" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
 
-metrics="$(panel_metric "当前封禁" "1,407" "情报库" "95,627" | sed $'s/\033\\[[0-9;]*m//g')"
+metrics="$(panel_metric_row "当前封禁" "1,407" "情报库" "95,627" | sed $'s/\033\\[[0-9;]*m//g')"
 [ "$(printf '%s\n' "$metrics" | wc -l)" -eq 1 ]
-[ "$(printf '%s' "${metrics%%情报库*}" | LC_ALL=C.UTF-8 wc -L)" -eq 38 ]
+[ "$(printf '%s' "${metrics%%情报库*}" | LC_ALL=C.UTF-8 wc -L)" -eq 27 ]
 [ "$(printf '%s' "$metrics" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
 [ "$(thousands 1407)" = 1,407 ]
 [ "$(thousands 95627)" = 95,627 ]
 
-# The home navigation lists the six category names only, two per row.
+nav="$(panel_nav_row 1 "运行概览" 2 "站点与证书" 3 "防火墙" | sed $'s/\033\\[[0-9;]*m//g')"
+[ "$(printf '%s\n' "$nav" | wc -l)" -eq 1 ]
+[ "$(printf '%s' "${nav%%\[2\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 27 ]
+[ "$(printf '%s' "${nav%%\[3\]*}" | LC_ALL=C.UTF-8 wc -L)" -eq 51 ]
+[ "$(printf '%s' "$nav" | LC_ALL=C.UTF-8 wc -L)" -le "$PANEL_WIDTH" ]
+
+# The home navigation lists the six category names only, three per row.
 header() { :; }
 panel_section() { :; }
 panel_footer() { :; }
 home="$(printf '0\n' | menu | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$home" | wc -l)" -eq 3 ]
-expected=$'[1] 运行概览 [4] SSH 与登录\n[2] 站点与证书 [5] 情报与上报\n[3] 防火墙 [6] 系统维护'
+[ "$(printf '%s\n' "$home" | wc -l)" -eq 2 ]
+expected=$'[1] 运行概览 [2] 站点与证书 [3] 防火墙\n[4] SSH 与登录 [5] 情报与上报 [6] 系统维护'
 [ "$(printf '%s\n' "$home" | sed -E 's/^ +//; s/ +/ /g')" = "$expected" ]
 LAYOUT
 
