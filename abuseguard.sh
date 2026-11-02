@@ -103,6 +103,31 @@ panel_row() {
 	printf '  %s%s\n' "$line" "$C_0"
 }
 
+# 按显示列宽补齐单元格，汉字与全角标点占两列，ANSI 颜色不占列。
+panel_pad() {
+	local text="$1" target="$2" width pad
+	width="$(printf '%s' "$text" | sed $'s/\033\\[[0-9;]*m//g' | LC_ALL=C.UTF-8 wc -L)"
+	width=$((target - width)); [ "$width" -gt 0 ] || width=1
+	printf -v pad '%*s' "$width" ''
+	printf '%s%s' "$text" "$pad"
+}
+
+thousands() {
+	local n="$1" out=''
+	case "$n" in '' | *[!0-9]*) printf '%s' "$n"; return ;; esac
+	while [ "${#n}" -gt 3 ]; do
+		out=",${n: -3}${out}"
+		n="${n:0:${#n}-3}"
+	done
+	printf '%s%s' "$n" "$out"
+}
+
+panel_metric() {
+	local cell
+	cell="$(panel_pad " $(panel_pad "$1" 12)$2" 36)"
+	panel_row "${cell}$(panel_pad "$3" 12)$4"
+}
+
 panel_start() {
 	clear 2>/dev/null || true
 	panel_row " ${C_B}AbuseGuard${C_0}  /  ${C_H}$1${C_0}"
@@ -157,7 +182,8 @@ intel_age_h() {
 }
 
 header() {
-	local caddy f2b intel banned rep age fresh report_status version firewall_status ssh_ports
+	local caddy f2b intel banned rep age report_text intel_text version ssh_ports sites
+	local firewall_ok=0 issue_text='' protection fw_badge='' intel_badge=''
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
@@ -167,24 +193,53 @@ header() {
 	ssh_ports="${ssh_ports% }"
 	version="$("$ENGINE" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
 	[ -n "$version" ] || version="?"
-	age="$(intel_age_h)"
-	if [ -z "$age" ]; then fresh="情报未同步"
-	elif [ "$age" -gt 12 ]; then fresh="${C_Y}情报最后同步 ${age}h 前，建议检查${C_0}"
-	else fresh="情报最后同步 ${age}h 前"; fi
-	if [ "$rep" = on ]; then
-		[ -s "$KEYFILE" ] && report_status="${C_G}已开启${C_0}" || report_status="${C_Y}未配置 API Key${C_0}"
-	else
-		report_status="${C_D}已关闭${C_0}"
+	sites="$(sites_lines | wc -l | tr -d ' ')"
+	if firewall_running; then firewall_ok=1; else fw_badge=" ${C_Y}!${C_0}"; fi
+
+	if [ "$caddy" != active ]; then issue_text='Caddy 未运行'; fi
+	if [ "$f2b" != active ]; then
+		[ -z "$issue_text" ] || issue_text+=' · '
+		issue_text+='Fail2Ban 未运行'
 	fi
-	if firewall_running; then firewall_status="${C_G}运行中${C_0}"
-	else firewall_status="${C_Y}未就绪${C_0}"; fi
+	if [ "$firewall_ok" = 0 ]; then
+		[ -z "$issue_text" ] || issue_text+=' · '
+		issue_text+='防火墙未就绪'
+	fi
+	if [ -z "$issue_text" ]; then
+		protection="${C_G}● 防护正常${C_0}   ${C_D}Caddy · Fail2Ban · 防火墙${C_0}"
+	else
+		protection="${C_R}! 防护异常${C_0}   ${C_R}${issue_text}${C_0}"
+	fi
+
+	if [ "$rep" = on ]; then
+		if [ -s "$KEYFILE" ]; then report_text="${C_G}已开启${C_0}"
+		else
+			report_text="${C_Y}未配置 API Key${C_0}"
+			intel_badge=" ${C_Y}!${C_0}"
+		fi
+	else
+		report_text="${C_D}已关闭${C_0}"
+	fi
+	age="$(intel_age_h)"
+	if [ -z "$age" ]; then
+		intel_text="${C_Y}未同步${C_0}"
+		intel_badge=" ${C_Y}!${C_0}"
+	elif [ "$age" -gt 12 ]; then
+		intel_text="${C_Y}${age}h 前，建议检查${C_0}"
+		intel_badge=" ${C_Y}!${C_0}"
+	else
+		intel_text="${C_D}${age}h 前${C_0}"
+	fi
+
 	panel_start "控制中心 · v${version}"
-	panel_section "运行状态"
-	panel_row " Caddy      $( [ "$caddy" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${caddy}${C_0}" )          Fail2Ban  $( [ "$f2b" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}${f2b}${C_0}" )"
-	panel_row " 防火墙     ${firewall_status}          SSH 端口  ${C_H}${ssh_ports}${C_0}"
-	panel_row "$(printf ' 封禁记录   %-16s情报 IP   %s' "$banned" "$intel")"
-	panel_row " ${C_D}封禁记录按 jail 累加 · ${fresh}${C_0}"
-	panel_row " 自动上报   ${report_status}"
+	echo
+	panel_row " ${protection}"
+	panel_row " ${C_D}自动上报${C_0}  ${report_text}  ${C_D}·${C_0}  ${C_D}情报同步${C_0}  ${intel_text}"
+	echo
+	panel_metric "当前封禁" "${C_H}$(thousands "$banned")${C_0}" "情报库" "${C_H}$(thousands "$intel")${C_0}"
+	panel_metric "SSH 端口" "${C_H}${ssh_ports}${C_0}" "受保护站点" "${C_H}${sites}${C_0}"
+	NAV_FW_BADGE="$fw_badge"
+	NAV_INTEL_BADGE="$intel_badge"
 }
 
 act_status() {
@@ -1555,13 +1610,10 @@ menu() {
 	local choice read_status
 	header
 	panel_section "功能导航"
-	panel_option 1 "运行概览"
-	panel_option 2 "站点与证书"
-	panel_option 3 "防火墙"
-	panel_option 4 "SSH 与登录"
-	panel_option 5 "情报与上报"
-	panel_option 6 "系统维护"
-	panel_footer "退出面板" "${C_D}首页每 30 分钟刷新${C_0}"
+	panel_pair 1 "运行概览" 4 "SSH 与登录"
+	panel_pair 2 "站点与证书" 5 "情报与上报${NAV_INTEL_BADGE:-}"
+	panel_pair 3 "防火墙${NAV_FW_BADGE:-}" 6 "系统维护"
+	panel_footer "退出面板" "${C_D}输入编号选择${C_0}"
 	read -r -t "$PANEL_REFRESH_SECONDS" -p "  选择 [0-6] > " choice
 	read_status=$?
 	case "$read_status" in
