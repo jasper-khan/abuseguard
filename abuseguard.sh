@@ -232,7 +232,7 @@ header() {
 
 	panel_start "AbuseGuard 控制中心"
 	panel_kv "防护状态" "$protect_value"
-	panel_kv "当前封禁" "${C_H}$(thousands "$banned")${C_0} 个 IP"
+	panel_kv "封禁记录" "${C_H}$(thousands "$banned")${C_0}"
 	panel_kv "情报库" "${C_H}$(thousands "$intel")${C_0} 条（${intel_note}）"
 	panel_kv "自动上报" "$report_value"
 	panel_kv "SSH 端口" "${C_H}${ssh_ports}${C_0}"
