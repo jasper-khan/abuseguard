@@ -72,14 +72,16 @@ caddy_restart_active() {
 # 辅助文字跟随终端默认前景色，避免固定亮灰色在浅色主题下难以辨认。
 C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[22;39m'; C_H=$'\033[1m'; C_0=$'\033[0m'
 PANEL_WIDTH=76
-PANEL_LEFT_SPACES=''
-pause() { echo; read -r -p "${PANEL_LEFT_SPACES:-}  按回车继续..." _; }
+PANEL_ROWS=0
+PANEL_TMP=''
+PANEL_BUFFERING=0
+pause() { panel_flush; echo; read -r -p "  按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
 panel_sep() {
 	local fill
 	printf -v fill '%*s' "$((PANEL_WIDTH - 4))" ''
-	printf '%s  %s\n' "$PANEL_LEFT_SPACES" "${fill// /=}"
+	printf '  %s\n' "${fill// /=}"
 }
 
 # 长文本按终端列宽换行：汉字和全角标点占两列，ANSI 颜色不占列。
@@ -95,13 +97,13 @@ panel_row() {
 		char="${text:0:1}"; text="${text:1}"
 		case "$char" in [㐀-鿿　-〿！-～]) size=2 ;; *) size=1 ;; esac
 		if (( used + size > limit )) || [ "$char" = $'\n' ]; then
-			printf '%s  %s%s\n' "$PANEL_LEFT_SPACES" "$line" "$C_0"
+			printf '  %s%s\n' "$line" "$C_0"
 			line="$color"; used=0
 			[ "$char" != $'\n' ] || continue
 		fi
 		line+="$char"; used=$((used + size))
 	done
-	printf '%s  %s%s\n' "$PANEL_LEFT_SPACES" "$line" "$C_0"
+	printf '  %s%s\n' "$line" "$C_0"
 }
 
 # 按显示列宽补齐单元格，汉字与全角标点占两列，ANSI 颜色不占列。
@@ -142,28 +144,54 @@ panel_center() {
 	width=$(panel_width "$1")
 	pad=$(((PANEL_WIDTH - 4 - width) / 2)); [ "$pad" -gt 0 ] || pad=0
 	printf -v pad '%*s' "$pad" ''
-	printf '%s  %s%s\n' "$PANEL_LEFT_SPACES" "$pad" "$1"
+	printf '  %s%s\n' "$pad" "$1"
 }
 
-panel_update_left() {
-	local cols='' block
-	if [ -n "${PANEL_FORCE_COLS:-}" ]; then cols="$PANEL_FORCE_COLS"
+panel_update_rows() {
+	local rows=''
+	if [ -n "${PANEL_FORCE_ROWS:-}" ]; then rows="$PANEL_FORCE_ROWS"
 	elif [ -t 1 ]; then
-		cols=$(tput cols 2>/dev/null || true)
-		[ -n "$cols" ] || cols=$(stty size 2>/dev/null | awk '{print $2}')
+		rows=$(tput lines 2>/dev/null || true)
+		[ -n "$rows" ] || rows=$(stty size 2>/dev/null | awk '{print $1}')
 	fi
-	[ -n "$cols" ] || cols="${COLUMNS:-0}"
-	case "$cols" in '' | *[!0-9]*) cols=0 ;; esac
-	block=$((PANEL_WIDTH - 2))
-	if [ "$cols" -gt "$block" ]; then
-		printf -v PANEL_LEFT_SPACES '%*s' "$(((cols - block) / 2))" ''
-	else
-		PANEL_LEFT_SPACES=''
-	fi
+	[ -n "$rows" ] || rows="${LINES:-0}"
+	case "$rows" in '' | *[!0-9]*) rows=0 ;; esac
+	PANEL_ROWS="$rows"
+}
+
+panel_flush() {
+	[ "${PANEL_BUFFERING:-0}" = 1 ] || return 0
+	exec 1>&4 4>&-
+	PANEL_BUFFERING=0
+	local lines=() count top i
+	mapfile -t lines < "$PANEL_TMP"
+	rm -f -- "$PANEL_TMP"
+	PANEL_TMP=''
+	count=${#lines[@]}
+	top=$(((PANEL_ROWS - count - 1) / 2)); [ "$top" -gt 0 ] || top=0
+	for ((i = 0; i < top; i++)); do echo; done
+	[ "$count" -eq 0 ] || printf '%s\n' "${lines[@]}"
 }
 
 panel_start() {
-	panel_update_left
+	panel_flush
+	clear 2>/dev/null || true
+	panel_update_rows
+	PANEL_TMP=$(mktemp 2>/dev/null) || PANEL_TMP=''
+	if [ -n "$PANEL_TMP" ]; then
+		exec 4>&1
+		exec >"$PANEL_TMP"
+		PANEL_BUFFERING=1
+	else
+		PANEL_BUFFERING=0
+	fi
+	panel_sep
+	panel_center "${C_H}$1${C_0}"
+	panel_sep
+}
+
+panel_start_now() {
+	panel_flush
 	clear 2>/dev/null || true
 	panel_sep
 	panel_center "${C_H}$1${C_0}"
@@ -172,15 +200,16 @@ panel_start() {
 
 panel_pause() {
 	panel_sep
-	read -r -p "${PANEL_LEFT_SPACES:-}  按回车返回..." _
+	panel_flush
+	read -r -p "  按回车返回..." _
 }
 
-panel_title() { panel_start "$1"; echo; }
+panel_title() { panel_start_now "$1"; echo; }
 panel_kv() { panel_row " $(panel_pad "$1" 8) : $2"; }
 panel_section() { echo; panel_row " ${C_H}$1${C_0}"; }
 panel_option() { panel_row " $1. $2"; }
 panel_pair() { panel_option "$1" "$2"; panel_option "$3" "$4"; }
-panel_footer() { panel_option 0 "$1"; panel_sep; }
+panel_footer() { panel_option 0 "$1"; panel_sep; panel_flush; }
 
 count_banned() {
 	local total=0 n
@@ -306,7 +335,7 @@ act_banned() {
 
 act_unban() {
 	local ip
-	read -r -p "${PANEL_LEFT_SPACES:-}输入要解封的 IP（留空取消）: " ip
+	read -r -p "输入要解封的 IP（留空取消）: " ip
 	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
 	[ -z "$ip" ] && return
 	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
@@ -320,7 +349,7 @@ act_unban() {
 
 act_ban() {
 	local ip allow_status
-	read -r -p "${PANEL_LEFT_SPACES:-}输入要立即封禁的 IP（留空取消）: " ip
+	read -r -p "输入要立即封禁的 IP（留空取消）: " ip
 	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
 	[ -z "$ip" ] && return
 	case "$ip" in */*) echo "  手动封禁仅支持单个 IPv4/IPv6 地址，不支持网段。"; pause; return ;; esac
@@ -393,7 +422,7 @@ act_whitelist() {
 		panel_option 2 "删除白名单条目"
 		panel_option 3 "用编辑器打开"
 		panel_footer "返回防火墙"
-		read -r -p "${PANEL_LEFT_SPACES:-}  请输入选项 [0-3]: " c || return
+		read -r -p "  请输入选项 [0-3]: " c || return
 		case "$c" in
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
@@ -422,7 +451,7 @@ act_whitelist() {
 			2)
 				[ "${#items[@]}" -eq 0 ] && { echo "  没有可删除的条目"; sleep 1; continue; }
 				i=1; for line in "${items[@]}"; do printf "  [%d] %s\n" "$i" "$line"; i=$((i+1)); done
-				read -r -p "${PANEL_LEFT_SPACES:-}  输入要删除的编号: " num
+				read -r -p "  输入要删除的编号: " num
 				case "$num" in ''|*[!0-9]*) continue ;; esac
 				if [ "$num" -lt 1 ] || [ "$num" -gt "${#items[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
 				target="${items[$((num-1))]}"
@@ -623,7 +652,7 @@ firewall_change_port() {
 			idx=$((idx + 1))
 			panel_row "$(printf ' [%d]  %-4s %-6s %s' "$idx" "$pr" "$po" "${so:-any}")"
 		done <<< "$rules"
-		read -r -p "${PANEL_LEFT_SPACES:-}  要关闭的规则编号（留空取消）: " selected || return 1
+		read -r -p "  要关闭的规则编号（留空取消）: " selected || return 1
 		[ -n "$selected" ] || return 0
 		case "$selected" in *[!0-9]*) echo "编号无效。"; return 1 ;; esac
 		selected=$((10#$selected))
@@ -632,14 +661,14 @@ firewall_change_port() {
 		set -- $selected
 		proto="$1"; port="$2"; source="${3:-any}"
 	elif [ "$interactive" = 1 ]; then
-		read -r -p "${PANEL_LEFT_SPACES:-}协议（tcp/udp，默认 tcp）: " proto || return 1
+		read -r -p "协议（tcp/udp，默认 tcp）: " proto || return 1
 		proto="${proto:-tcp}"
 	fi
 	case "$proto" in tcp|udp) ;; *) echo "协议只能是 tcp 或 udp。"; return 1 ;; esac
 	if [ "$interactive" = 1 ] && [ "$action" = open ]; then
-		read -r -p "${PANEL_LEFT_SPACES:-}端口（1–65535，留空取消）: " port || return 1
+		read -r -p "端口（1–65535，留空取消）: " port || return 1
 		[ -n "$port" ] || return 0
-		read -r -p "${PANEL_LEFT_SPACES:-}来源 IPv4/IPv6 或 CIDR（留空=所有来源）: " source || return 1
+		read -r -p "来源 IPv4/IPv6 或 CIDR（留空=所有来源）: " source || return 1
 		source="${source:-any}"
 	fi
 	[ "${#port}" -le 5 ] && port_valid "$port" || { echo "端口格式无效。"; return 1; }
@@ -724,7 +753,7 @@ firewall_toggle_family() {
 			case "$3" in *:*) srv=IPv6 ;; *) srv=IPv4 ;; esac
 			[ "$srv" = "$warn" ] && echo " 当前 SSH 会话是 $warn；断开后需要控制台恢复。"
 		fi
-		read -r -p "${PANEL_LEFT_SPACES:-} 输入 yes 继续: " answer || return 1
+		read -r -p " 输入 yes 继续: " answer || return 1
 		[ "$answer" = yes ] || { echo " 已取消。"; return 1; }
 	fi
 	if firewall_set_policy "$fam" "$target"; then
@@ -772,7 +801,7 @@ act_firewall() {
 		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
 		panel_row " ${C_D}云安全组及容器转发规则需在对应平台管理。${C_0}"
 		panel_footer "返回首页"
-		read -r -p "${PANEL_LEFT_SPACES:-}  请输入选项 [0-10]: " choice || return
+		read -r -p "  请输入选项 [0-10]: " choice || return
 		case "$choice" in
 			1) panel_title "防火墙 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
 			2) panel_title "防火墙 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
@@ -888,7 +917,7 @@ act_ssh_port() {
 		echo "请先只保留一个 Port 指令后重试。"
 		return 1
 	fi
-	read -r -p "${PANEL_LEFT_SPACES:-}  新的 SSH 端口（1-65535，留空取消）: " new || return 1
+	read -r -p "  新的 SSH 端口（1-65535，留空取消）: " new || return 1
 	[ -n "$new" ] || return 0
 	[ "${#new}" -le 5 ] && port_valid "$new" || { echo "端口格式无效。"; return 1; }
 	new=$((10#$new))
@@ -911,7 +940,7 @@ act_ssh_port() {
 	fi
 	echo "  ${C_R}新旧端口将同时监听；确认新端口可登录后到防火墙关闭旧端口。${C_0}"
 	echo "  ${C_R}请先在云安全组放行 $new/tcp。${C_0}"
-	read -r -p "${PANEL_LEFT_SPACES:-}  继续？[y/N]: " answer || return 1
+	read -r -p "  继续？[y/N]: " answer || return 1
 	case "$answer" in y|Y) ;; *) echo "已取消。"; return 1 ;; esac
 
 	if [ -f "$SSHD_DROPIN" ]; then
@@ -1161,7 +1190,7 @@ act_ssh_auth() {
 		else
 			echo " 请保持当前会话，先用新连接验证 root 密码登录。"
 		fi
-		read -r -p "${PANEL_LEFT_SPACES:-} 确认备用登录已验证，输入 yes 继续: " answer || return 1
+		read -r -p " 确认备用登录已验证，输入 yes 继续: " answer || return 1
 		[ "$answer" = yes ] || { echo " 已取消。"; return 1; }
 	fi
 	backup=""
@@ -1214,7 +1243,7 @@ act_ssh_auth() {
 act_ssh_key_add() {
 	local key tmp
 	[ -d "$SSH_ROOT_HOME" ] || mkdir -m 700 -p "$SSH_ROOT_HOME" || { echo "无法创建 $SSH_ROOT_HOME。"; return 1; }
-	read -r -p "${PANEL_LEFT_SPACES:-}  粘贴公钥（ssh-ed25519/ssh-rsa/...，留空取消）: " key || return 1
+	read -r -p "  粘贴公钥（ssh-ed25519/ssh-rsa/...，留空取消）: " key || return 1
 	[ -n "$key" ] || return 0
 	local ktype kblob rest
 	read -r ktype kblob rest <<< "$key"
@@ -1267,7 +1296,7 @@ act_ssh_key_remove() {
 		idx=$((idx + 1))
 		printf ' [%d] %.60s\n' "$idx" "$line"
 	done <<< "$keys"
-	read -r -p "${PANEL_LEFT_SPACES:-}  要删除的编号（留空取消）: " n || return 1
+	read -r -p "  要删除的编号（留空取消）: " n || return 1
 	[ -n "$n" ] || return 0
 	case "$n" in *[!0-9]*) echo "编号无效。"; return 1 ;; esac
 	[ "$n" -ge 1 ] && [ "$n" -le "$idx" ] || { echo "编号无效。"; return 1; }
@@ -1284,7 +1313,7 @@ act_ssh_key_remove() {
 			return 1
 		fi
 		echo "删除后将没有有效公钥。请保持当前会话，先用新连接验证 root 密码登录。"
-		read -r -p "${PANEL_LEFT_SPACES:-} 输入 yes 继续: " answer || { rm -f -- "$tmp"; return 1; }
+		read -r -p " 输入 yes 继续: " answer || { rm -f -- "$tmp"; return 1; }
 		[ "$answer" = yes ] || { rm -f -- "$tmp"; echo "已取消。"; return 1; }
 	fi
 	mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; return 1; }
@@ -1342,7 +1371,7 @@ act_ssh() {
 		panel_row " ${C_D}新端口验证登录后，再到防火墙关闭旧端口。${C_0}"
 		panel_row " ${C_D}关闭认证方式前，请确认备用登录方式可用。${C_0}"
 		panel_footer "返回首页"
-		read -r -p "${PANEL_LEFT_SPACES:-}  请输入选项 [0-6]: " choice || return
+		read -r -p "  请输入选项 [0-6]: " choice || return
 		case "$choice" in
 			1) panel_title "SSH 与登录 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
 			2) panel_title "SSH 与登录 / 密码登录"; act_ssh_auth passwordauthentication PasswordAuthentication "密码登录" || echo "未完成修改。"; pause ;;
@@ -1401,23 +1430,23 @@ act_sites() {
 		panel_section "证书设置"
 		panel_option 3 "设置 Cloudflare API Token"
 		panel_footer "返回首页"
-		read -r -p "${PANEL_LEFT_SPACES:-}  请输入选项 [0-3]: " choice || return
+		read -r -p "  请输入选项 [0-3]: " choice || return
 		case "$choice" in
 			1)
 				panel_title "站点与证书 / 添加站点"
-				read -r -p "${PANEL_LEFT_SPACES:-}  域名（如 example.com）: " dom
+				read -r -p "  域名（如 example.com）: " dom
 				dom="$(printf '%s' "$dom" | tr -d '[:space:]')"
 				domain_valid "$dom" || { echo "  域名格式无效"; sleep 1; continue; }
 				[ -e "$SITES_DIR/$dom.caddy" ] && { echo "  该域名已存在"; sleep 1; continue; }
 				echo "  上游类型："
 				echo "  [1] 本地 IP:端口（如 127.0.0.1:3000）"
 				echo "  [2] 公网 IP:端口（如 203.0.113.10:8080）"
-				read -r -p "${PANEL_LEFT_SPACES:-}  请选择: " t
+				read -r -p "  请选择: " t
 				case "$t" in
-					1) read -r -p "${PANEL_LEFT_SPACES:-}  本地 IP:端口: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
+					1) read -r -p "  本地 IP:端口: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
 					   hostport_valid "$hp" || { echo "  IP:端口 格式无效"; sleep 1; continue; }
 					   up="$hp" ;;
-					2) read -r -p "${PANEL_LEFT_SPACES:-}  公网 IP:端口: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
+					2) read -r -p "  公网 IP:端口: " hp; hp="$(printf '%s' "$hp" | tr -d '[:space:]')"
 					   hostport_valid "$hp" || { echo "  IP:端口 格式无效"; sleep 1; continue; }
 					   up="$hp" ;;
 					*) continue ;;
@@ -1451,7 +1480,7 @@ act_sites() {
 			2)
 				[ "${#doms[@]}" -eq 0 ] && { echo "  没有可删除的站点"; sleep 1; continue; }
 				i=1; for d in "${doms[@]}"; do printf "  [%d] %s\n" "$i" "$d"; i=$((i+1)); done
-				read -r -p "${PANEL_LEFT_SPACES:-}  输入要删除的编号: " num
+				read -r -p "  输入要删除的编号: " num
 				case "$num" in ''|*[!0-9]*) continue ;; esac
 				if [ "$num" -lt 1 ] || [ "$num" -gt "${#doms[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
 				target="${doms[$((num-1))]}"
@@ -1493,7 +1522,7 @@ act_key() {
 }
 
 act_cftoken() {
-	read -r -p "${PANEL_LEFT_SPACES:-}Cloudflare API token（留空=保持当前）: " t
+	read -r -p "Cloudflare API token（留空=保持当前）: " t
 	if [ -n "$t" ]; then
 		local backup had_env=0 restore_rc=0
 		backup="$(mktemp)" || { echo "无法备份旧 token，未修改。" >&2; pause; return 1; }
@@ -1594,7 +1623,7 @@ act_intel() {
 		panel_option 3 "设置 AbuseIPDB API Key"
 		panel_option 4 "开关自动上报"
 		panel_footer "返回首页"
-		read -r -p "${PANEL_LEFT_SPACES:-}  请输入选项 [0-4]: " choice || return
+		read -r -p "  请输入选项 [0-4]: " choice || return
 		case "$choice" in
 			1) panel_title "情报与上报 / 同步情报"; act_sync ;;
 			2) panel_title "情报与上报 / 发送上报队列"; act_flush ;;
@@ -1617,7 +1646,7 @@ act_system() {
 		panel_section "卸载"
 		panel_option 3 "${C_R}卸载 AbuseGuard${C_0}"
 		panel_footer "返回首页"
-		read -r -p "${PANEL_LEFT_SPACES:-}  请输入选项 [0-3]: " choice || return
+		read -r -p "  请输入选项 [0-3]: " choice || return
 		case "$choice" in
 			1) panel_title "系统维护 / 最近日志"; act_logs ;;
 			2) panel_title "系统维护 / 更新"; act_update ;;
@@ -1639,7 +1668,7 @@ menu() {
 	panel_option 5 "情报与上报"
 	panel_option 6 "系统维护"
 	panel_footer "退出面板"
-	read -r -t "$PANEL_REFRESH_SECONDS" -p "${PANEL_LEFT_SPACES:-}  请输入选项 [0-6]: " choice
+	read -r -t "$PANEL_REFRESH_SECONDS" -p "  请输入选项 [0-6]: " choice
 	read_status=$?
 	case "$read_status" in
 		0) ;;
