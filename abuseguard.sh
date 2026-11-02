@@ -158,7 +158,6 @@ panel_pause() {
 
 panel_title() { panel_start "$1"; echo; }
 panel_kv() { panel_row " $(panel_pad "$1" 8) : $2"; }
-panel_section() { panel_row " ${C_H}$1${C_0}"; }
 panel_option() { panel_row " $1. $2"; }
 panel_pair() { panel_option "$1" "$2"; panel_option "$3" "$4"; }
 panel_footer() { panel_option 0 "$1"; panel_sep; }
@@ -244,25 +243,21 @@ header() {
 act_status() {
 	local st n desc next d u
 	panel_start "运行概览"
-	panel_section "服务状态"
 	for s in caddy fail2ban; do
 		st="$(svc_state "$s")"; [ "$st" = active ] && st="运行中"
 		panel_row " $s  $st"
 	done
-	panel_section "受保护站点 · 域名 → 反代上游"
 	if [ -n "$(sites_lines)" ]; then
 		while IFS=$'\t' read -r d u; do [ -n "$d" ] && panel_row " $d → $u"; done < <(sites_lines)
 	else
 		panel_row " 暂无站点，可从首页「站点与证书」添加。"
 	fi
-	panel_section "防护任务 · 各 jail 当前封禁数"
 	for j in $JAILS; do
 		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
 		[ -z "$n" ] && n="未启用"
 		printf -v st ' %-20s%s' "$j" "$n"
 		panel_row "$st"
 	done
-	panel_section "定时任务"
 	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
 		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
 		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
@@ -356,7 +351,6 @@ act_whitelist() {
 	local line ip num target tmp c i
 	while true; do
 		panel_start "防火墙 / IP 白名单"
-		panel_section "当前白名单"
 		panel_row " 白名单 IP 不会被封禁或上报，仍受端口规则限制。"
 		items=()
 		while IFS= read -r line; do
@@ -369,7 +363,6 @@ act_whitelist() {
 			for line in "${items[@]}"; do panel_row " $line"; done
 		fi
 		panel_sep
-		panel_section "白名单操作"
 		panel_option 1 "添加 IP 或网段（支持批量）"
 		panel_option 2 "删除白名单条目"
 		panel_option 3 "用编辑器打开"
@@ -722,7 +715,6 @@ act_firewall() {
 	while true; do
 		panel_start "防火墙"
 		firewall_policy_load
-		panel_section "当前策略"
 		if firewall_running; then state="${C_G}运行中${C_0}"; else state="${C_Y}未就绪，请重新应用规则${C_0}"; fi
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="已开启"; else boot="未开启"; fi
 		panel_row " 防火墙 $state   开机恢复 $boot"
@@ -739,15 +731,12 @@ act_firewall() {
 			while IFS= read -r line; do panel_row "${C_Y}$line${C_0}"; done <<< "$warning"
 		fi
 		panel_sep
-		panel_section "端口与协议"
 		panel_pair 1 "开放端口" 2 "关闭端口"
 		if [ "$fw_ipv4_in" = 1 ]; then state4="${C_G}已开启${C_0}"; else state4="${C_D}已关闭${C_0}"; fi
 		if [ "$fw_ipv6_in" = 1 ]; then state6="${C_G}已开启${C_0}"; else state6="${C_D}已关闭${C_0}"; fi
 		panel_pair 3 "IPv4 入站  $state4" 4 "IPv6 入站  $state6"
-		panel_section "IP 访问控制"
 		panel_pair 5 "查看封禁列表" 6 "封禁 IP"
 		panel_pair 7 "解封 IP" 8 "管理白名单"
-		panel_section "规则维护"
 		panel_pair 9 "查看全部规则" 10 "重新应用规则"
 		echo
 		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
@@ -1295,7 +1284,6 @@ act_ssh() {
 	local choice ports pw pk pw_display pk_display
 	while true; do
 		panel_start "SSH 与登录"
-		panel_section "当前状态"
 		ports="$(ssh_current_ports)"
 		[ -n "$ports" ] || ports="无法读取"
 		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
@@ -1311,12 +1299,9 @@ act_ssh() {
 			panel_row " ${C_Y}键盘交互认证仍开启，可能仍允许密码${C_0}"
 		fi
 		panel_sep
-		panel_section "连接设置"
 		panel_option 1 "修改 SSH 端口"
-		panel_section "认证方式"
 		panel_option 2 "全局密码认证 开/关"
 		panel_option 3 "全局密钥认证 开/关"
-		panel_section "root 凭据"
 		panel_pair 4 "添加公钥" 5 "删除公钥"
 		panel_option 6 "修改 root 密码"
 		echo
@@ -1362,7 +1347,6 @@ act_sites() {
 	local -a doms
 	while true; do
 		panel_start "站点与证书"
-		panel_section "已保护的站点 · 域名 → 反代上游"
 		doms=()
 		while IFS=$'\t' read -r d u; do
 			[ -n "$d" ] || continue
@@ -1376,10 +1360,8 @@ act_sites() {
 			panel_row " 证书方式：Caddy 自动 HTTPS（需 443/tcp 可直达）"
 		fi
 		panel_sep
-		panel_section "站点管理"
 		panel_option 1 "添加站点"
 		panel_option 2 "删除站点"
-		panel_section "证书设置"
 		panel_option 3 "设置 Cloudflare API Token"
 		panel_footer "返回首页"
 		read -r -p "  请输入选项 [0-3]: " choice || return
@@ -1560,7 +1542,6 @@ act_intel() {
 	local choice
 	while true; do
 		panel_start "情报与上报"
-		panel_section "情报与上报状态"
 		if [ "$(reporting_state)" = on ]; then
 			if [ -s "$KEYFILE" ]; then panel_row " AbuseIPDB 自动上报：${C_G}已开启${C_0}"
 			else panel_row " AbuseIPDB 自动上报：${C_Y}等待配置 API Key${C_0}"; fi
@@ -1568,9 +1549,7 @@ act_intel() {
 			panel_row " AbuseIPDB 自动上报：${C_D}已关闭${C_0}"
 		fi
 		panel_sep
-		panel_section "情报同步"
 		panel_option 1 "立即同步威胁情报"
-		panel_section "AbuseIPDB 上报"
 		panel_option 2 "立即发送上报队列"
 		panel_option 3 "设置 AbuseIPDB API Key"
 		panel_option 4 "开关自动上报"
@@ -1591,11 +1570,8 @@ act_system() {
 	local choice
 	while true; do
 		panel_start "系统维护"
-		panel_section "运行诊断"
 		panel_option 1 "查看最近日志"
-		panel_section "版本维护"
 		panel_option 2 "更新 AbuseGuard"
-		panel_section "卸载"
 		panel_option 3 "${C_R}卸载 AbuseGuard${C_0}"
 		panel_footer "返回首页"
 		read -r -p "  请输入选项 [0-3]: " choice || return
