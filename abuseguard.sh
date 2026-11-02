@@ -72,10 +72,7 @@ caddy_restart_active() {
 # 辅助文字跟随终端默认前景色，避免固定亮灰色在浅色主题下难以辨认。
 C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[22;39m'; C_H=$'\033[1m'; C_0=$'\033[0m'
 PANEL_WIDTH=76
-PANEL_ROWS=0
-PANEL_TMP=''
-PANEL_BUFFERING=0
-pause() { panel_flush; echo; read -r -p "  按回车继续..." _; }
+pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
 panel_sep() {
@@ -147,51 +144,7 @@ panel_center() {
 	printf '  %s%s\n' "$pad" "$1"
 }
 
-panel_update_rows() {
-	local rows=''
-	if [ -n "${PANEL_FORCE_ROWS:-}" ]; then rows="$PANEL_FORCE_ROWS"
-	elif [ -t 1 ]; then
-		rows=$(tput lines 2>/dev/null || true)
-		[ -n "$rows" ] || rows=$(stty size 2>/dev/null | awk '{print $1}')
-	fi
-	[ -n "$rows" ] || rows="${LINES:-0}"
-	case "$rows" in '' | *[!0-9]*) rows=0 ;; esac
-	PANEL_ROWS="$rows"
-}
-
-panel_flush() {
-	[ "${PANEL_BUFFERING:-0}" = 1 ] || return 0
-	exec 1>&4 4>&-
-	PANEL_BUFFERING=0
-	local lines=() count top i
-	mapfile -t lines < "$PANEL_TMP"
-	rm -f -- "$PANEL_TMP"
-	PANEL_TMP=''
-	count=${#lines[@]}
-	top=$(((PANEL_ROWS - count - 1) / 2)); [ "$top" -gt 0 ] || top=0
-	for ((i = 0; i < top; i++)); do echo; done
-	[ "$count" -eq 0 ] || printf '%s\n' "${lines[@]}"
-}
-
 panel_start() {
-	panel_flush
-	clear 2>/dev/null || true
-	panel_update_rows
-	PANEL_TMP=$(mktemp 2>/dev/null) || PANEL_TMP=''
-	if [ -n "$PANEL_TMP" ]; then
-		exec 4>&1
-		exec >"$PANEL_TMP"
-		PANEL_BUFFERING=1
-	else
-		PANEL_BUFFERING=0
-	fi
-	panel_sep
-	panel_center "${C_H}$1${C_0}"
-	panel_sep
-}
-
-panel_start_now() {
-	panel_flush
 	clear 2>/dev/null || true
 	panel_sep
 	panel_center "${C_H}$1${C_0}"
@@ -200,16 +153,15 @@ panel_start_now() {
 
 panel_pause() {
 	panel_sep
-	panel_flush
 	read -r -p "  按回车返回..." _
 }
 
-panel_title() { panel_start_now "$1"; echo; }
+panel_title() { panel_start "$1"; echo; }
 panel_kv() { panel_row " $(panel_pad "$1" 8) : $2"; }
 panel_section() { echo; panel_row " ${C_H}$1${C_0}"; }
 panel_option() { panel_row " $1. $2"; }
 panel_pair() { panel_option "$1" "$2"; panel_option "$3" "$4"; }
-panel_footer() { panel_option 0 "$1"; panel_sep; panel_flush; }
+panel_footer() { panel_option 0 "$1"; panel_sep; }
 
 count_banned() {
 	local total=0 n
