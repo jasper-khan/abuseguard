@@ -72,7 +72,6 @@ caddy_restart_active() {
 # 辅助文字跟随终端默认前景色，避免固定亮灰色在浅色主题下难以辨认。
 C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[22;39m'; C_H=$'\033[1m'; C_0=$'\033[0m'
 PANEL_WIDTH=76
-PANEL_FIRST_SECTION=0
 pause() { echo; read -r -p "按回车继续..." _; }
 svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
@@ -150,7 +149,6 @@ panel_start() {
 	panel_sep
 	panel_center "${C_H}$1${C_0}"
 	panel_sep
-	PANEL_FIRST_SECTION=1
 }
 
 panel_pause() {
@@ -160,14 +158,7 @@ panel_pause() {
 
 panel_title() { panel_start "$1"; echo; }
 panel_kv() { panel_row " $(panel_pad "$1" 8) : $2"; }
-panel_section() {
-	if [ "${PANEL_FIRST_SECTION:-0}" = 1 ]; then
-		PANEL_FIRST_SECTION=0
-	else
-		echo
-	fi
-	panel_row " ${C_H}$1${C_0}"
-}
+panel_section() { panel_row " ${C_H}$1${C_0}"; }
 panel_option() { panel_row " $1. $2"; }
 panel_pair() { panel_option "$1" "$2"; panel_option "$3" "$4"; }
 panel_footer() { panel_option 0 "$1"; panel_sep; }

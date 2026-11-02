@@ -156,15 +156,9 @@ footer="$(panel_footer "返回首页" | sed $'s/\033\\[[0-9;]*m//g')"
 [ "$(printf '%s\n' "$footer" | sed -n '1p' | sed -E 's/^ +//; s/ +/ /g')" = '0. 返回首页' ]
 [ "$(printf '%s\n' "$footer" | sed -n '2p' | LC_ALL=C.UTF-8 wc -L)" -eq 74 ]
 
-PANEL_FIRST_SECTION=1
-first_section="$(panel_section "已保护的站点" | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$first_section" | wc -l)" -eq 1 ]
-[ "$(printf '%s\n' "$first_section" | sed -n '1p')" = '   已保护的站点' ]
-
-PANEL_FIRST_SECTION=0
 section="$(panel_section "服务状态" | sed $'s/\033\\[[0-9;]*m//g')"
-[ "$(printf '%s\n' "$section" | wc -l)" -eq 2 ]
-[ "$(printf '%s\n' "$section" | sed -n '2p')" = '   服务状态' ]
+[ "$(printf '%s\n' "$section" | wc -l)" -eq 1 ]
+[ "$(printf '%s\n' "$section" | sed -n '1p')" = '   服务状态' ]
 [ "$(thousands 1407)" = 1,407 ]
 [ "$(thousands 95627)" = 95,627 ]
 LAYOUT
