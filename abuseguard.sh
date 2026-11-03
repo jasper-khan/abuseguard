@@ -732,13 +732,14 @@ act_firewall() {
 		firewall_policy_load
 		if firewall_running; then state="${C_G}运行中${C_0}"; else state="${C_Y}未就绪，请重新应用规则${C_0}"; fi
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="已开启"; else boot="未开启"; fi
-		panel_row " 防火墙 $state   开机恢复 $boot"
+		panel_row " $(panel_pad "防火墙" 24)$state"
+		panel_row " $(panel_pad "开机恢复" 24)$boot"
 		panel_row " ${C_D}默认拒绝未放行的入站连接，保留已建立连接。${C_0}"
 		ports="$(firewall_ports)"
 		if [ -n "$ports" ]; then
-			panel_row " ${C_D}协议  端口     来源${C_0}"
+			panel_row " ${C_D}协议    端口  来源${C_0}"
 			while IFS= read -r line; do panel_row "$line"; done < <(printf '%s\n' "$ports" | awk '
-				{ printf " %-5s %-8s %s\n", toupper($1), $2, ($3 != "" && $3 != "any" ? $3 : "所有来源") }
+				{ printf " %-5s %6s  %s\n", toupper($1), $2, ($3 != "" && $3 != "any" ? $3 : "所有来源") }
 			')
 		else panel_row " （配置缺失）"; fi
 		warning="$(firewall_check_conflicts 2>&1)" || true
