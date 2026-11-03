@@ -158,6 +158,40 @@ footer="$(panel_footer "返回首页" | sed $'s/\033\\[[0-9;]*m//g')"
 
 [ "$(thousands 1407)" = 1,407 ]
 [ "$(thousands 95627)" = 95,627 ]
+
+# Render the overview once with data doubles: grouping, column alignment,
+# colored states and the fallbacks for missing jails and disabled timers.
+panel_start() { :; }
+panel_pause() { :; }
+svc_state() { case "$1" in fail2ban) echo active ;; *) echo inactive ;; esac; }
+sites_lines() { printf '%s\t%s\n' "example.com" "127.0.0.1:3000"; }
+systemctl() {
+	case "$1" in
+		is-active) case "$2" in caddy-abuseguard-sync.timer) echo active ;; *) echo inactive ;; esac ;;
+		show) case "$2" in caddy-abuseguard-sync.timer) echo "Tue 2026-11-04 03:00:00 CST" ;; *) echo n/a ;; esac ;;
+	esac
+}
+fail2ban-client() {
+	case "$2" in
+		caddy-intel) echo "Status for the jail: $2. Currently banned: 158" ;;
+		sshd-intel) echo "NOK: $2" ;;
+		*) echo "Currently banned: 0" ;;
+	esac
+}
+status="$(act_status | sed $'s/\033\\[[0-9;]*m//g')"
+count_rows="$(printf '%s\n' "$status" | grep -E '^ +(caddy-(intel|rate-local|probe-h[12])|sshd) +[0-9]+$')"
+# Every count row must end in the same column: 3 leading + 24 label + 7 count.
+[ "$(printf '%s\n' "$count_rows" | awk '{print length($0)}' | sort -u)" = 34 ]
+[ "$(printf '%s\n' "$count_rows" | wc -l)" -eq 5 ]
+[ "$(printf '%s\n' "$status" | grep -cE 'sshd-intel +未启用' || true)" -eq 1 ]
+[ "$(printf '%s\n' "$status" | grep -cE 'caddy +未运行' || true)" -eq 1 ]
+[ "$(printf '%s\n' "$status" | grep -cE 'fail2ban +运行中' || true)" -eq 1 ]
+[ "$(printf '%s\n' "$status" | grep -cE 'example\.com +→ 127\.0\.0\.1:3000' || true)" -eq 1 ]
+[ "$(printf '%s\n' "$status" | grep -cE '上报队列冲刷 +未启用' || true)" -eq 1 ]
+[ "$(printf '%s\n' "$status" | grep -cE '威胁情报同步 +已启用（下次 Tue 2026-11-04 03:00:00 CST）' || true)" -eq 1 ]
+for h in 服务 站点 封禁 定时; do
+	[ "$(printf '%s\n' "$status" | grep -cE "^ +$h\$" || true)" -eq 1 ]
+done
 LAYOUT
 
 echo "panel refresh, navigation and layout tests passed"

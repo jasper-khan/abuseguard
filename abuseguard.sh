@@ -243,28 +243,43 @@ header() {
 act_status() {
 	local st n desc next d u
 	panel_start "运行概览"
+	panel_row " ${C_D}服务${C_0}"
 	for s in caddy fail2ban; do
-		st="$(svc_state "$s")"; [ "$st" = active ] && st="运行中"
-		panel_row " $s  $st"
+		if [ "$(svc_state "$s")" = active ]; then st="${C_G}运行中${C_0}"; else st="${C_R}未运行${C_0}"; fi
+		panel_row " $(panel_pad "$s" 24)$st"
 	done
+	panel_row ""
+	panel_row " ${C_D}站点${C_0}"
 	if [ -n "$(sites_lines)" ]; then
-		while IFS=$'\t' read -r d u; do [ -n "$d" ] && panel_row " $d → $u"; done < <(sites_lines)
+		while IFS=$'\t' read -r d u; do
+			[ -n "$d" ] && panel_row " $(panel_pad "$d" 24)${C_D}→${C_0} $u"
+		done < <(sites_lines)
 	else
 		panel_row " 暂无站点，可从首页「站点与证书」添加。"
 	fi
+	panel_row ""
+	panel_row " ${C_D}封禁${C_0}"
 	for j in $JAILS; do
 		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
-		[ -z "$n" ] && n="未启用"
-		printf -v st ' %-20s%s' "$j" "$n"
-		panel_row "$st"
+		if [ -n "$n" ]; then
+			printf -v st ' %-24s%7s' "$j" "$n"
+			panel_row "$st"
+		else
+			panel_row " $(panel_pad "$j" 24)${C_D}未启用${C_0}"
+		fi
 	done
+	panel_row ""
+	panel_row " ${C_D}定时${C_0}"
 	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
 		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
 		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
 			next="$(systemctl show "$u" -p NextElapseUSecRealtime --value 2>/dev/null)"
-			case "$next" in ""|0|n/a) panel_row " $desc：已启用" ;; *) panel_row " $desc：已启用（下次 $next）" ;; esac
+			case "$next" in ""|0|n/a) next="" ;; esac
+			st=""
+			[ -n "$next" ] && st="${C_D}（下次 $next）${C_0}"
+			panel_row " $(panel_pad "$desc" 24)${C_G}已启用${C_0}$st"
 		else
-			panel_row " $desc：未启用"
+			panel_row " $(panel_pad "$desc" 24)${C_D}未启用${C_0}"
 		fi
 	done
 	panel_pause
