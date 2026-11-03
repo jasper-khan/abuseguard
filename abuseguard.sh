@@ -81,6 +81,13 @@ panel_sep() {
 	printf '  %s\n' "${fill// /=}"
 }
 
+# 小节分隔线：细横线加暗色，弱于上下边框。
+panel_divider() {
+	local fill
+	printf -v fill '%*s' "$((PANEL_WIDTH - 4))" ''
+	printf '  %s%s%s\n' "${C_D}" "${fill// /─}" "${C_0}"
+}
+
 # 长文本按终端列宽换行：汉字和全角标点占两列，ANSI 颜色不占列。
 panel_row() {
 	local LC_ALL=C.UTF-8 text="$1" line='' color='' used=0 char size seq
@@ -248,7 +255,7 @@ act_status() {
 		if [ "$(svc_state "$s")" = active ]; then st="${C_G}运行中${C_0}"; else st="${C_R}未运行${C_0}"; fi
 		panel_row " $(panel_pad "$s" 24)$st"
 	done
-	panel_row ""
+	panel_divider
 	panel_row " ${C_D}站点${C_0}"
 	if [ -n "$(sites_lines)" ]; then
 		while IFS=$'\t' read -r d u; do
@@ -257,7 +264,7 @@ act_status() {
 	else
 		panel_row " 暂无站点，可从首页「站点与证书」添加。"
 	fi
-	panel_row ""
+	panel_divider
 	panel_row " ${C_D}封禁${C_0}"
 	for j in $JAILS; do
 		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
@@ -268,7 +275,7 @@ act_status() {
 			panel_row " $(panel_pad "$j" 24)${C_D}未启用${C_0}"
 		fi
 	done
-	panel_row ""
+	panel_divider
 	panel_row " ${C_D}定时${C_0}"
 	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
 		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac

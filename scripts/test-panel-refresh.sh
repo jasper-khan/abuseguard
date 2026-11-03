@@ -192,6 +192,7 @@ count_rows="$(printf '%s\n' "$status" | grep -E '^ +(caddy-(intel|rate-local|pro
 for h in 服务 站点 封禁 定时; do
 	[ "$(printf '%s\n' "$status" | grep -cE "^ +$h\$" || true)" -eq 1 ]
 done
+[ "$(printf '%s\n' "$status" | grep -c '───' || true)" -eq 3 ]
 LAYOUT
 
 echo "panel refresh, navigation and layout tests passed"
