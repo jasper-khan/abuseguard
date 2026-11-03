@@ -1370,7 +1370,7 @@ act_sites() {
 		done < <(sites_lines)
 		[ "${#doms[@]}" -eq 0 ] && panel_row " （暂无站点，选择 [1] 添加并启用防护）"
 		if cf_is_set; then
-			panel_row " 证书方式：Cloudflare DNS（已配置 CF token）"
+			panel_row " 证书方式：Cloudflare DNS-01（已配置 API Token）"
 		else
 			panel_row " 证书方式：Caddy 自动 HTTPS（需 443/tcp 可直达）"
 		fi
