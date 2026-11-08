@@ -382,7 +382,7 @@ act_whitelist() {
 		panel_option 2 "删除白名单条目"
 		panel_option 3 "用编辑器打开"
 		panel_footer "返回防火墙"
-		read -r -p "  请输入选项 [0-3]: " c || return
+		read -r -p "  请输入选项 [0-3]（回车返回）: " c || return
 		case "$c" in
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
@@ -432,7 +432,7 @@ act_whitelist() {
 					rm -f -- "$tmp"; echo "  白名单格式无效或编辑失败，原文件保持不变。"
 				fi
 				sleep 1 ;;
-			0) wl_reload; return ;;
+			''|0) wl_reload; return ;;
 			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
 		esac
 	done
@@ -758,7 +758,7 @@ act_firewall() {
 		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
 		panel_row " ${C_D}云安全组及容器转发规则需在对应平台管理。${C_0}"
 		panel_footer "返回首页"
-		read -r -p "  请输入选项 [0-10]: " choice || return
+		read -r -p "  请输入选项 [0-10]（回车返回）: " choice || return
 		case "$choice" in
 			1) panel_title "防火墙 / 开放端口"; firewall_change_port open || echo "未完成端口变更。"; pause ;;
 			2) panel_title "防火墙 / 关闭端口"; firewall_change_port close || echo "未完成端口变更。"; pause ;;
@@ -770,7 +770,7 @@ act_firewall() {
 			8) act_whitelist ;;
 			9) panel_title "防火墙 / 全部规则"; nft -a list ruleset; pause ;;
 			10) panel_title "防火墙 / 重新应用规则"; firewall_apply || echo "应用失败，请检查上方错误。"; pause ;;
-			0) return ;;
+			''|0) return ;;
 			*) echo "请输入 0–10 之间的菜单编号。"; pause ;;
 		esac
 	done
@@ -1324,7 +1324,7 @@ act_ssh() {
 		panel_row " ${C_D}新端口验证登录后，再到防火墙关闭旧端口。${C_0}"
 		panel_row " ${C_D}关闭认证方式前，请确认备用登录方式可用。${C_0}"
 		panel_footer "返回首页"
-		read -r -p "  请输入选项 [0-6]: " choice || return
+		read -r -p "  请输入选项 [0-6]（回车返回）: " choice || return
 		case "$choice" in
 			1) panel_title "SSH 与登录 / 端口"; act_ssh_port || echo "未完成端口修改。"; pause ;;
 			2) panel_title "SSH 与登录 / 密码登录"; act_ssh_auth passwordauthentication PasswordAuthentication "密码登录" || echo "未完成修改。"; pause ;;
@@ -1332,7 +1332,7 @@ act_ssh() {
 			4) panel_title "SSH 与登录 / 添加公钥"; act_ssh_key_add; pause ;;
 			5) panel_title "SSH 与登录 / 删除公钥"; act_ssh_key_remove; pause ;;
 			6) panel_title "SSH 与登录 / 修改 root 密码"; act_ssh_password; pause ;;
-			0) return ;;
+			''|0) return ;;
 			*) echo "请输入 0–6 之间的菜单编号。"; pause ;;
 		esac
 	done
@@ -1380,7 +1380,7 @@ act_sites() {
 		panel_option 2 "删除站点"
 		panel_option 3 "设置 Cloudflare API Token"
 		panel_footer "返回首页"
-		read -r -p "  请输入选项 [0-3]: " choice || return
+		read -r -p "  请输入选项 [0-3]（回车返回）: " choice || return
 		case "$choice" in
 			1)
 				panel_title "站点与证书 / 添加站点"
@@ -1457,7 +1457,7 @@ act_sites() {
 				rm -f -- "$backup"
 				echo "  已删除 $target （caddy 已应用配置）"; sleep 1 ;;
 			3) panel_title "站点与证书 / Cloudflare API Token"; act_cftoken ;;
-			0) return ;;
+			''|0) return ;;
 			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
 		esac
 	done
@@ -1579,13 +1579,13 @@ act_intel() {
 		panel_option 3 "设置 AbuseIPDB API Key"
 		panel_option 4 "开关自动上报"
 		panel_footer "返回首页"
-		read -r -p "  请输入选项 [0-4]: " choice || return
+		read -r -p "  请输入选项 [0-4]（回车返回）: " choice || return
 		case "$choice" in
 			1) panel_title "情报与上报 / 同步情报"; act_sync ;;
 			2) panel_title "情报与上报 / 发送上报队列"; act_flush ;;
 			3) panel_title "情报与上报 / AbuseIPDB API Key"; act_key ;;
 			4) panel_title "情报与上报 / 自动上报"; act_toggle ;;
-			0) return ;;
+			''|0) return ;;
 			*) echo "请输入 0–4 之间的菜单编号。"; pause ;;
 		esac
 	done
@@ -1599,12 +1599,12 @@ act_system() {
 		panel_option 2 "更新 AbuseGuard"
 		panel_option 3 "${C_R}卸载 AbuseGuard${C_0}"
 		panel_footer "返回首页"
-		read -r -p "  请输入选项 [0-3]: " choice || return
+		read -r -p "  请输入选项 [0-3]（回车返回）: " choice || return
 		case "$choice" in
 			1) panel_title "系统维护 / 最近日志"; act_logs ;;
 			2) panel_title "系统维护 / 更新"; act_update ;;
 			3) panel_title "系统维护 / 卸载"; act_uninstall ;;
-			0) return ;;
+			''|0) return ;;
 			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
 		esac
 	done
