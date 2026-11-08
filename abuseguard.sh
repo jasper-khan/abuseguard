@@ -432,7 +432,8 @@ act_whitelist() {
 					rm -f -- "$tmp"; echo "  白名单格式无效或编辑失败，原文件保持不变。"
 				fi
 				sleep 1 ;;
-			''|0) wl_reload; return ;;
+			'') return ;;
+			0) wl_reload; return ;;
 			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
 		esac
 	done
