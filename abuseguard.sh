@@ -248,6 +248,18 @@ act_status() {
 		if [ "$(svc_state "$s")" = active ]; then st="${C_G}运行中${C_0}"; else st="${C_R}未运行${C_0}"; fi
 		panel_row " $(panel_pad "$s" 24)$st"
 	done
+	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
+		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
+		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
+			next="$(systemctl show "$u" -p NextElapseUSecRealtime --value 2>/dev/null)"
+			case "$next" in ""|0|n/a) next="" ;; esac
+			st=""
+			[ -n "$next" ] && st="${C_D}（下次 $next）${C_0}"
+			panel_row " $(panel_pad "$desc" 24)${C_G}已启用${C_0}$st"
+		else
+			panel_row " $(panel_pad "$desc" 24)${C_D}未启用${C_0}"
+		fi
+	done
 	panel_sep
 	panel_row " ${C_D}站点${C_0}"
 	if [ -n "$(sites_lines)" ]; then
@@ -266,20 +278,6 @@ act_status() {
 			panel_row "$st"
 		else
 			panel_row " $(panel_pad "$j" 24)${C_D}未启用${C_0}"
-		fi
-	done
-	panel_sep
-	panel_row " ${C_D}定时${C_0}"
-	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
-		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
-		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
-			next="$(systemctl show "$u" -p NextElapseUSecRealtime --value 2>/dev/null)"
-			case "$next" in ""|0|n/a) next="" ;; esac
-			st=""
-			[ -n "$next" ] && st="${C_D}（下次 $next）${C_0}"
-			panel_row " $(panel_pad "$desc" 24)${C_G}已启用${C_0}$st"
-		else
-			panel_row " $(panel_pad "$desc" 24)${C_D}未启用${C_0}"
 		fi
 	done
 	panel_pause
@@ -732,10 +730,9 @@ act_firewall() {
 		panel_start "防火墙"
 		firewall_policy_load
 		if firewall_running; then state="${C_G}运行中${C_0}"; else state="${C_Y}未就绪，请重新应用规则${C_0}"; fi
-		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="已开启"; else boot="未开启"; fi
+		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="${C_G}已开启${C_0}"; else boot="${C_R}未开启${C_0}"; fi
 		panel_row " $(panel_pad "防火墙" 24)$state"
 		panel_row " $(panel_pad "开机恢复" 24)$boot"
-		panel_row " ${C_D}默认拒绝未放行的入站连接，保留已建立连接。${C_0}"
 		ports="$(firewall_ports)"
 		if [ -n "$ports" ]; then
 			panel_row " ${C_D}协议    端口  来源${C_0}"
@@ -748,6 +745,10 @@ act_firewall() {
 			while IFS= read -r line; do panel_row "${C_Y}$line${C_0}"; done <<< "$warning"
 		fi
 		panel_sep
+		panel_row " ${C_D}默认拒绝未放行的入站连接，保留已建立连接。${C_0}"
+		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
+		panel_row " ${C_D}云安全组及容器转发规则需在对应平台管理。${C_0}"
+		panel_sep
 		panel_pair 1 "开放端口" 2 "关闭端口"
 		if [ "$fw_ipv4_in" = 1 ]; then state4="${C_G}已开启${C_0}"; else state4="${C_D}已关闭${C_0}"; fi
 		if [ "$fw_ipv6_in" = 1 ]; then state6="${C_G}已开启${C_0}"; else state6="${C_D}已关闭${C_0}"; fi
@@ -755,9 +756,6 @@ act_firewall() {
 		panel_pair 5 "查看封禁列表" 6 "封禁 IP"
 		panel_pair 7 "解封 IP" 8 "管理白名单"
 		panel_pair 9 "查看全部规则" 10 "重新应用规则"
-		echo
-		panel_row " ${C_D}白名单仅豁免 IP 封禁，仍受端口规则限制。${C_0}"
-		panel_row " ${C_D}云安全组及容器转发规则需在对应平台管理。${C_0}"
 		panel_footer "返回首页"
 		read -r -p "  请输入选项 [0-10]（回车返回）: " choice || return
 		case "$choice" in
@@ -1306,8 +1304,8 @@ act_ssh() {
 		panel_row " 监听端口 $(printf '%s' "$ports" | tr '\n' ' ')"
 		pw="$(ssh_auth_state passwordauthentication)"
 		pk="$(ssh_auth_state pubkeyauthentication)"
-		case "$pw" in on) pw_display="${C_G}已开启${C_0}" ;; off) pw_display="${C_D}已关闭${C_0}" ;; *) pw_display="${C_Y}未知${C_0}" ;; esac
-		case "$pk" in on) pk_display="${C_G}已开启${C_0}" ;; off) pk_display="${C_D}已关闭${C_0}" ;; *) pk_display="${C_Y}未知${C_0}" ;; esac
+		case "$pw" in on) pw_display="${C_G}已开启${C_0}" ;; off) pw_display="${C_R}已关闭${C_0}" ;; *) pw_display="${C_Y}未知${C_0}" ;; esac
+		case "$pk" in on) pk_display="${C_G}已开启${C_0}" ;; off) pk_display="${C_R}已关闭${C_0}" ;; *) pk_display="${C_Y}未知${C_0}" ;; esac
 		panel_row " 全局密码认证 $pw_display   全局密钥认证 $pk_display"
 		if [ "$pw" = on ] && ! root_password_login_ready; then
 			panel_row " ${C_Y}root 能否独立使用密码：未确认（可能受 SSH 策略限制）${C_0}"
@@ -1315,15 +1313,14 @@ act_ssh() {
 		if [ "$pw" = off ] && [ "$(ssh_auth_state kbdinteractiveauthentication)" = on ]; then
 			panel_row " ${C_Y}键盘交互认证仍开启，可能仍允许密码${C_0}"
 		fi
+		panel_row " ${C_D}新端口验证登录后，再到防火墙关闭旧端口。${C_0}"
+		panel_row " ${C_D}关闭认证方式前，请确认备用登录方式可用。${C_0}"
 		panel_sep
 		panel_option 1 "修改 SSH 端口"
 		panel_option 2 "全局密码认证 开/关"
 		panel_option 3 "全局密钥认证 开/关"
 		panel_pair 4 "添加公钥" 5 "删除公钥"
 		panel_option 6 "修改 root 密码"
-		echo
-		panel_row " ${C_D}新端口验证登录后，再到防火墙关闭旧端口。${C_0}"
-		panel_row " ${C_D}关闭认证方式前，请确认备用登录方式可用。${C_0}"
 		panel_footer "返回首页"
 		read -r -p "  请输入选项 [0-6]（回车返回）: " choice || return
 		case "$choice" in

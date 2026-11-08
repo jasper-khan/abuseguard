@@ -189,10 +189,10 @@ count_rows="$(printf '%s\n' "$status" | grep -E '^ +(caddy-(intel|rate-local|pro
 [ "$(printf '%s\n' "$status" | grep -cE 'example\.com +→ 127\.0\.0\.1:3000' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE '上报队列冲刷 +未启用' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE '威胁情报同步 +已启用（下次 Tue 2026-11-04 03:00:00 CST）' || true)" -eq 1 ]
-for h in 服务 站点 封禁 定时; do
+for h in 服务 站点 封禁; do
 	[ "$(printf '%s\n' "$status" | grep -cE "^ +$h\$" || true)" -eq 1 ]
 done
-[ "$(printf '%s\n' "$status" | grep -c '===' || true)" -eq 3 ]
+[ "$(printf '%s\n' "$status" | grep -c '===' || true)" -eq 2 ]
 LAYOUT
 
 echo "panel refresh, navigation and layout tests passed"
