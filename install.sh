@@ -67,6 +67,7 @@ REPORTS_DIR="$STATE_DIR/reports"
 LOG_DIR=/var/log/caddy
 LIBEXEC_DIR=/usr/local/libexec
 ENGINE_BIN="$LIBEXEC_DIR/caddy-abuseguard"
+POLICY_BIN="$LIBEXEC_DIR/caddy-abuseguard-policy"
 PANEL_BIN=/usr/local/bin/ag
 LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
@@ -120,7 +121,7 @@ detect_ssh_port() {
 
 verify_fail2ban_jails() {
 	local mode="$1" jail dump missing attempt
-	local jails="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
+	local jails="caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd"
 	if [ "$mode" = config ]; then
 		dump="$(fail2ban-client -d)" || die "无法读取 fail2ban 的有效配置。"
 		for jail in $jails; do
@@ -140,6 +141,203 @@ verify_fail2ban_jails() {
 		sleep 1
 	done
 	die "fail2ban 已启动，但以下防护未运行：$missing。请检查 fail2ban 日志；安装未完成。"
+}
+
+# Legacy intel jails are retired. Capture their bans before the new jail files
+# replace them, so the installer can re-ban each source after the new policy is
+# live instead of silently dropping operator/feed bans.
+legacy_intel_bans() {
+	local jail status ips
+	for jail in caddy-intel sshd-intel; do
+		status="$(fail2ban-client status "$jail" 2>/dev/null)" || continue
+		ips="$(printf '%s\n' "$status" | sed -n 's/.*Banned IP list:[[:space:]]*//p')"
+		[ -z "$ips" ] || printf '%s\n' "$ips" | tr ' ' '\n'
+	done | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | awk '!seen[$0]++'
+}
+
+# --- fail2ban upgrade safety -------------------------------------------------
+# The retired intel jails run the engine as ignorecommand. Replacing the engine
+# while those jails are live would make them invoke the new CLI (which no longer
+# has their subcommands) and ban every uncached visitor for 90 days. "idle" stops
+# log detection/ignorecommand but keeps each jail's existing nft bans enforced;
+# a full stop is only the fallback when idle is unavailable.
+FAIL2BAN_PAUSED=0
+FAIL2BAN_STOPPED=0
+ENGINE_SWAPPED=0
+ENGINE_BACKUP=""
+INSTALL_COMPLETE=0
+STAGED_BIN=""
+F2B_ROLLBACK_DIR=""
+PAUSE_JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
+PAUSED_JAILS_DONE=""
+# Root-only test hook (scripts/test-native-policy.sh); production uses /etc.
+F2B_ETC="${F2B_ETC:-/etc/fail2ban}"
+POLICY_F2B="$F2B_ETC/jail.d/zzz-caddy-abuseguard-policy.local"
+
+# Snapshot every fail2ban asset this installer overwrites, so a failure can
+# restore the old engine+config and resume detection instead of leaving
+# protection paused until the operator reruns the installer.
+backup_f2b_assets() {
+	local src rel
+	F2B_ROLLBACK_DIR="$(mktemp -d)" || die "无法创建 fail2ban 回滚目录。"
+	mkdir -p "$F2B_ROLLBACK_DIR/filter.d" "$F2B_ROLLBACK_DIR/action.d" "$F2B_ROLLBACK_DIR/jail.d" \
+		|| die "无法创建 fail2ban 回滚目录。"
+	: > "$F2B_ROLLBACK_DIR/manifest"
+	for src in "$SRC_DIR"/assets/fail2ban/filter.d/*.conf; do
+		rel="filter.d/$(basename "$src")"
+		if [ -e "$F2B_ETC/$rel" ]; then
+			cp -a -- "$F2B_ETC/$rel" "$F2B_ROLLBACK_DIR/$rel" || die "无法备份 $F2B_ETC/$rel。"
+			printf 'present %s\n' "$rel" >> "$F2B_ROLLBACK_DIR/manifest"
+		else
+			printf 'absent %s\n' "$rel" >> "$F2B_ROLLBACK_DIR/manifest"
+		fi
+	done
+	for src in "$SRC_DIR"/assets/fail2ban/action.d/*.conf; do
+		rel="action.d/$(basename "$src")"
+		if [ -e "$F2B_ETC/$rel" ]; then
+			cp -a -- "$F2B_ETC/$rel" "$F2B_ROLLBACK_DIR/$rel" || die "无法备份 $F2B_ETC/$rel。"
+			printf 'present %s\n' "$rel" >> "$F2B_ROLLBACK_DIR/manifest"
+		else
+			printf 'absent %s\n' "$rel" >> "$F2B_ROLLBACK_DIR/manifest"
+		fi
+	done
+	for rel in jail.d/caddy-abuseguard.local jail.d/zz-caddy-abuseguard-report.local \
+		jail.d/zzz-caddy-abuseguard-policy.local; do
+		if [ -e "$F2B_ETC/$rel" ]; then
+			cp -a -- "$F2B_ETC/$rel" "$F2B_ROLLBACK_DIR/$rel" || die "无法备份 $F2B_ETC/$rel。"
+			printf 'present %s\n' "$rel" >> "$F2B_ROLLBACK_DIR/manifest"
+		else
+			printf 'absent %s\n' "$rel" >> "$F2B_ROLLBACK_DIR/manifest"
+		fi
+	done
+}
+
+restore_f2b_assets() {
+	local state rel failed=0
+	[ -n "$F2B_ROLLBACK_DIR" ] && [ -f "$F2B_ROLLBACK_DIR/manifest" ] || return 0
+	while IFS=' ' read -r state rel; do
+		case "$state" in
+			present) cp -a -- "$F2B_ROLLBACK_DIR/$rel" "$F2B_ETC/$rel" || failed=1 ;;
+			absent) rm -f -- "$F2B_ETC/$rel" ;;
+		esac
+	done < "$F2B_ROLLBACK_DIR/manifest"
+	[ "$failed" = 0 ] || warn "警告：无法完整恢复原 fail2ban 配置，请检查 /etc/fail2ban。"
+}
+
+pause_fail2ban_for_upgrade() {
+	local jail failed=0
+	fail2ban-client ping >/dev/null 2>&1 || return 0
+	for jail in $PAUSE_JAILS; do
+		fail2ban-client status "$jail" >/dev/null 2>&1 || continue
+		if fail2ban-client set "$jail" idle on >/dev/null 2>&1; then
+			PAUSED_JAILS_DONE="$PAUSED_JAILS_DONE $jail"
+			log "已暂停 $jail 检测（现有封禁保持生效）"
+		else
+			warn "无法暂停 $jail 检测"
+			failed=1
+			break
+		fi
+	done
+	if [ "$failed" = 1 ]; then
+		log "idle 暂停失败，回退为停止 fail2ban（封禁规则短暂下掉，重启时由数据库恢复）"
+		systemctl stop fail2ban \
+			|| die "无法暂停或停止 fail2ban；为避免旧 jail 调用新引擎，安装已中止。"
+		FAIL2BAN_STOPPED=1
+	else
+		FAIL2BAN_PAUSED=1
+	fi
+}
+
+# The engine is still the old one on this path, so the old detection can resume.
+resume_fail2ban_after_failure() {
+	local jail
+	for jail in $PAUSED_JAILS_DONE; do
+		fail2ban-client set "$jail" idle off >/dev/null 2>&1 || true
+	done
+	if [ "$FAIL2BAN_PAUSED" = 1 ]; then
+		warn "安装失败：已恢复旧 fail2ban 检测（旧引擎仍在使用）。"
+	elif [ "$FAIL2BAN_STOPPED" = 1 ]; then
+		systemctl start fail2ban >/dev/null 2>&1 || warn "警告：无法重新启动 fail2ban。"
+		warn "安装失败：已恢复旧 fail2ban（旧引擎与旧配置仍在使用）。"
+	elif [ -n "$PAUSED_JAILS_DONE" ]; then
+		warn "安装失败：已恢复此前暂停的 fail2ban 检测（旧引擎仍在使用）。"
+	fi
+}
+
+# Keep the previous engine beside the installed one until the new policy is
+# proven usable, so a failure after the swap can restore the compatible pair
+# instead of discarding recovery state.
+restore_engine_backup() {
+	[ -n "$ENGINE_BACKUP" ] || return 1
+	mv -f -- "$ENGINE_BACKUP" "$ENGINE_BIN" || return 1
+	ENGINE_BACKUP=""
+	return 0
+}
+
+on_install_exit() {
+	[ -z "$STAGED_BIN" ] || rm -f -- "$STAGED_BIN"
+	if [ "$INSTALL_COMPLETE" = 1 ]; then
+		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
+		[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
+		return 0
+	fi
+	if [ "$ENGINE_SWAPPED" = 0 ]; then
+		restore_f2b_assets
+		resume_fail2ban_after_failure
+		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
+	elif restore_engine_backup; then
+		# Restore the old config only after its engine is back: old jails run the
+		# engine as ignorecommand, which the new CLI no longer supports.
+		restore_f2b_assets
+		if systemctl restart fail2ban >/dev/null 2>&1; then
+			warn "安装未完成：已恢复旧引擎与旧 fail2ban 配置，检测已恢复；修复问题后请重新运行安装器。"
+		else
+			warn "安装未完成：已恢复旧引擎与旧 fail2ban 配置，但 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
+		fi
+	else
+		# Fresh install (no previous engine) or unreadable backup: the new
+		# config never invokes the engine, so keep it and start detection.
+		[ -z "$ENGINE_BACKUP" ] || warn "警告：旧引擎备份仍保留在 $ENGINE_BACKUP。"
+		if systemctl restart fail2ban >/dev/null 2>&1; then
+			warn "安装未完成：已保留新 fail2ban 配置并恢复检测；修复问题后请重新运行安装器。"
+		else
+			warn "安装未完成：已保留新 fail2ban 配置，但 fail2ban 未能启动；请检查 journalctl -u fail2ban。"
+		fi
+	fi
+	[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
+}
+
+# Re-apply captured legacy bans to the retained non-reporting jail after the new
+# fail2ban config is running. The pending file keeps them for a retry when an
+# install fails before the migration completes.
+migrate_legacy_bans() {
+	local ip allow_rc failed=0
+	[ -n "$LEGACY_BANS" ] || return 0
+	log "正在把旧情报 jail 的封禁迁移到 caddy-rate-local（重新计时 90 天，不上报）"
+	while IFS= read -r ip; do
+		[ -n "$ip" ] || continue
+		"$ENGINE_BIN" allowlist-validate --entry "$ip" >/dev/null 2>&1 \
+			|| { warn "跳过无效的旧封禁：$ip"; continue; }
+		allow_rc=0
+		"$ENGINE_BIN" allowlist-check --ip "$ip" >/dev/null 2>&1 || allow_rc=$?
+		case "$allow_rc" in
+			0) log "白名单已覆盖旧封禁 $ip，跳过"; continue ;;
+			1) ;;
+			*) warn "无法检查白名单，跳过旧封禁 $ip"; failed=1; continue ;;
+		esac
+		if fail2ban-client set caddy-rate-local banip "$ip" >/dev/null 2>&1; then
+			log "已迁移封禁：$ip"
+		else
+			warn "迁移封禁失败：$ip"
+			failed=1
+		fi
+	done <<< "$LEGACY_BANS"
+	if [ "$failed" = 0 ]; then
+		rm -f -- "$CONF_DIR/legacy-intel-bans.pending"
+	else
+		warn "部分旧封禁未能迁移；保留 $CONF_DIR/legacy-intel-bans.pending 供下次安装重试。"
+		return 1
+	fi
 }
 
 validate_caddyfile() {
@@ -274,6 +472,62 @@ EOF
 	log "已记录安装清单（供卸载时对称回滚）"
 fi
 
+# --- capture legacy fail2ban state before the engine swap ---------------------
+# The retired jails' bans must be read while the old config is live; per-jail
+# native ignoreip is preserved by the applier on every apply. Old jails are
+# made idle (not stopped) around the swap so existing bans stay enforced. The
+# pending file makes the ban migration retryable after a failed install.
+LEGACY_BANS=""
+if [ -f "$CONF_DIR/legacy-intel-bans.pending" ]; then
+	LEGACY_BANS="$(cat "$CONF_DIR/legacy-intel-bans.pending")"
+fi
+if fail2ban-client ping >/dev/null 2>&1; then
+	LEGACY_BANS="$(printf '%s\n%s\n' "$LEGACY_BANS" "$(legacy_intel_bans || true)" \
+		| sed '/^$/d' | awk '!seen[$0]++')"
+else
+	[ "$UPDATE_MODE" = 0 ] \
+		|| warn "fail2ban 未运行：无法读取旧情报 jail 的封禁；已记录的封禁会在成功安装后迁移。"
+fi
+if [ -n "$LEGACY_BANS" ]; then
+	printf '%s\n' "$LEGACY_BANS" > "$CONF_DIR/legacy-intel-bans.pending" \
+		|| die "无法保存旧封禁清单。"
+	chown root:root "$CONF_DIR/legacy-intel-bans.pending"
+	chmod 0640 "$CONF_DIR/legacy-intel-bans.pending"
+fi
+trap on_install_exit EXIT
+trap 'exit 130' INT TERM
+# Snapshot every fail2ban file replaced below: a failure before the engine swap
+# restores this set, then resumes the old detection instead of leaving it off.
+backup_f2b_assets
+# Install the new jail/filter/action files before the engine swap. They contain
+# no ignorecommand, so a reboot or a failed install cannot make the old intel
+# jails execute the new engine. The running fail2ban keeps its old in-memory
+# config until the final restart; this only changes the on-disk config.
+log "正在安装 fail2ban 的 filter / action / jail"
+install -m 0644 "$SRC_DIR"/assets/fail2ban/filter.d/*.conf "$F2B_ETC/filter.d/"
+install -m 0644 "$SRC_DIR"/assets/fail2ban/action.d/*.conf "$F2B_ETC/action.d/"
+install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/caddy-abuseguard.local" "$F2B_ETC/jail.d/caddy-abuseguard.local"
+install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/zz-caddy-abuseguard-report.local" "$F2B_ETC/jail.d/zz-caddy-abuseguard-report.local"
+# Disable retired intel jails before the engine swap, even if a copy lives in
+# jail.local: the first policy apply rewrites this file with the full generated
+# ignoreip, but this early version already prevents old jails from ever running
+# the new engine after a reboot.
+if [ ! -f "$POLICY_F2B" ]; then
+	printf '[caddy-intel]\nenabled = false\n\n[sshd-intel]\nenabled = false\n' \
+		> "$POLICY_F2B"
+	chmod 0644 "$POLICY_F2B"
+fi
+# Reports carry the port that was actually attacked, so keep the SSH jail in
+# sync with the port sshd listens on instead of the hardcoded 22 default.
+ssh_port="$(detect_ssh_port)" || ssh_port=""
+if [ -n "$ssh_port" ]; then
+	sed -i -E "s/(profile=ssh-bruteforce, transport=SSH, target_port=)[0-9]+/\1$ssh_port/" \
+		"$F2B_ETC/jail.d/zz-caddy-abuseguard-report.local"
+	log "SSH 上报端口已同步为 $ssh_port"
+else
+	warn "未能探测 SSH 端口，SSH 上报端口保持默认 22（可在 /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local 手动修改）"
+fi
+
 # release_asset NAME -- URL of an asset from the selected release. The query is a
 # cache buster: GitHub ignores it, but download mirrors key their cache on the
 # full URL, so they stop serving a stale copy cached under the previous
@@ -306,7 +560,7 @@ sums_require() {
 	log "正在获取 SHA256SUMS（校验二进制用）..."
 	if { $AG_CURL_SUMS -o "$f" "$url" 2>/dev/null || gh_fetch "$url" "$f" "$AG_CURL_SUMS"; } && [ -s "$f" ]; then
 		SUMS_FILE="$f"
-		trap 'rm -f "$SUMS_FILE"' EXIT
+		trap 'rm -f "${SUMS_FILE:-}"; on_install_exit' EXIT
 		return 0
 	fi
 	rm -f "$f"
@@ -324,8 +578,9 @@ verify_sha256() {  # FILE BASENAME -- return failure unless the release checksum
 
 # Stage a release binary beside its destination, then verify and probe it before
 # an atomic rename. A failed download, checksum, or startup check leaves the
-# currently installed binary untouched.
-install_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
+# currently installed binary untouched. The caller decides when to commit, so a
+# long download can finish while fail2ban still runs the old engine.
+stage_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
 	local url="$1" dest="$2" fn="$3" label="$4" expected="${5:-}" tmp version_output
 	sums_require
 	tmp="$(mktemp "$(dirname "$dest")/.${fn}.tmp.XXXXXX")" \
@@ -349,39 +604,67 @@ install_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
 		warn "$label 版本不匹配（需要 $expected），保留当前版本。"
 		return 1
 	fi
-	if ! mv -f -- "$tmp" "$dest"; then
-		rm -f -- "$tmp"
-		warn "$label 无法替换当前二进制。"
+	STAGED_BIN="$tmp"
+}
+commit_staged_binary() {  # DEST LABEL
+	if ! mv -f -- "$STAGED_BIN" "$1"; then
+		rm -f -- "$STAGED_BIN"
+		STAGED_BIN=""
+		warn "$2 无法替换当前二进制。"
 		return 1
 	fi
+	STAGED_BIN=""
+}
+install_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
+	stage_release_binary "$@" || return 1
+	commit_staged_binary "$2" "$4"
 }
 
 # --- engine ------------------------------------------------------------------
-install_engine() {
+# Download/compile/verify into a temp beside the destination; the atomic swap
+# happens only after fail2ban is paused (commit_engine below).
+stage_engine() {
 	if [ -n "${ABUSEGUARD_ENGINE_BIN:-}" ]; then
 		[ -f "$ABUSEGUARD_ENGINE_BIN" ] || die "找不到 ABUSEGUARD_ENGINE_BIN 指定的文件 '$ABUSEGUARD_ENGINE_BIN'。"
 		log "从 ABUSEGUARD_ENGINE_BIN 安装引擎"
-		install -m 0755 "$ABUSEGUARD_ENGINE_BIN" "$ENGINE_BIN"
+		STAGED_BIN="$(mktemp "$(dirname "$ENGINE_BIN")/.engine.tmp.XXXXXX")" \
+			|| die "无法创建引擎临时文件。"
+		install -m 0755 "$ABUSEGUARD_ENGINE_BIN" "$STAGED_BIN" \
+			|| die "无法暂存 ABUSEGUARD_ENGINE_BIN。"
 		return
 	fi
 	if [ "$FROM_SOURCE" = "1" ]; then
 		command -v go >/dev/null 2>&1 || die "--from-source 需要 Go 工具链（请先安装 go）。"
 		log "从源码编译引擎（$SRC_DIR/engine）"
-		( cd "$SRC_DIR/engine" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$TARGET_VERSION" -o "$ENGINE_BIN" . )
-		chmod 0755 "$ENGINE_BIN"
+		STAGED_BIN="$(mktemp "$(dirname "$ENGINE_BIN")/.engine.tmp.XXXXXX")" \
+			|| die "无法创建引擎临时文件。"
+		( cd "$SRC_DIR/engine" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$TARGET_VERSION" -o "$STAGED_BIN" . ) \
+			|| die "引擎编译失败；未替换当前引擎。"
+		chmod 0755 "$STAGED_BIN"
 		return
 	fi
 	local fn="caddy-abuseguard-linux-$ARCH"
 	local url; url="$(release_asset "$fn")"
 	log "正在下载引擎（linux-$ARCH，自动选择线路，稍候）..."
-	install_release_binary "$url" "$ENGINE_BIN" "$fn" "引擎" "$TARGET_VERSION" \
+	stage_release_binary "$url" "$ENGINE_BIN" "$fn" "引擎" "$TARGET_VERSION" \
 		|| die "引擎下载、校验或启动检查失败。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
 }
-install_engine
-INSTALLED_VERSION="$("$ENGINE_BIN" version 2>/dev/null | awk 'NR == 1 { print $2 }' || true)"
+commit_engine() {
+	if [ -e "$ENGINE_BIN" ]; then
+		ENGINE_BACKUP="$(mktemp "$(dirname "$ENGINE_BIN")/.engine.rollback.XXXXXX")" \
+			|| die "无法创建旧引擎备份；安装未完成。"
+		cp -a -- "$ENGINE_BIN" "$ENGINE_BACKUP" \
+			|| die "无法备份当前引擎；安装未完成。"
+	fi
+	commit_staged_binary "$ENGINE_BIN" "引擎" \
+		|| die "无法替换引擎二进制；安装未完成。"
+	ENGINE_SWAPPED=1
+}
+stage_engine
+INSTALLED_VERSION="$("$STAGED_BIN" version 2>/dev/null | awk 'NR == 1 { print $2 }' || true)"
 [ "$INSTALLED_VERSION" = "$TARGET_VERSION" ] \
 	|| die "引擎版本不匹配：需要 $TARGET_VERSION，实际 ${INSTALLED_VERSION:-未知}。"
-log "引擎：$("$ENGINE_BIN" version)"
+log "引擎：$("$STAGED_BIN" version)"
 
 # --- config, whitelist, key (only if absent) ---------------------------------
 if [ ! -f "$CONF_DIR/config.json" ]; then
@@ -428,7 +711,7 @@ else
 	log "已有的 Caddy 已包含 cloudflare 模块"
 fi
 # checksums no longer needed; drop the temp + its EXIT trap (if we fetched one)
-if [ -n "$SUMS_FILE" ]; then rm -f "$SUMS_FILE"; SUMS_FILE=""; trap - EXIT; fi
+if [ -n "$SUMS_FILE" ]; then rm -f "$SUMS_FILE"; SUMS_FILE=""; trap on_install_exit EXIT; fi
 setcap 'cap_net_bind_service=+ep' "$CADDY_BIN" || warn "setcap 失败；Caddy 绑定 :80/:443 可能需要 root"
 
 # --- Caddy snippet + env + systemd unit --------------------------------------
@@ -785,22 +1068,8 @@ migrate_caddy_sites "$caddy_migration_source"
 chown caddy:caddy "$LOG_DIR/abuseguard-access.json"
 chmod 0640 "$LOG_DIR/abuseguard-access.json"
 
-# --- fail2ban assets ---------------------------------------------------------
-log "正在安装 fail2ban 的 filter / action / jail"
-install -m 0644 "$SRC_DIR"/assets/fail2ban/filter.d/*.conf /etc/fail2ban/filter.d/
-install -m 0644 "$SRC_DIR"/assets/fail2ban/action.d/*.conf /etc/fail2ban/action.d/
-install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/caddy-abuseguard.local" /etc/fail2ban/jail.d/caddy-abuseguard.local
-install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/zz-caddy-abuseguard-report.local" /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
-# Reports carry the port that was actually attacked, so keep the SSH jail in
-# sync with the port sshd listens on instead of the hardcoded 22 default.
-ssh_port="$(detect_ssh_port)" || ssh_port=""
-if [ -n "$ssh_port" ]; then
-	sed -i -E "s/(profile=ssh-bruteforce, transport=SSH, target_port=)[0-9]+/\1$ssh_port/" \
-		/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
-	log "SSH 上报端口已同步为 $ssh_port"
-else
-	warn "未能探测 SSH 端口，SSH 上报端口保持默认 22（可在 /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local 手动修改）"
-fi
+# Legacy bans and ignoreip were captured before the engine swap (see above).
+
 
 # --- systemd timers + panel --------------------------------------------------
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/systemd/system/
@@ -808,6 +1077,8 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.timer"   /etc/s
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.service"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-firewall.service" /etc/systemd/system/
+install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-policy.service" /etc/systemd/system/
+install -m 0755 -o root -g root "$SRC_DIR/assets/policy/abuseguard-policy.sh" "$POLICY_BIN"
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 # Older releases installed the panel as `abuseguard`. Remove that stale copy
 # so `ag` is the only shortcut, but only when the file really is our panel.
@@ -869,10 +1140,19 @@ validate_caddyfile "$CADDYFILE" >/dev/null || die "Caddyfile 校验失败。"
 log "正在校验 fail2ban 配置"
 fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
 verify_fail2ban_jails config
+# All long work (downloads/builds, jail files, prompts) is done while fail2ban
+# keeps running. Pause it only for the binary swap, then restart below.
+pause_fail2ban_for_upgrade
+commit_engine
+log "引擎已更新；正在应用新策略"
 
 systemctl daemon-reload
+systemctl enable caddy-abuseguard-policy.service >/dev/null 2>&1 \
+	|| die "无法启用开机策略恢复（caddy-abuseguard-policy.service）。"
 log "正在启用 AbuseGuard 防火墙并设置开机恢复"
 "$PANEL_BIN" --firewall-apply || die "防火墙接管失败，安装未完成。请检查上方错误后重试。"
+log "正在应用原生白名单/情报策略"
+"$POLICY_BIN" apply || die "原生白名单/情报策略应用失败，安装未完成。请检查上方错误后重试。"
 log "正在启用并启动服务"
 # Prefer a non-disruptive reload, but restart when the existing Caddy has its
 # admin API disabled and therefore cannot accept `caddy reload`.
@@ -882,16 +1162,29 @@ systemctl enable fail2ban >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
 systemctl restart fail2ban || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
 verify_fail2ban_jails running
+migrate_legacy_bans || die "旧封禁迁移失败，安装未完成。"
+# Re-run against the live daemon: writes/validates ignoreip, reloads if it
+# changed, and clears bans that a newly allowlisted source still carries.
+"$POLICY_BIN" apply || die "fail2ban 就绪后应用策略失败，安装未完成。"
+# Only now is the cutover usable; before this point a failure restores the old
+# engine+config. Reclaim the rollback copy without waiting for the EXIT trap
+# (the interactive path execs the panel, which skips EXIT traps).
+INSTALL_COMPLETE=1
+[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
+ENGINE_BACKUP=""
+[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"
 log "已启用 SSH 防护；Web、SSH 和手动封禁共用白名单，并按源 IP 拦截所有端口。"
+log "原生白名单/情报策略已应用；外部修改白名单后运行：sudo ag --policy-apply"
 cat <<EOF
 
   文件位置：
     Caddyfile:    $CADDYFILE
     白名单:       $CONF_DIR/whitelist
     配置:         $CONF_DIR/config.json
+    情报快照:     $CONF_DIR/intel.nft（开机恢复）
     访问日志:     $LOG_DIR/abuseguard-access.json
 
   在 $SITES_DIR/<域名>.caddy 中添加受保护站点（站点块内放

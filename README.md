@@ -12,25 +12,28 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
 访客 ─▶ Caddy（受保护站点：`import abuseguard`）
              │  写入隐私精简的 JSON 访问日志
              ▼
-         fail2ban ──(命中)──▶ nftables 按源 IP DROP 全部端口/协议
+         fail2ban ──(速率/探测/SSH 行为)──▶ nftables 按源 IP DROP 全部端口/协议
              │
              └─(敏感路径探测)─▶ 引擎入队 ─▶ 上报队列 ──(定时器)──▶ AbuseIPDB
 
-sshd/auth.log ─▶ sshd / sshd-intel ──(认证爆破 / 情报命中)──▶ 同样的全入口封禁
+情报名单 ──(每 6 小时，引擎校验)──▶ 根权限应用 ──▶ 独立 nft 情报集合 ──▶ DROP 名单内源 IP
+                                                   └─ 白名单例外只在情报链 return
 ```
 
 - Caddy 为每个到受保护站点的请求打标签，只记录 fail2ban 所需的字段（客户端 IP、协议、标签）——不记录路径、主机名、请求头或查询串。
-- 安装时启用四个 Web jail 和两个 SSH jail，共用白名单和威胁情报名单。任一 jail 封禁某个 IP 后，nftables 会拦截该源 IP 到本机所有端口、所有协议的流量，包括 SSH。
-- 一个 Go 引擎（仅用标准库、单个静态二进制）负责封禁/放行判定、保持威胁情报名单新鲜、并冲刷上报队列。
+- 安装时启用三个 Web 行为 jail 和 `sshd`，共用同一份白名单。任一 jail 封禁某个 IP 后，nftables 会拦截该源 IP 到本机所有端口、所有协议的流量，包括 SSH。
+- 威胁情报不再经过 fail2ban：同步后由根权限应用把整份名单装进独立的内核集合，名单内的源 IP 在建立连接前即被丢弃；集合独立于端口防火墙表，修改端口不会重建它。
+- 白名单只有一份：面板改动会同时更新 fail2ban 的 `ignoreip` 和 nft 情报例外。手工编辑文件后需要显式应用，见「威胁情报」。
+- 一个 Go 引擎（仅用标准库、单个静态二进制）负责校验名单、冲刷上报队列并导出经过严格解析的策略输入；它始终以非特权用户运行，真正加载防火墙的是独立的根权限一次性服务。
 
 ## 环境要求
 
 - Debian 11/12 或 Ubuntu 20.04+（amd64 或 arm64），需 root（sudo）。
-- nftables 封禁适用于客户端直接连接源站（包括 Cloudflare DNS-only）的站点。
+- 所有 nftables 封禁都按“到达本机的源 IP”执行，因此只对客户端直接连接源站的站点有效（包括 Cloudflare DNS-only）。经 CDN 或自建代理转发时，内核看到的源地址是代理的边缘 IP，不是访客 IP：威胁情报拦截无法作用于这类被代理的请求；行为 jail 依据 Caddy 记录的 `client_ip` 决定封谁，但同样无法阻止经代理到达的访客流量。本工具不解决未知 IP 或分布式 CC。
 
 ## 安装
 
-安装器会检查六个 jail 的有效配置和启动状态。若旧的 `jail.local` 或 `jail.d/*.local` 禁用了其中某个 jail（例如 `[sshd] enabled = false`），安装会报错；请解除禁用冲突后重试。安装器不会自动改写这些自定义文件。
+安装器会检查四个 jail 的有效配置和启动状态。若旧的 `jail.local` 或 `jail.d/*.local` 禁用了其中某个 jail（例如 `[sshd] enabled = false`），安装会报错；请解除禁用冲突后重试。安装器不会自动改写这些自定义文件。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jasper-khan/abuseguard/main/install.sh)
@@ -84,7 +87,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 直接运行 `ag`（面板需要 root；以普通用户运行会自动通过 sudo 提权，必要时提示输入密码）。标题会显示当前 AbuseGuard 引擎版本，首页会显示当前 SSH 端口和受保护站点数；“封禁记录”每 30 分钟重新查询各 jail，无需进入菜单手动刷新：
 
-面板使用 `=` 分隔线、左对齐的 `标签 : 值` 状态区和单列编号菜单；首页显示防护结论、封禁记录、情报库、上报状态、SSH 端口、站点数与版本，子页面沿用同一结构。状态值用颜色区分（绿=正常/开启，黄=需检查/未配置，红=异常），其余文字跟随终端前景色，兼顾深色与浅色背景：
+面板使用 `=` 分隔线、左对齐的 `标签 : 值` 状态区和单列编号菜单；首页显示防护结论、封禁记录、情报集合大小与行为封禁数、上报状态、SSH 端口、站点数与版本，子页面沿用同一结构。状态值用颜色区分（绿=正常/开启，黄=需检查/未配置，红=异常），其余文字跟随终端前景色，兼顾深色与浅色背景：
 
 | 首页入口 | 分类内的功能 |
 | --- | --- |
@@ -92,14 +95,14 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 | `[2]` 站点与证书 | 查看、添加、删除反代站点；设置 Cloudflare API Token |
 | `[3]` 防火墙 | 端口与协议：开放/关闭 TCP、UDP 端口（可限制来源 IP/CIDR）、切换 IPv4/IPv6 入站；IP 访问控制：查看、封禁、解封 IP、管理白名单；规则维护：查看、重新应用规则 |
 | `[4]` SSH 与登录 | 连接设置：修改 SSH 监听端口；认证方式：全局密码/密钥认证开关；root 凭据：公钥增删、修改 root 密码 |
-| `[5]` 情报与上报 | 情报同步：立即同步；AbuseIPDB 上报：发送队列、设置 API Key、开关自动上报 |
+| `[5]` 情报与上报 | 情报同步：立即同步（校验后应用内核策略）；AbuseIPDB 上报：发送队列、设置 API Key、开关自动上报 |
 | `[6]` 系统维护 | 运行诊断：近期日志；版本维护：更新；卸载 |
 
-添加站点只需输入域名和上游（本地或公网 IP:端口），面板自动生成受保护的反代配置（`import abuseguard` 和按需 TLS）。白名单支持面板内增删，**新增会自动解封该 IP** 并重载 fail2ban。首页显示防火墙状态及情报最后同步时间。
+添加站点只需输入域名和上游（本地或公网 IP:端口），面板自动生成受保护的反代配置（`import abuseguard` 和按需 TLS）。白名单支持面板内增删：改动会同时应用到 fail2ban 的 `ignoreip` 与 nft 情报例外，**新增条目会解封它覆盖的行为封禁（含 CIDR 内的地址）**；若该 IP 仍在情报名单中，需要白名单条目才能放行。首页分别显示防火墙状态、情报名单条目数与行为封禁数，不会把整份情报集合打印到终端。
 
 更新会在校验前用 `caddy fmt` 规范化主 Caddyfile 和 `/etc/caddy/sites/*.caddy`，并删除 Caddy 明确判定为冗余的精确指令 `header_up X-Forwarded-Host {host}` 或 `header_up X-Forwarded-Host {http.request.host}`；其他反代配置和请求头均保留。
 
-安装或更新会自动启用 AbuseGuard 防火墙并设置开机恢复，无需另行确认。首次建立配置时开放检测到的所有 SSH 端口、443/tcp 和 443/udp，其余入站端口默认丢弃；80/tcp 不默认开放，需要 HTTP 访问或跳转时可在面板手动放行。已有配置则保留用户开放和关闭的端口，并补齐当前 SSH 端口。保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭当前 SSH 会话端口和唯一的 SSH 端口；关闭其他端口只阻止新连接。
+安装或更新会自动启用 AbuseGuard 防火墙与原生白名单/情报策略，并设置开机恢复，无需另行确认。从旧版本升级时，旧 `caddy-intel`/`sshd-intel` jail 中已有的封禁会重新写入 `caddy-rate-local`，按升级时刻重新计算 90 天（现有 fail2ban API 能读取每个封禁的剩余时长，但正常恢复接口只在恢复时按整 jail 的 bantime 重新计时，无法为每个 IP 恢复原有到期时间），白名单内的地址跳过；旧 jail 会被移除，不再作为仍在运行的别名保留，也不会因此产生新的上报。更新时会把六个旧 jail 设为 idle：检测和 `ignorecommand` 暂停，但已有封禁继续在内核生效；装好新引擎与 jail 后再重启 fail2ban。仅在 idle 不可用时才回退为停止 fail2ban（此时行为封禁会短暂失效，重启后由数据库恢复）。替换引擎前失败会恢复原 jail 配置并继续检测；替换后的任何失败也会恢复旧引擎与旧 jail 配置、重启旧检测并明确告警，不会把检测留在暂停状态；已有内核封禁继续生效。若安装失败，重新运行安装器会继续迁移已保存的旧封禁。fail2ban 的原生 `ignoreip` 按 jail 分别保留，sshd 的豁免不会扩散到 Web jail；修改或删除原生豁免后，下次应用即生效。首次建立配置时开放检测到的所有 SSH 端口、443/tcp 和 443/udp，其余入站端口默认丢弃；80/tcp 不默认开放，需要 HTTP 访问或跳转时可在面板手动放行。已有配置则保留用户开放和关闭的端口，并补齐当前 SSH 端口。保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭当前 SSH 会话端口和唯一的 SSH 端口；关闭其他端口只阻止新连接。
 
 「SSH 与登录」中的「修改 SSH 端口」会让新旧端口同时监听：校验 `sshd -t`，放行新端口，重载 sshd 并确认新旧端口都在监听，任一步失败恢复原配置；成功后同步 fail2ban 的 SSH 上报端口。请先用新端口重新登录确认，再到「防火墙」关闭旧端口：面板会删除对应的 `Port` 指令并关闭旧端口的防火墙放行；当前会话端口和唯一的 SSH 端口不允许关闭。没有 `Port` 指令时，在 `/etc/ssh/sshd_config.d/99-abuseguard-port.conf` 写入新旧两个端口；已有一个 `Port` 指令时保留原文件，新端口写入该 drop-in；出现多个 `Port` 指令时拒绝。新端口继承旧端口在防火墙中的来源限制；若新端口已有不兼容的来源规则，需先在「防火墙」中调整。切换前需先在云安全组或上游防火墙放行新端口。`ssh.socket` 激活方式下面板会拒绝修改。
 
@@ -107,34 +110,42 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 开放端口时可填写来源 IPv4/IPv6 地址或 CIDR，留空表示所有来源；同一端口可以有多条来源规则，关闭端口时按编号选择要移除的那条。协议族有两个开关：IPv4 入站默认开启，IPv6 入站默认关闭；关闭某个协议族后，新的该协议族入站连接会被丢弃，已建立连接、回环、ICMP 和 DHCP 仍然保留。关闭当前 SSH 会话所在的协议族需要输入 `yes` 确认，会话断开后需要控制台恢复。重新应用规则和安装更新只会补齐缺失的 SSH 端口，不会把已有来源限制加宽为所有来源。SSH 改端口时，新端口继承旧端口的所有来源规则。
 
-端口配置仅保存在 `/etc/caddy-abuseguard/firewall.nft`，由独立的 `inet caddy_abuseguard` 表执行。修改先通过 `nft -c` 校验，再以单次事务应用；一次性 systemd 服务负责开机恢复，无新增常驻进程。菜单可重新应用规则；卸载只移除本项目的表。IP 封禁继续复用 fail2ban，保留原有白名单、90 天封禁和不上报手动封禁的规则。
+端口配置仅保存在 `/etc/caddy-abuseguard/firewall.nft`，由独立的 `inet caddy_abuseguard` 表执行。修改先通过 `nft -c` 校验，再以单次事务应用；`caddy-abuseguard-firewall.service` 负责开机恢复端口表，独立的 `caddy-abuseguard-policy.service` 负责开机恢复情报集合，两者都是一次性服务，无新增常驻进程。菜单可重新应用规则；卸载只移除本项目创建的表（端口表与独立的 `inet caddy_abuseguard_intel` 情报表）。行为封禁继续复用 fail2ban：保留白名单、90 天封禁和不上报手动封禁的规则；白名单同时驱动 fail2ban `ignoreip` 与情报例外，不再使用按请求执行的 `ignorecommand`。
 
-其他脚本可用 `ag --firewall-open tcp 12345` 或 `ag --firewall-open udp 12345` 非交互放行单个端口，沿用面板的校验和持久化流程，失败返回非零状态。本 fork 的 `sing-box-yg` 会在创建节点、改端口和配置内网落地入口时调用此接口；请先更新 AbuseGuard 至 v0.3.5 或以上，再使用新版 `sb`。此联动仅处理操作明确指定的端口，不自动扫描服务或关闭旧端口；云安全组仍需单独放行。
+其他脚本可用 `ag --firewall-open tcp 12345` 或 `ag --firewall-open udp 12345` 非交互放行单个端口，沿用面板的校验和持久化流程，失败返回非零状态。外部修改白名单或情报名单后，需要运行 `sudo ag --policy-apply` 立即校验并应用；`ag --firewall-apply` 只重建端口表，不触碰情报表。本 fork 的 `sing-box-yg` 会在创建节点、改端口和配置内网落地入口时调用此接口；请先更新 AbuseGuard 至 v0.3.5 或以上，再使用新版 `sb`。此联动仅处理操作明确指定的端口，不自动扫描服务或关闭旧端口；云安全组仍需单独放行。
 
-接管和修改端口前会检查现有 nftables 入站链：若发现其他有效入站规则或默认丢弃策略（Fail2Ban 除外），操作会报错并列出冲突链，需先迁移或停用对应规则后重试，避免面板放行却仍被旧规则拦截。云安全组及容器发布端口等转发流量仍由对应平台管理。白名单只豁免 IP 封禁，不绕过端口策略。其他工具若清空整个 nftables ruleset，需要在面板重新应用防火墙规则。新增 HTTPS 反代站点通常只需已有的 443，无需向公网开放反代上游端口。
+接管和修改端口前会检查现有 nftables 入站链：若发现其他有效入站规则或默认丢弃策略（本项目的受管表与 Fail2Ban 的表除外），操作会报错并列出冲突链，需先迁移或停用对应规则后重试，避免面板放行却仍被旧规则拦截。云安全组及容器发布端口等转发流量仍由对应平台管理。白名单只豁免 IP 封禁，不绕过端口策略。其他工具若清空整个 nftables ruleset，需要在面板重新应用防火墙规则。新增 HTTPS 反代站点通常只需已有的 443，无需向公网开放反代上游端口。
 
 ## 防护模型
 
 | Jail | 触发条件 | 阈值 | 封禁对象 |
 | --- | --- | --- | --- |
-| `caddy-intel` | 对受保护站点的任意请求 | 命中 1 次 | 仅威胁情报名单上的 IP |
-| `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 120 次 | 任意非白名单 IP（仅本地封禁） |
+| `caddy-rate-local` | 对受保护站点的任意请求 | 60 秒内 120 次 | 任意非白名单 IP（仅本地封禁；面板手动封禁也写入此 jail） |
 | `caddy-probe-h1` | 用 HTTP/1.1 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 | `caddy-probe-h2` | 用 HTTP/2 扫描敏感路径 | 10 分钟内 5 次 | 任意非白名单 IP + 加入上报队列 |
 | `sshd`（安装时启用） | SSH 认证失败 | 沿用该 jail 的实际阈值 | 任意非白名单 IP + 加入上报队列 |
-| `sshd-intel`（安装时启用） | 命中 SSH 认证失败过滤器 | 命中 1 次 | 仅威胁情报名单上的 IP |
 
-六个 jail 的封禁时长均为 90 天，使用相同的全端口、全协议封禁动作；`sshd` 沿用系统原有的日志来源、后端和检测阈值，未自定义时采用 fail2ban 的默认值。白名单 IP（`/etc/caddy-abuseguard/whitelist`）永不被 AbuseGuard 封禁或上报；手动封禁也检查白名单，只接受单个 IPv4/IPv6 地址；白名单仍支持 CIDR 网段。各 jail 独立记录封禁，某个 jail 解封不会撤销其他 jail 仍有效的封禁；面板解封会遍历所有 jail。「敏感路径」= `/.env`、`/.git`、`/phpmyadmin`、`/vendor/phpunit`、`/cgi-bin`（及其子路径）。
+三个 Web jail 与 `sshd` 的封禁时长均为 90 天，使用相同的全端口、全协议封禁动作；`sshd` 沿用系统原有的日志来源、后端和检测阈值，未自定义时采用 fail2ban 的默认值。白名单 IP（`/etc/caddy-abuseguard/whitelist`）永不被 AbuseGuard 封禁或上报；手动封禁也检查白名单，只接受单个 IPv4/IPv6 地址；白名单仍支持 CIDR 网段。各 jail 独立记录封禁，某个 jail 解封不会撤销其他 jail 仍有效的封禁；面板解封会遍历所有 jail。情报拦截不经过 jail，命中名单的源 IP 由独立的内核集合直接丢弃（见「威胁情报」）。「敏感路径」= `/.env`、`/.git`、`/phpmyadmin`、`/vendor/phpunit`、`/cgi-bin`（及其子路径）。
 
 首次生成的 Caddy 配置只启用 HTTP/1.1 和 HTTP/2，不监听 HTTP/3，UDP/443 可供其他服务使用。全入口封禁只针对被封禁的源 IP，不占用任何端口。
 
 ## 威胁情报
 
-在名单同步之前，intel jail 不封禁任何人。引擎会拉取一份公开的、源自 AbuseIPDB 的封禁名单，并拒绝加载明显异常偏小（<9 万）或偏大（>12 万）的名单；任何失败都会保留上一次的名单。刷新每 6 小时执行一次（也可通过面板手动触发）。
+威胁情报以内核集合的形式生效，不再是“命中一次就封 90 天”的 jail。每 6 小时（也可通过面板手动触发）引擎拉取一份公开的、源自 AbuseIPDB 的名单：只保留 IPv4，拒绝明显异常偏小（<9 万）或偏大（>12 万）的结果，校验通过后原子写入 `intel.txt`；任何下载或解析失败都保留上一份名单。
+
+随后的根权限应用（`/usr/local/libexec/caddy-abuseguard-policy`，由 `caddy-abuseguard-policy.service` 在开机时、以及 `caddy-abuseguard-sync.service` 在每次同步后运行）会用引擎导出的、逐行严格校验的地址列表重建集合：先校验整份输入，再以单次 nft 事务替换，成功后写入根所有的开机快照。从未建立过策略时允许空集合；已有名单缺失、损坏、超界或应用/保存失败时，保留上一次生效的内核策略和快照，不会用空集合或半份名单覆盖。
+
+名单跟随：新列入的源 IP 在下一次同步后即被拦截，移出名单后不再被拦截，不再有固定 90 天的情报封禁。白名单例外只在情报链内 `return`，不会全局接受流量，所以白名单 IP 仍受端口防火墙约束；重叠的 CIDR 例外同样有效。修改端口只重建端口表，情报集合独立存在。
+
+手工编辑 `/etc/caddy-abuseguard/whitelist` 后需要显式应用：`sudo ag --policy-apply`（否则要等到下一个 6 小时同步周期）；面板内增删会立即应用，安装与更新也会重新应用。应用失败时保留上一次生效的策略，不会出现 fail2ban 已放开而内核仍拦截（或相反）的静默分裂状态。
+
+解封与情报的关系：面板“解封 IP”只清除各 jail 的定时行为封禁。如果该 IP 仍在情报名单上，内核拦截会继续生效——要放行一个仍被名单命中的源，请把它加入白名单。
+
+代理/CDN 的限制见「环境要求」：内核只能按到达本机的源地址匹配，无法对经代理转发的访客做名单拦截。
 
 ## AbuseIPDB 上报（可选）
 
-配置里上报默认开启，但只有设置 API key 后事件才会入队。敏感路径探测固定上报为类别 `21`（Web App Attack）；`sshd` jail 产生的认证爆破封禁固定上报为 `18,22`（Brute-Force + SSH）。普通请求速率、Web/SSH 情报名单命中和面板手动封禁只在本地处理，不对外举报。
+配置里上报默认开启，但只有设置 API key 后事件才会入队。敏感路径探测固定上报为类别 `21`（Web App Attack）；`sshd` jail 产生的认证爆破封禁固定上报为 `18,22`（Brute-Force + SSH）。普通请求速率、情报拦截和面板手动封禁只在本地处理，不对外举报。
 
 公开原因只写标准化行为、实际次数、检测窗口，以及 Web 事件的 HTTP 协议；不会出现 AbuseGuard 名称，也不包含主机名、具体路径、查询参数、请求头、请求正文、UA、SSH 用户名或原始日志。上报按 IP 遵守 15 分钟窗口；同一 IP 的后续不同事件在窗口内会留在队列延后发送，而不是丢弃。每天最多 1000 条。冲刷时会先把当前队列原子轮转为独立批次，因此发送期间新入队的记录会留在新队列。白名单无法可靠读取或状态文件损坏时，冲刷会停止并返回失败；临时 API 故障保留记录重试。冲刷每 10 分钟执行一次。要关闭外部举报，用面板 → `[5]` 情报与上报 → `[4]` 开关自动上报；关闭上报不影响任何本地封禁。
 
@@ -162,13 +173,19 @@ example.com {
 /usr/local/bin/caddy                          Caddy（内置 caddy-dns/cloudflare）
 /usr/local/bin/ag                             控制面板
 /usr/local/libexec/caddy-abuseguard           Go 引擎
+/usr/local/libexec/caddy-abuseguard-policy    根权限策略应用助手
 /etc/caddy/Caddyfile                          全局配置 + AbuseGuard 导入
 /etc/caddy/abuseguard.caddy                   (abuseguard) 片段
 /etc/caddy/sites/<域名>.caddy                 每个受保护站点一个文件
 /etc/caddy-abuseguard/config.json             引擎配置
 /etc/caddy-abuseguard/whitelist               永不封禁名单
+/etc/caddy-abuseguard/firewall.nft            端口防火墙配置 + 开机恢复
+/etc/caddy-abuseguard/intel.nft               情报集合快照（根所有，开机恢复）
+/etc/caddy-abuseguard/intel-allow.nft         白名单例外快照（根所有）
+/etc/caddy-abuseguard/intel-applied.json      最近一次应用时间与条目数
 /etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key（可选）
-/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  启用 SSH 防护、情报检测和上报
+/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  启用 SSH 防护和上报
+/etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local 由白名单生成的原生 ignoreip
 /var/lib/caddy-abuseguard/                     情报名单 + 上报队列/状态
 /var/log/caddy/abuseguard-access.json         隐私精简的访问日志
 ```
@@ -191,13 +208,16 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 - **彻底卸载**：再按清单删 AbuseGuard 安装的 Caddy/账户/配置 —— 但**装之前你已有的一律不动**（原本就有 Caddy 就不会删 Caddy）。清单丢失时自动降级为最保守处理。
 - `/etc/caddy/sites` 中由 AbuseGuard 管理的站点，卸载时可选「保留反代、只去防护」或「一起删」；以后重新安装时，保留的站点会自动恢复 `import abuseguard` 防护。原有 Caddyfile 在安装时已备份为 `Caddyfile.pre-abuseguard`。
 
+卸载同时删除本项目的端口表、独立情报表、根所有开机快照和生成的白名单 jail 配置，不会改动其他 nftables 表或其他 fail2ban jail。
+
 ## 安全须知
 
 - Caddy 本身不提供任何鉴权。凡是你对外暴露的站点，除非你自己加了鉴权，否则都是公开的。
 - 安装器的自检站点只绑定 `127.0.0.1:8080`。
 - 密钥（`*.key`、`.env`）权限为 0640 且已被 git 忽略；切勿提交。
 - 下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络慢 / 大陆镜像」的完整性校验说明）。
-- Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务同样加固。
+- 威胁情报只以根所有的快照和内核集合生效：根权限应用服务逐行校验引擎导出的纯地址列表，绝不把下载到的原始文本当作 nft 规则执行；`/var/lib/caddy-abuseguard` 对 `abuseguard` 用户可写，因此不作为可执行策略来源。
+- Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务和根权限策略应用单元同样加固。
 
 ## 构建 / 发布
 

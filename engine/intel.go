@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -25,35 +27,59 @@ type intelMeta struct {
 func intelTxtPath(c *Config) string  { return c.Paths.StateDir + "/intel.txt" }
 func intelMetaPath(c *Config) string { return c.Paths.StateDir + "/intel-last-sync.txt" }
 
-// intelContains reports whether ip is on the threat-intel list.
+// formatIntel returns canonical bare-IPv4 lines from intel.txt.
 //
-// It streams the file and returns on the first match instead of loading all
-// ~90k entries into a map: this runs once per uncached candidate IP, straight
-// from fail2ban's ignorecommand, so the old map cost ~15MB of allocation and
-// 90k hash inserts just to answer one yes/no. That spike hit hardest exactly
-// when it matters least affordable -- a scan burst, where every fresh IP misses
-// the ignorecache. Streaming keeps it O(1) in memory.
-//
-// A missing or unreadable file reports false, which makes the intel jail ignore
-// everyone (fail-safe: no bans before the first successful sync).
-func intelContains(c *Config, ip string) bool {
+// The whole file is validated before returning so corrupt, empty, IPv6 or
+// out-of-bounds stored data can never reach the kernel as a partial set. Only
+// a missing file is treated as an empty list, which lets root bootstrap the
+// native set before the first sync; the root applier keeps any existing set
+// when an existing file fails validation.
+func formatIntel(c *Config) ([]byte, error) {
 	f, err := os.Open(intelTxtPath(c))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return false
+		return nil, err
 	}
 	defer f.Close()
+
+	var out strings.Builder
+	seen := make(map[string]struct{})
+	entries := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		line := sc.Text()
+		ip := net.ParseIP(line)
+		// Reject anything that is not the canonical dotted-quad form, including
+		// IPv6, IPv4-mapped IPv6 and tokens with comments or whitespace.
+		if ip == nil || ip.To4() == nil || ip.String() != line {
+			return nil, fmt.Errorf("invalid intel entry %q", line)
+		}
+		entries++
+		// Enforce the bound during the scan: a locally writable file must not
+		// force unbounded allocation before the whole-file rejection at EOF.
+		if c.Intel.MaxEntries > 0 && entries > c.Intel.MaxEntries {
+			return nil, fmt.Errorf("intel list has %d entries (> max %d)", entries, c.Intel.MaxEntries)
+		}
+		if _, ok := seen[line]; ok {
 			continue
 		}
-		if line == ip {
-			return true
-		}
+		seen[line] = struct{}{}
+		out.WriteString(line)
+		out.WriteByte('\n')
 	}
-	return false
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if entries == 0 {
+		return nil, fmt.Errorf("intel list is empty")
+	}
+	if entries < c.Intel.MinEntries {
+		return nil, fmt.Errorf("intel list has %d entries (< min %d)", entries, c.Intel.MinEntries)
+	}
+	return []byte(out.String()), nil
 }
 
 func httpGet(url, token string) ([]byte, error) {
@@ -178,7 +204,10 @@ func cmdSyncIntel(c *Config) int {
 		if ip == nil || ip.To4() == nil {
 			continue
 		}
-		out.WriteString(line)
+		// Store only the canonical dotted-quad form: intel-export rejects
+		// anything else, so a non-canonical source spelling must never block
+		// later native policy updates.
+		out.WriteString(ip.String())
 		out.WriteByte('\n')
 		count++
 	}

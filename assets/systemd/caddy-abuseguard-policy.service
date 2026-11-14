@@ -1,0 +1,38 @@
+[Unit]
+Description=AbuseGuard native allowlist and threat-intel policy (boot restore)
+DefaultDependencies=no
+After=local-fs.target nftables.service
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/caddy-abuseguard-policy apply
+
+# --- sandboxing --------------------------------------------------------------
+# Root oneshot: nft needs CAP_NET_ADMIN; the applier writes its snapshots and
+# the generated fail2ban ignoreip file. Everything else is read-only.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/caddy-abuseguard /var/lib/caddy-abuseguard /etc/fail2ban/jail.d /run/fail2ban
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallFilter=setuid setgid setgroups setresuid setresgid
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

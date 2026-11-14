@@ -1,11 +1,22 @@
 name: ci
 
-# Runs on every push/PR. Two gates:
-#   1. the Go engine tests must pass and it must compile/vet clean;
+# Runs on every push/PR. Five gates:
+#   1. the Go engine tests must pass and it must compile/vet clean, and the
+#      shell policy/panel tests must pass with their scripted command doubles;
 #   2. the Caddy-log <-> fail2ban-filter contract must hold, checked against
 #      upstream-latest Caddy. Because release.yml deliberately tracks Caddy
 #      latest, this is what turns "upstream silently changed the log schema and
-#      every jail stopped banning" into a red build instead of a quiet outage.
+#      every jail stopped banning" into a red build instead of a quiet outage;
+#   3. isolated real-nftables transactions must pass on a Linux kernel;
+#   4. the native allowlist + threat-intel policy contract must hold on a real
+#      nftables kernel and the final fail2ban jail set, so whitelist exceptions,
+#      feed replacement, last-good preservation, and unban-vs-feed behavior are
+#      exercised as behavior rather than asserted from source text;
+#   5. the installed sync and boot policy units must actually run under their
+#      sandbox/capability directives (unprivileged feed sync, root post-apply,
+#      protected paths, last-good boot restore) inside a private netns, because
+#      synthetic hardening can block nft/load/user drops even when the helpers
+#      pass when invoked directly.
 on:
   push:
     branches: ['**']
@@ -58,7 +69,7 @@ jobs:
       - name: Syntax-check the shell scripts
         run: |
           set -eu
-          for f in install.sh uninstall.sh abuseguard.sh scripts/*.sh; do
+          for f in install.sh uninstall.sh abuseguard.sh scripts/*.sh assets/policy/*.sh; do
             bash -n "$f" && echo "ok: $f"
           done
           bash ./scripts/test-panel-refresh.sh
@@ -70,6 +81,31 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq nftables
           sudo bash ./scripts/test-firewall.sh --kernel
+
+  native-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Build the engine for the applier exports
+        working-directory: engine
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/caddy-abuseguard .
+      - name: Install nftables, fail2ban and network test tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables fail2ban iproute2 iputils-ping python3
+      - name: Verify service units and sandboxing definitions
+        run: |
+          sudo install -d -m 0755 /usr/local/libexec
+          sudo install -m 0755 /tmp/caddy-abuseguard /usr/local/libexec/caddy-abuseguard
+          sudo install -m 0755 assets/policy/abuseguard-policy.sh /usr/local/libexec/caddy-abuseguard-policy
+          sudo useradd --system --no-create-home abuseguard 2>/dev/null || true
+          sudo install -d /etc/caddy-abuseguard /var/lib/caddy-abuseguard /run/fail2ban
+          systemd-analyze verify assets/systemd/*.service assets/systemd/*.timer
+      - name: Verify native allowlist + intel enforcement
+        run: sudo env ABUSEGUARD_ENGINE_BIN=/tmp/caddy-abuseguard bash ./scripts/test-native-policy.sh --kernel
+      - name: Verify the installed sandboxed sync and boot policy services
+        run: sudo env ABUSEGUARD_CI_SERVICE_TEST=1 bash ./scripts/test-policy-units.sh
 
   log-contract:
     runs-on: ubuntu-latest

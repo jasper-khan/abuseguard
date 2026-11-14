@@ -38,6 +38,80 @@ func installIntelTestTransport(t *testing.T, servers ...*httptest.Server) {
 	})
 }
 
+func TestFormatIntelExportsCanonicalIPv4(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "intel.txt")
+	if err := os.WriteFile(path, []byte("192.0.2.1\n198.51.100.2\n192.0.2.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Config{}
+	c.Paths.StateDir = dir
+	c.Intel.MinEntries = 2
+	c.Intel.MaxEntries = 10
+
+	got, err := formatIntel(c)
+	if err != nil {
+		t.Fatalf("formatIntel returned error: %v", err)
+	}
+	want := "192.0.2.1\n198.51.100.2\n"
+	if string(got) != want {
+		t.Fatalf("formatIntel = %q; want %q", got, want)
+	}
+}
+
+func TestFormatIntelMissingFileIsEmptySuccess(t *testing.T) {
+	c := &Config{}
+	c.Paths.StateDir = t.TempDir()
+	c.Intel.MinEntries = 90000
+
+	got, err := formatIntel(c)
+	if err != nil {
+		t.Fatalf("missing intel file returned error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("missing intel file returned %q; want empty output", got)
+	}
+}
+
+func TestFormatIntelRejectsInvalidStoredData(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		min  int
+		max  int
+	}{
+		{name: "empty file", data: "", min: 0, max: 0},
+		{name: "blank line", data: "192.0.2.1\n\n198.51.100.2\n", min: 1, max: 10},
+		{name: "ipv6", data: "2001:db8::1\n", min: 1, max: 10},
+		{name: "ipv4-mapped ipv6", data: "::ffff:192.0.2.1\n", min: 1, max: 10},
+		{name: "comment", data: "# list\n192.0.2.1\n", min: 1, max: 10},
+		{name: "trailing field", data: "192.0.2.1 # cn\n", min: 1, max: 10},
+		{name: "leading space", data: " 192.0.2.1\n", min: 1, max: 10},
+		{name: "undersized", data: "192.0.2.1\n", min: 2, max: 10},
+		{name: "oversized", data: "192.0.2.1\n198.51.100.2\n", min: 1, max: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "intel.txt"), []byte(tt.data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c := &Config{}
+			c.Paths.StateDir = dir
+			c.Intel.MinEntries = tt.min
+			c.Intel.MaxEntries = tt.max
+
+			got, err := formatIntel(c)
+			if err == nil {
+				t.Fatal("invalid stored intel was accepted")
+			}
+			if got != nil {
+				t.Fatalf("invalid stored intel produced output %q", got)
+			}
+		})
+	}
+}
+
 func TestResolveCommitSendsTokenToCommitAPI(t *testing.T) {
 	apiAuth := make(chan string, 1)
 	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +155,7 @@ func TestCmdSyncIntelDoesNotSendTokenToSource(t *testing.T) {
 	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sourceAuth <- r.Header.Get("Authorization")
 		sourcePath <- r.URL.Path
-		_, _ = io.WriteString(w, "192.0.2.1\n")
+		_, _ = io.WriteString(w, "::ffff:192.0.2.1\n192.0.2.2 # country column\n")
 	}))
 	defer source.Close()
 	installIntelTestTransport(t, api, source)
@@ -123,6 +197,14 @@ func TestCmdSyncIntelDoesNotSendTokenToSource(t *testing.T) {
 		}
 	default:
 		t.Fatal("source request was not received")
+	}
+
+	stored, err := os.ReadFile(filepath.Join(cfg.Paths.StateDir, "intel.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != "192.0.2.1\n192.0.2.2\n" {
+		t.Fatalf("stored intel = %q; want canonical IPv4 lines", stored)
 	}
 }
 

@@ -22,9 +22,12 @@ trap cleanup EXIT
 fail() { echo "system test failed: $* (evidence: $WORK)" >&2; exit 1; }
 systemctl stop caddy-abuseguard-sync.timer caddy-abuseguard-report.timer
 fail2ban-client -t
-for jail in caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel; do
+[ -x /usr/local/libexec/caddy-abuseguard-policy ] || fail 'policy applier missing'
+systemctl is-enabled --quiet caddy-abuseguard-policy.service || fail 'policy boot restore not enabled'
+for jail in caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd; do
 	fail2ban-client status "$jail" >/dev/null || fail "jail not enabled: $jail"
 done
+nft list table inet caddy_abuseguard_intel >/dev/null || fail 'native intel table missing'
 ip netns add "$NS"
 ip link add ag-test-host type veth peer name ag-test-client
 ip link set ag-test-client netns "$NS"
@@ -112,26 +115,36 @@ if ip netns exec "$NS" curl -fsS --interface "$BAD" --max-time 2 http://198.18.0
 fail2ban-client unban "$BAD" >/dev/null
 echo 'PASS: SSH authentication failures trigger the global ban'
 
+# The disposable test feed is tiny; lower the configured bounds so intel-export
+# accepts it (production keeps the 90k-120k bounds).
+jq '.intel.min_entries = 1 | .intel.max_entries = 1000' /etc/caddy-abuseguard/config.json > "$WORK/config.json" \
+	|| fail 'could not lower intel bounds'
+install -m 0640 -o root -g abuseguard "$WORK/config.json" /etc/caddy-abuseguard/config.json
 printf '%s\n%s\n' "$INTEL" "$TRUSTED" > /var/lib/caddy-abuseguard/intel.txt
 chown abuseguard:abuseguard /var/lib/caddy-abuseguard/intel.txt
 printf '%s\n' "$TRUSTED" >> /etc/caddy-abuseguard/whitelist
-ssh_failure "$INTEL"
-wait_ban sshd-intel "$INTEL"
+chown root:abuseguard /etc/caddy-abuseguard/whitelist
+chmod 0640 /etc/caddy-abuseguard/whitelist
+/usr/local/bin/ag --policy-apply >/dev/null || fail 'policy apply failed'
 probe "$INTEL" drop
-echo 'PASS: SSH uses the shared intel list at one matching failure'
+probe "$TRUSTED" allow
+if fail2ban-client status sshd 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p' | tr ' ' '\n' | grep -qxF "$INTEL"; then
+	fail 'intel enforcement still used fail2ban'
+fi
+echo 'PASS: native intel table drops feed sources; the allowlist exception lets a listed source through without fail2ban'
 
 for ((i=0; i<retries+1; i++)); do ssh_failure "$TRUSTED"; done
 for _ in {1..6}; do
 	ip netns exec "$NS" curl -fsS --interface "$TRUSTED" --max-time 2 http://198.18.0.1/.env >/dev/null
 done
 sleep 2
-for jail in caddy-intel caddy-probe-h1 sshd sshd-intel; do
+for jail in caddy-rate-local caddy-probe-h1 sshd; do
 	if has_ban "$jail" "$TRUSTED"; then fail "allowlisted IP banned by $jail"; fi
 done
 probe "$TRUSTED" allow
 echo 'PASS: the same allowlist overrides Web/SSH behavior and intel hits'
 
-fail2ban-client set caddy-intel banip "$BAD6" >/dev/null
+fail2ban-client set caddy-rate-local banip "$BAD6" >/dev/null
 probe "$BAD6" drop 2001:db8:123::1
 fail2ban-client unban "$BAD6" >/dev/null
 probe "$BAD6" allow 2001:db8:123::1

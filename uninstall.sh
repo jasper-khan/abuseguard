@@ -19,6 +19,8 @@ CONF_DIR=/etc/caddy-abuseguard
 STATE_DIR=/var/lib/caddy-abuseguard
 LOG_DIR=/var/log/caddy
 ENGINE_BIN=/usr/local/libexec/caddy-abuseguard
+POLICY_BIN=/usr/local/libexec/caddy-abuseguard-policy
+POLICY_F2B=/etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local
 PANEL_BIN=/usr/local/bin/ag
 LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
@@ -200,8 +202,11 @@ clean_sites_keep() {
 
 # --- 1) stop + remove AbuseGuard's own components (both modes) ----------------
 log "停止并移除 AbuseGuard 组件"
+run "systemctl disable --now caddy-abuseguard-policy.service >/dev/null 2>&1 || true"
 run "systemctl disable --now caddy-abuseguard-firewall.service >/dev/null 2>&1 || true"
+run "if nft list table inet caddy_abuseguard_intel >/dev/null 2>&1; then nft delete table inet caddy_abuseguard_intel; fi" || exit 1
 run "if nft list table inet caddy_abuseguard >/dev/null 2>&1; then nft delete table inet caddy_abuseguard; fi" || exit 1
+remove_file /etc/systemd/system/caddy-abuseguard-policy.service
 remove_file /etc/systemd/system/caddy-abuseguard-firewall.service
 for u in caddy-abuseguard-report.timer caddy-abuseguard-report.service \
          caddy-abuseguard-sync.timer caddy-abuseguard-sync.service; do
@@ -213,11 +218,13 @@ remove_file /etc/systemd/system/caddy-abuseguard-sync.service
 remove_file /etc/systemd/system/caddy-abuseguard-sync.timer
 remove_file /etc/fail2ban/jail.d/caddy-abuseguard.local
 remove_file /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
+remove_file "$POLICY_F2B"
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-any.conf
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h1.conf
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h2.conf
 remove_file /etc/fail2ban/action.d/caddy-abuseguard-queue.conf
 remove_file /etc/fail2ban/action.d/caddy-abuseguard-drop.conf
+remove_file "$POLICY_BIN"
 remove_file "$ENGINE_BIN"
 remove_file "$PANEL_BIN"
 # Older releases installed the panel as `abuseguard`; clean up that leftover

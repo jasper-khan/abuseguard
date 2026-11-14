@@ -128,7 +128,7 @@ RULESET_JSON='invalid-json'
 if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored unreadable nft state'; fi
 # Empty accepting chains and forwarded/container traffic do not compete with
 # the input policy; Fail2Ban and our own table are managed by AbuseGuard.
-RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
+RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard_intel","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"caddy_abuseguard_intel","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
 firewall_apply </dev/null >/dev/null
 for rule in 'tcp 22 any' 'tcp 2200 any' 'tcp 2222 any' 'tcp 443 any' 'udp 443 any'; do
 	firewall_ports | grep -qxF "$rule" || fail "missing initial rule: $rule"
@@ -262,7 +262,7 @@ CHECK_FAIL=0
 grep -q '^# policy ipv4-in=1' "$FIREWALL_FILE" || fail 'a failed policy change altered the saved policy'
 RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"drop"}}]}'
 if firewall_set_policy ipv4 0 >/dev/null 2>&1; then fail 'policy change ignored a conflicting input policy'; fi
-RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
+RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard_intel","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"caddy_abuseguard_intel","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'
 grep -q '^# policy ipv4-in=1' "$FIREWALL_FILE" || fail 'a conflicting policy change altered the saved policy'
 
 # IPv6 source rules render and round-trip.

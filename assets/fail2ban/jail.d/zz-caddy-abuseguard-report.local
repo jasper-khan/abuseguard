@@ -1,24 +1,9 @@
 # Enable SSH protection on install. Keep the system's SSH log/backend and
-# detection thresholds; share AbuseGuard's allowlist and global ban action.
+# detection thresholds; the kernel intel set and generated `ignoreip` handle
+# feed/allowlist enforcement, and this jail enforces behaviour only.
 # The installer rewrites target_port below to the port sshd actually listens on.
 [sshd]
 enabled = true
 bantime = 90d
-ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>
 action = caddy-abuseguard-drop
          caddy-abuseguard-queue[profile=ssh-bruteforce, transport=SSH, target_port=22, window="%(findtime)s"]
-
-# Known-bad sources need only one SSH filter match, just as one Web request
-# suffices for caddy-intel. Intel-only bans do not generate external reports.
-[sshd-intel]
-enabled = true
-filter = sshd
-logpath = %(sshd/logpath)s
-backend = %(sshd/backend)s
-usedns = no
-bantime = 90d
-maxretry = 1
-findtime = 10m
-ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard intel-ignore --ip <ip>
-ignorecache = key="<ip>", max-count=50000, max-time=10m
-action = caddy-abuseguard-drop

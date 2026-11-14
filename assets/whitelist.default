@@ -2,6 +2,11 @@
 # One IP or CIDR per line. Lines starting with '#' are comments.
 # Any address matched here is NEVER banned and NEVER reported.
 #
+# Panel edits apply immediately. After editing this file by hand, run:
+#   sudo ag --policy-apply
+# to validate the file and update fail2ban ignoreip + the kernel intel
+# exception together (otherwise the change waits for the next 6h cycle).
+#
 # Loopback is always safe to keep:
 127.0.0.0/8
 ::1

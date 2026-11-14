@@ -32,7 +32,7 @@ logpath = $TMP/auth.log
 backend = polling
 action =
 EOF
-for jail in caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel; do
+for jail in caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd; do
 	printf '\n[%s]\n' "$jail" >> "$TMP/jail.conf"
 done
 printf '[sshd]\nenabled = true\n' > "$TMP/jail.d/zz-caddy-abuseguard-report.local"

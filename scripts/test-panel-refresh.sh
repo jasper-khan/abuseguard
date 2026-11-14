@@ -173,17 +173,19 @@ systemctl() {
 }
 fail2ban-client() {
 	case "$2" in
-		caddy-intel) echo "Status for the jail: $2. Currently banned: 158" ;;
-		sshd-intel) echo "NOK: $2" ;;
+		caddy-rate-local) echo "Status for the jail: $2. Currently banned: 158" ;;
+		caddy-probe-h1) echo "Currently banned: 0" ;;
+		caddy-probe-h2) echo "Currently banned: 0" ;;
+		sshd) echo "NOK: $2" ;;
 		*) echo "Currently banned: 0" ;;
 	esac
 }
 status="$(act_status | sed $'s/\033\\[[0-9;]*m//g')"
-count_rows="$(printf '%s\n' "$status" | grep -E '^ +(caddy-(intel|rate-local|probe-h[12])|sshd) +[0-9]+$')"
+count_rows="$(printf '%s\n' "$status" | grep -E '^ +(caddy-(rate-local|probe-h[12])|sshd) +[0-9]+$')"
 # Every count row must end in the same column: 3 leading + 24 label + 7 count.
 [ "$(printf '%s\n' "$count_rows" | awk '{print length($0)}' | sort -u)" = 34 ]
-[ "$(printf '%s\n' "$count_rows" | wc -l)" -eq 5 ]
-[ "$(printf '%s\n' "$status" | grep -cE 'sshd-intel +未启用' || true)" -eq 1 ]
+[ "$(printf '%s\n' "$count_rows" | wc -l)" -eq 3 ]
+[ "$(printf '%s\n' "$status" | grep -cE 'sshd +未启用' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE 'caddy +未运行' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE 'fail2ban +运行中' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE 'example\.com +→ 127\.0\.0\.1:3000' || true)" -eq 1 ]

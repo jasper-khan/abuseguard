@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,90 @@ func TestLoadAllowlistParsesCommentsAndCIDRs(t *testing.T) {
 		if !allow.Contains(ip) {
 			t.Fatalf("allowlist does not contain %s", ip)
 		}
+	}
+}
+
+func TestFormatAllowlistCanonicalizesWithoutNarrowing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "whitelist")
+	data := strings.Join([]string{
+		"# trusted addresses",
+		"192.0.2.1 # admin",
+		"192.0.2.1",
+		"::ffff:192.0.2.1",
+		"::ffff:192.0.2.9",
+		"::ffff:198.51.100.7",
+		"198.51.100.5/24",
+		"::ffff:203.0.113.77/120",
+		"2001:db8::1/32",
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	exported, err := formatAllowlist(path)
+	if err != nil {
+		t.Fatalf("formatAllowlist returned error: %v", err)
+	}
+	want := "192.0.2.1\n192.0.2.9\n198.51.100.7\n198.51.100.0/24\n203.0.113.0/24\n2001:db8::/32\n"
+	if string(exported) != want {
+		t.Fatalf("formatAllowlist = %q; want %q", exported, want)
+	}
+
+	roundPath := filepath.Join(dir, "exported")
+	if err := os.WriteFile(roundPath, exported, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := loadAllowlist(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := loadAllowlist(roundPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		ip   string
+		want bool
+	}{
+		{ip: "192.0.2.1", want: true},
+		{ip: "::ffff:192.0.2.1", want: true},
+		{ip: "192.0.2.2", want: false},
+		{ip: "192.0.2.9", want: true},
+		{ip: "::ffff:192.0.2.9", want: true},
+		{ip: "198.51.100.7", want: true},
+		{ip: "::ffff:198.51.100.7", want: true},
+		{ip: "198.51.100.255", want: true},
+		{ip: "198.51.101.1", want: false},
+		{ip: "203.0.113.5", want: true},
+		{ip: "::ffff:203.0.113.5", want: true},
+		{ip: "2001:db8:1::1", want: true},
+		{ip: "2001:db9::1", want: false},
+	} {
+		if got := original.Contains(tt.ip); got != tt.want {
+			t.Fatalf("original allowlist Contains(%q) = %v; want %v", tt.ip, got, tt.want)
+		}
+		if got := roundTrip.Contains(tt.ip); got != original.Contains(tt.ip) {
+			t.Fatalf("exported allowlist Contains(%q) = %v; want %v", tt.ip, got, original.Contains(tt.ip))
+		}
+	}
+}
+
+func TestFormatAllowlistRejectsInvalidWithoutOutput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "whitelist")
+	if err := os.WriteFile(path, []byte("192.0.2.1\n999.1.2.3\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := formatAllowlist(path)
+	if err == nil {
+		t.Fatal("invalid allowlist was accepted")
+	}
+	if data != nil {
+		t.Fatalf("invalid allowlist produced output %q", data)
+	}
+	if _, err := formatAllowlist(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("missing allowlist was accepted")
 	}
 }
 

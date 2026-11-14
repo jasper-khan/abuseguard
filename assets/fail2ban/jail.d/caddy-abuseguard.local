@@ -1,26 +1,16 @@
 # AbuseGuard jails for Caddy.
 #
 # All jails read the same privacy-trimmed Caddy access log and block with
-# nftables (drop) on every port and protocol. The engine decides who to ignore:
-#   - intel jail : ban instantly ONLY if the IP is on the threat-intel list
-#                  (engine `intel-ignore`: exit 1 = on list = ban).
-#   - rate/probe : ban unknown IPs by behaviour, but never a whitelisted IP
-#                  (engine `unknown-ignore`: exit 0 = whitelisted = skip).
-# Whitelisted IPs (see /etc/caddy-abuseguard/whitelist) are never banned.
-[caddy-intel]
-enabled       = true
-backend       = auto
-usedns        = no
-bantime       = 90d
-filter        = caddy-abuseguard-any
-logpath       = /var/log/caddy/abuseguard-access.json
-# Caddy's default JSON log writes time as a Unix epoch under the "ts" key.
-datepattern   = "ts":{EPOCH}
-maxretry      = 1
-findtime      = 10m
-action        = caddy-abuseguard-drop
-ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard intel-ignore --ip <ip>
-ignorecache   = key="<ip>", max-count=50000, max-time=10m
+# nftables (drop) on every port and protocol.
+#
+# Whitelist handling is native: /etc/caddy-abuseguard/whitelist is exported by
+# the engine and written as `ignoreip` into
+# /etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local by
+# `caddy-abuseguard-policy apply` (Ag panel / install / six-hour sync). There is
+# no per-request ignorecommand and no intel-only jail: the kernel intel set
+# decides feed enforcement, and these jails enforce behaviour only.
+#
+# Manual bans from the panel land in caddy-rate-local (drop-only, no report).
 
 [caddy-rate-local]
 enabled       = true
@@ -35,8 +25,6 @@ datepattern   = "ts":{EPOCH}
 maxretry      = 120
 findtime      = 60s
 action        = caddy-abuseguard-drop
-ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>
-ignorecache   = key="<ip>", max-count=50000, max-time=10m
 
 [caddy-probe-h1]
 enabled       = true
@@ -50,7 +38,6 @@ maxretry      = 5
 findtime      = 10m
 action        = caddy-abuseguard-drop
                 caddy-abuseguard-queue[profile=web-probe, transport=HTTP/1.1, target_port=443, window=10m]
-ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>
 
 [caddy-probe-h2]
 enabled       = true
@@ -64,4 +51,3 @@ maxretry      = 5
 findtime      = 10m
 action        = caddy-abuseguard-drop
                 caddy-abuseguard-queue[profile=web-probe, transport=HTTP/2.0, target_port=443, window=10m]
-ignorecommand = /usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard unknown-ignore --ip <ip>

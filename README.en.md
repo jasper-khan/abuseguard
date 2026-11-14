@@ -12,25 +12,28 @@ One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS modul
 visitor ─▶ Caddy (protected site: `import abuseguard`)
              │  writes a privacy-trimmed JSON access log
              ▼
-         fail2ban ──(matches)──▶ nftables source-IP DROP on all ports/protocols
+         fail2ban ──(rate/probe/SSH behavior)──▶ nftables source-IP DROP on all ports/protocols
              │
              └─(sensitive-path probe)─▶ engine enqueue ─▶ report queue ──(timer)──▶ AbuseIPDB
 
-sshd/auth.log ─▶ sshd / sshd-intel ──(brute force / intel hit)──▶ same global source-IP ban
+intel feed ──(6h sync, engine validates)──▶ root apply ──▶ dedicated nft intel set ──▶ drop listed sources
+                                                        └─ allowlist exception returns from intel chain only
 ```
 
 - Caddy tags each request to a protected site and logs only what fail2ban needs (client IP, protocol, tags) — no paths, hosts, headers, or query strings.
-- Installation enables four Web jails and two SSH jails sharing the same allowlist and threat-intel list. A ban from any jail drops that source IP on every port and protocol at the origin, including SSH.
-- A Go engine (stdlib only, single static binary) makes the ban/ignore decisions, keeps the threat-intel list fresh, and flushes queued reports.
+- Installation enables three behavioural Web jails and `sshd`, sharing one allowlist. A ban from any jail drops that source IP on every port and protocol at the origin, including SSH.
+- Threat intel no longer runs through fail2ban: after a sync, a root applier loads the validated list into a dedicated kernel set, so listed sources are dropped at the first packet before reaching Caddy or SSH. The set is independent of the port firewall table, so port edits never rebuild it.
+- The allowlist is one file: panel edits update fail2ban `ignoreip` and the nft intel exception together. Hand edits need an explicit apply; see Threat intel.
+- A Go engine (stdlib only, single static binary) validates feeds, flushes queued reports and exports strictly parsed policy input. It stays unprivileged; a separate root oneshot loads the firewall.
 
 ## Requirements
 
 - Debian 11/12 or Ubuntu 20.04+ (amd64 or arm64), with root (sudo).
-- nftables banning applies when clients connect directly to the origin, including Cloudflare DNS-only records.
+- Every nftables ban matches the source IP that reaches this host, so it only works when clients connect directly to the origin (including Cloudflare DNS-only). Behind a CDN or your own proxy, the kernel sees the proxy edge IP, not the visitor: feed enforcement cannot act on proxied requests, and behavioural jails only decide whom to ban from Caddy's logged `client_ip`, which still cannot stop traffic arriving through the proxy. This does not solve unknown-IP or distributed CC.
 
 ## Install
 
-The installer checks both the effective configuration and running state of all six jails. If an existing `jail.local` or `jail.d/*.local` disables a required jail (for example, `[sshd] enabled = false`), installation fails with an error. Resolve that override and retry; the installer does not rewrite custom files automatically.
+The installer checks both the effective configuration and running state of all four jails. If an existing `jail.local` or `jail.d/*.local` disables a required jail (for example, `[sshd] enabled = false`), installation fails with an error. Resolve that override and retry; the installer does not rewrite custom files automatically.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/jasper-khan/abuseguard/main/install.sh)
@@ -116,7 +119,7 @@ validation before it is applied.
 
 Just run `ag` (the panel needs root; a normal user is transparently re-run under sudo, prompting for a password only if needed). Its title shows the current AbuseGuard engine version, the home screen shows the current SSH ports and protected-site count, and the home-screen ban record count re-queries every jail every 30 minutes without requiring a menu action:
 
-The panel uses `=` rules, aligned `label : value` status rows, and a single-column numbered menu. The home screen shows protection, ban records, intel size, reporting state, SSH ports, site count, and version; subpages reuse the same structure. Status values use color (green = healthy/on, yellow = warning/unconfigured, red = failed); all other text follows the terminal's foreground for both light and dark backgrounds:
+The panel uses `=` rules, aligned `label : value` status rows, and a single-column numbered menu. The home screen shows protection, ban records, intel-set size and behavioural ban counts, reporting state, SSH ports, site count, and version; subpages reuse the same structure. Status values use color (green = healthy/on, yellow = warning/unconfigured, red = failed); all other text follows the terminal's foreground for both light and dark backgrounds:
 
 | Home entry | Available actions |
 | --- | --- |
@@ -124,14 +127,14 @@ The panel uses `=` rules, aligned `label : value` status rows, and a single-colu
 | `[2]` Sites and certificates | List, add, or delete reverse-proxy sites; set the Cloudflare API Token |
 | `[3]` Firewall | Ports and protocols: open/close TCP or UDP ports with optional source IP/CIDR limits, toggle IPv4/IPv6 inbound; IP access: list, ban, unban, whitelist; rules: inspect or reapply |
 | `[4]` SSH and login | Connection: listening ports; authentication: global password/key toggles; root credentials: add/remove public keys, change password |
-| `[5]` Intel and reporting | Threat intel: sync now; AbuseIPDB reporting: send queue, set API Key, toggle automatic reporting |
+| `[5]` Intel and reporting | Threat intel: sync now (validates then applies kernel policy); AbuseIPDB reporting: send queue, set API Key, toggle automatic reporting |
 | `[6]` Maintenance | Diagnostics: recent logs; version: update; uninstall |
 
-Adding a site takes a domain and upstream (local or remote IP:port), then generates a protected reverse-proxy configuration with `import abuseguard` and TLS as needed. The whitelist supports in-panel add/remove; **an added IP is auto-unbanned** and fail2ban reloaded. The home screen also shows firewall status and threat-intel last-sync age.
+Adding a site takes a domain and upstream (local or remote IP:port), then generates a protected reverse-proxy configuration with `import abuseguard` and TLS as needed. The whitelist supports in-panel add/remove: an edit updates fail2ban `ignoreip` and the nft intel exception together, and **adding an entry also clears the behavioural bans it covers, including addresses inside a CIDR**. If the IP is still on the intel feed, only the whitelist entry lets it through. The home screen shows firewall state, intel-feed entry count and behavioural ban counts separately, and never dumps the full intel set.
 
 Before validation, an update runs `caddy fmt` on the main Caddyfile and `/etc/caddy/sites/*.caddy`, and removes only the exact `header_up X-Forwarded-Host {host}` or `header_up X-Forwarded-Host {http.request.host}` directives that Caddy identifies as redundant. Other reverse-proxy settings and request headers are preserved.
 
-Installation and updates automatically apply the AbuseGuard firewall and enable boot restoration, without another confirmation. The initial configuration allows all detected SSH ports, TCP 443, and UDP 443, and drops other new inbound connections. TCP 80 is closed by default; allow it explicitly in the panel if HTTP access or redirects are needed. Existing configurations retain user-added and user-closed ports, with current SSH ports added as needed. Established connections, loopback, ICMP (including IPv6 neighbor discovery), and DHCP remain allowed; outbound traffic is unrestricted. The panel refuses to close the current SSH session port and the only SSH port. Closing other ports affects new connections only.
+Installation and updates automatically apply the AbuseGuard firewall and native allowlist/intel policy, and enable boot restoration, without another confirmation. Upgrading from an older release re-applies existing `caddy-intel`/`sshd-intel` bans to `caddy-rate-local` as fresh 90-day timed bans at upgrade time (the supported fail2ban API can read each ban's remaining duration, but its normal restore call re-applies the jail-wide bantime from restore time and cannot restore a distinct per-IP expiry) and skips whitelisted addresses; the retired jails are removed rather than kept as live aliases, and no new report is queued. An update sets the six old jails to idle: detection and `ignorecommand` stop while existing bans stay enforced in the kernel, and fail2ban restarts after the new engine and jail files are installed; a full stop is only the fallback when idle is unavailable (existing behavioural nft bans are then briefly removed and restored from the database on restart). A failure before the engine swap restores the old jail config and keeps detection running; any failure after the swap restores the previous engine and jail config, restarts the old detection, and warns clearly instead of leaving detection paused. Existing kernel bans remain in force, and re-running the installer resumes the saved old-ban migration. Each jail's native `ignoreip` is preserved per jail (an sshd-only exemption never widens the Web jails), and edits/removals in that native config take effect on the next apply. The initial configuration allows all detected SSH ports, TCP 443, and UDP 443, and drops other new inbound connections. TCP 80 is closed by default; allow it explicitly in the panel if HTTP access or redirects are needed. Existing configurations retain user-added and user-closed ports, with current SSH ports added as needed. Established connections, loopback, ICMP (including IPv6 neighbor discovery), and DHCP remain allowed; outbound traffic is unrestricted. The panel refuses to close the current SSH session port and the only SSH port. Closing other ports affects new connections only.
 
 An SSH port change in `[4]` SSH and login keeps both ports listening: it runs `sshd -t`, allows the new port, reloads sshd, and confirms both ports are listening; any failure restores the previous configuration. On success it syncs Fail2Ban's SSH report port. Reconnect on the new port, then close the old one from the firewall menu: the panel removes its `Port` directive and closes the old firewall rule; the current session port and the only SSH port are protected. Without a `Port` directive it writes both ports to `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`; with a single existing directive the original file is kept and the new port goes into that drop-in; multiple directives are refused. The new port inherits the old port's firewall source restrictions; incompatible existing source rules on the new port must first be adjusted in the firewall menu. Allow the new port in the cloud security group first. The panel refuses `ssh.socket` activation.
 
@@ -139,34 +142,42 @@ The login toggles in `[4]` SSH and login manage password and key login through `
 
 When opening a port you can enter a source IPv4 or IPv6 address or CIDR; leave it empty to allow every source. One port can have several source rules, and the close action asks for the rule number. Two family switches control inbound: IPv4 is on by default, IPv6 is off by default. Turning a family off drops new inbound connections of that family while established connections, loopback, ICMP, and DHCP stay allowed. Turning off the family of the current SSH session asks for a `yes` confirmation and may require console recovery after the session ends. Reapplying rules and reinstalling only add missing SSH ports and never widen an existing source restriction.
 
-`/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot systemd service restores it at boot, without a new daemon. The menu can reapply saved rules; uninstalling removes only this project's table. IP bans retain the existing Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports.
+`/etc/caddy-abuseguard/firewall.nft` is the single saved configuration. Changes pass `nft -c` before a transaction replaces only the `inet caddy_abuseguard` table. A oneshot `caddy-abuseguard-firewall.service` restores it at boot, without a new daemon; the separate `caddy-abuseguard-policy.service` oneshot restores the intel policy at boot. The menu can reapply saved rules; uninstalling removes only tables this project created (the port table and the independent `inet caddy_abuseguard_intel` intel table). Behavioural bans retain the Fail2Ban path, allowlist checks, 90-day duration, and exclusion of manual bans from reports; the same allowlist drives fail2ban `ignoreip` and the intel exception, with no per-request `ignorecommand`.
 
-Other scripts can run `ag --firewall-open tcp 12345` or `ag --firewall-open udp 12345` to allow one port noninteractively, using the panel's validation and persistence path; failures return a nonzero status. This fork's `sing-box-yg` calls the interface when creating nodes, changing ports, or configuring a private landing inbound. Update AbuseGuard to v0.3.5 or later before using the updated `sb`. Only explicitly requested ports are added, without service scanning or automatic closure of old ports; cloud security groups still need separate rules.
+Other scripts can run `ag --firewall-open tcp 12345` or `ag --firewall-open udp 12345` to allow one port noninteractively, using the panel's validation and persistence path; failures return a nonzero status. After editing the whitelist or intel file externally, run `sudo ag --policy-apply` to validate and apply immediately; `ag --firewall-apply` rebuilds only the port table and never touches the intel table. This fork's `sing-box-yg` calls the interface when creating nodes, changing ports, or configuring a private landing inbound. Update AbuseGuard to v0.3.5 or later before using the updated `sb`. Only explicitly requested ports are added, without service scanning or automatic closure of old ports; cloud security groups still need separate rules.
 
-Before applying the firewall or editing ports, AbuseGuard checks existing nftables input chains. Other input rules or default-drop policies (except Fail2Ban) abort the operation and list the conflicting chains; migrate or disable those rules before retrying so that old rules cannot silently override a panel port allowance. Cloud security groups and forwarded traffic, including published container ports, remain managed by their respective platforms. The IP allowlist exempts addresses from bans, not from port filtering. If another tool flushes the entire nftables ruleset, reapply the firewall rules from the panel. Reverse-proxy upstream ports normally do not need public access.
+Before applying the firewall or editing ports, AbuseGuard checks existing nftables input chains. Other input rules or default-drop policies (except this project's managed tables and Fail2Ban's `f2b-table`) abort the operation and list the conflicting chains; migrate or disable those rules before retrying so that old rules cannot silently override a panel port allowance. Cloud security groups and forwarded traffic, including published container ports, remain managed by their respective platforms. The IP allowlist exempts addresses from bans, not from port filtering. If another tool flushes the entire nftables ruleset, reapply the firewall rules from the panel. Reverse-proxy upstream ports normally do not need public access.
 
 ## Protection model
 
 | Jail | Trigger | Threshold | Who gets banned |
 | --- | --- | --- | --- |
-| `caddy-intel` | any request to a protected site | 1 hit | only IPs on the threat-intel list |
-| `caddy-rate-local` | any request to a protected site | 120 in 60s | any non-whitelisted IP (local ban only) |
+| `caddy-rate-local` | any request to a protected site | 120 in 60s | any non-whitelisted IP (local ban only; panel manual bans also land in this jail) |
 | `caddy-probe-h1` | HTTP/1.1 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
 | `caddy-probe-h2` | HTTP/2 scan of sensitive paths | 5 in 10m | any non-whitelisted IP + queued for report |
 | `sshd` (enabled on install) | SSH authentication failures | the jail's effective thresholds | any non-whitelisted IP + queued for report |
-| `sshd-intel` (enabled on install) | SSH authentication filter match | 1 hit | only IPs on the threat-intel list |
 
-All six jails ban for 90 days using the same all-port, all-protocol action. The `sshd` jail keeps the system's log source, backend, and detection thresholds (Fail2Ban defaults when not customized). IPs on `/etc/caddy-abuseguard/whitelist` are never banned or reported by AbuseGuard. Manual bans also check the allowlist and accept only single IPv4/IPv6 addresses; allowlist entries still support CIDRs. Each jail tracks bans independently, so one jail's unban cannot undo another jail's active ban; the panel unbans across all jails. "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
+The three Web jails and `sshd` ban for 90 days using the same all-port, all-protocol action. The `sshd` jail keeps the system's log source, backend, and detection thresholds (Fail2Ban defaults when not customized). IPs on `/etc/caddy-abuseguard/whitelist` are never banned or reported by AbuseGuard. Manual bans also check the allowlist and accept only single IPv4/IPv6 addresses; allowlist entries still support CIDRs. Each jail tracks bans independently, so one jail's unban cannot undo another jail's active ban; the panel unbans across all jails. Threat-intel enforcement does not use a jail: listed sources are dropped by a dedicated kernel set (see Threat intel). "Sensitive paths" = `/.env`, `/.git`, `/phpmyadmin`, `/vendor/phpunit`, `/cgi-bin` (and subpaths).
 
 Newly generated Caddy configurations enable only HTTP/1.1 and HTTP/2, leaving UDP/443 available for other services. Global source-IP bans do not occupy any port.
 
 ## Threat intel
 
-The intel jail bans nothing until the list is synced. The engine pulls a public AbuseIPDB-derived blocklist and refuses a list that is implausibly small (<90k) or large (>120k); on any failure it keeps the previous list. Refresh runs every 6h (and via the panel).
+Threat intel is enforced as a kernel set, not as a "one hit then 90-day ban" jail. Every 6h (and on demand from the panel) the engine pulls a public AbuseIPDB-derived blocklist: it keeps IPv4 only, refuses a list that is implausibly small (<90k) or large (>120k), and writes `intel.txt` atomically once validation passes. Any download or parse failure keeps the previous list.
+
+The root applier (`/usr/local/libexec/caddy-abuseguard-policy`, run by `caddy-abuseguard-policy.service` at boot and by `caddy-abuseguard-sync.service` after each sync) then rebuilds the set from the engine's exported, line-by-line validated address list: it validates the whole input first, replaces the set in one nft transaction, and only then writes a root-owned boot snapshot. An empty set is allowed only when no policy was ever established; a missing, corrupt, undersized, oversized, or failed apply keeps the last effective kernel policy and snapshot instead of replacing it with an empty or partial list.
+
+Enforcement follows the feed: a newly listed source is dropped on the next sync, and a source that leaves the list stops being dropped — there is no fixed 90-day intel ban. The allowlist exception only `return`s from the intel chain, never globally accepts traffic, so whitelisted IPs still pass through the normal port firewall; overlapping CIDR exceptions work. Port edits rebuild only the port table; the intel set is independent.
+
+Hand edits to `/etc/caddy-abuseguard/whitelist` need an explicit apply: `sudo ag --policy-apply` (otherwise they wait for the next six-hour sync cycle). Panel edits apply immediately, as do install and update. A failed apply keeps the last effective policy, so fail2ban is never silently split from kernel enforcement.
+
+Unban versus the feed: the panel's unban clears timed behavioural bans only. If the source is still on the intel feed, kernel enforcement continues — add it to the whitelist to let it through.
+
+See Requirements for the proxy/CDN limit: the kernel only matches the source address that reaches this host, so feed enforcement cannot act on proxied visitors.
 
 ## AbuseIPDB reporting (optional)
 
-Reporting is enabled in the config by default, but events are queued only after an API key is set. Sensitive-path probes are fixed to category `21` (Web App Attack); authentication brute-force bans from the `sshd` jail are fixed to `18,22` (Brute-Force + SSH). Request-rate bans, Web/SSH threat-intel hits, and manual panel bans remain local only.
+Reporting is enabled in the config by default, but events are queued only after an API key is set. Sensitive-path probes are fixed to category `21` (Web App Attack); authentication brute-force bans from the `sshd` jail are fixed to `18,22` (Brute-Force + SSH). Request-rate bans, threat-intel enforcement, and manual panel bans remain local only.
 
 Public comments contain only a standardized behavior, the observed count and detection window, plus the HTTP protocol for web events. They never name AbuseGuard or include a host, exact path, query, headers, request body, user agent, SSH username, or raw log. Reports honor AbuseIPDB's per-IP 15-minute window; a later event for the same IP stays queued until eligible instead of being discarded. The daily cap remains 1000. A flush atomically rotates the current queue into a separate processing batch, so records enqueued while it sends remain in the new queue. An unreadable allowlist or corrupt state stops the flush; temporary API failures keep records for retry. The flush runs every 10m. Toggle external reporting with panel → `[5]` Intel and reporting → `[4]` Automatic reporting; this never disables local bans.
 
@@ -194,13 +205,19 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 /usr/local/bin/caddy                          Caddy (with caddy-dns/cloudflare)
 /usr/local/bin/ag                             control panel
 /usr/local/libexec/caddy-abuseguard           Go engine
+/usr/local/libexec/caddy-abuseguard-policy    root policy applier
 /etc/caddy/Caddyfile                          global config + AbuseGuard imports
 /etc/caddy/abuseguard.caddy                   the (abuseguard) snippet
 /etc/caddy/sites/<domain>.caddy               one file per protected site
 /etc/caddy-abuseguard/config.json             engine config
 /etc/caddy-abuseguard/whitelist               never-ban list
+/etc/caddy-abuseguard/firewall.nft            port firewall config + boot restore
+/etc/caddy-abuseguard/intel.nft               intel snapshot (root-owned, boot restore)
+/etc/caddy-abuseguard/intel-allow.nft         allowlist exception snapshot (root-owned)
+/etc/caddy-abuseguard/intel-applied.json      last apply time and entry counts
 /etc/caddy-abuseguard/abuseipdb-report.key    AbuseIPDB key (optional)
-/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  enables SSH protection, intel detection, reporting
+/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  enables SSH protection and reporting
+/etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local generated native ignoreip
 /var/lib/caddy-abuseguard/                     intel list + report queue/state
 /var/log/caddy/abuseguard-access.json         privacy-trimmed access log
 ```
@@ -231,13 +248,16 @@ AbuseGuard created vs. what you already had).
   reinstall automatically restores `import abuseguard` to kept sites without changing their reverse
   proxy. Your original Caddyfile is backed up at install time as `Caddyfile.pre-abuseguard`.
 
+Uninstall also removes this project's port table, independent intel table, root-owned boot snapshot, and generated allowlist jail configuration; other nftables tables and other fail2ban jails are left untouched.
+
 ## Security notes
 
 - Caddy adds no authentication. Anything you expose is public unless you add auth yourself.
 - The installer's self-test site binds `127.0.0.1:8080` only.
 - Secrets (`*.key`, `.env`) are mode 0640 and git-ignored; never commit them.
 - Downloaded binaries are verified against `SHA256SUMS.txt` (see the integrity check under "Slow network / China mirror").
-- Caddy runs under a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, restricted capability set, syscall filtering); the two engine timers are hardened too.
+- Threat intel takes effect only through a root-owned snapshot and kernel set: the root applier validates the engine's plain address export line by line and never executes downloaded text as nft rules. `/var/lib/caddy-abuseguard` is writable by the unprivileged `abuseguard` user, so it is never used as executable policy input.
+- Caddy runs under a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, restricted capability set, syscall filtering); the two engine timers and the root policy applier are hardened too.
 
 ## Build / release
 

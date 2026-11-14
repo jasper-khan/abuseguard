@@ -11,6 +11,9 @@ cleanup() {
 }
 trap cleanup EXIT
 (cd "$ROOT/engine" && go build -o "$TMP/engine" .)
+# Native binaries (Windows here, Linux in CI) must receive native paths inside
+# config/env; cygpath converts only when it exists.
+native_path() { command -v cygpath >/dev/null 2>&1 && cygpath -m "$1" || printf '%s' "$1"; }
 for name in act_ban wl_valid; do
 	awk -v signature="$name() {" '
 		index($0, signature) == 1 { printing=1 }
@@ -20,8 +23,8 @@ for name in act_ban wl_valid; do
 done
 source "$TMP/functions.sh"
 ENGINE="$TMP/engine"
-export ABUSEGUARD_CONFIG="$TMP/config.json"
-printf '{"allowlist_file":"%s"}\n' "$TMP/whitelist" > "$ABUSEGUARD_CONFIG"
+export ABUSEGUARD_CONFIG="$(native_path "$TMP/config.json")"
+printf '{"allowlist_file":"%s"}\n' "$(native_path "$TMP/whitelist")" > "$ABUSEGUARD_CONFIG"
 printf '192.0.2.10\n2001:db8:1::/48\n' > "$TMP/whitelist"
 pause() { :; }
 fail2ban-client() { printf '%s\n' "$*" >> "$TMP/calls"; }
@@ -36,7 +39,7 @@ act_ban <<< '198.51.100.0/24' >/dev/null
 [ ! -s "$TMP/calls" ] || fail 'unsupported CIDR target reached banip'
 : > "$TMP/calls"
 act_ban <<< '198.51.100.10' >/dev/null
-grep -qx 'set caddy-intel banip 198.51.100.10' "$TMP/calls" || fail "non-whitelisted IP was not banned"
+grep -qx 'set caddy-rate-local banip 198.51.100.10' "$TMP/calls" || fail "non-whitelisted IP was not banned"
 printf 'invalid-whitelist\n' > "$TMP/whitelist"
 : > "$TMP/calls"
 act_ban <<< '198.51.100.10' >/dev/null

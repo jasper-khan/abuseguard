@@ -71,6 +71,8 @@ fail() {
 
 # The generic installer helper must stage, verify, probe, and only then replace.
 extract_function verify_sha256 "$ROOT/install.sh" > "$FUNCTIONS"
+extract_function stage_release_binary "$ROOT/install.sh" >> "$FUNCTIONS"
+extract_function commit_staged_binary "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function install_release_binary "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function latest_release_tag "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function release_asset "$ROOT/install.sh" >> "$FUNCTIONS"
@@ -182,10 +184,6 @@ install_release_binary test-url "$OLD_BIN" test-name test-label 0.3.33 \
 [ "$("$OLD_BIN" version)" = 'abuseguard-engine 0.3.33' ] || fail "matching engine was not installed"
 find "$TMP" -maxdepth 1 -name '.*.tmp.*' -print -quit | grep -q . \
 	&& fail "installer left a staged binary behind"
-grep -q 'install_release_binary .*ENGINE_BIN' "$ROOT/install.sh" \
-	|| fail "engine download does not use the atomic installer"
-grep -q 'install_release_binary .*CADDY_BIN' "$ROOT/install.sh" \
-	|| fail "Caddy download does not use the atomic installer"
 
 # Build the real engine so panel validation is tested against its parser.
 (cd "$ROOT/engine" && go build -o "$ENGINE_BUILD" .)

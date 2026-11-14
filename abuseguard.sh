@@ -13,10 +13,13 @@ CADDYFILE=/etc/caddy/Caddyfile
 SITES_DIR=/etc/caddy/sites
 STATE_DIR=/var/lib/caddy-abuseguard
 INTEL="$STATE_DIR/intel.txt"
-JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
+JAILS="caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd"
 PANEL_REFRESH_SECONDS=1800
 FIREWALL_FILE="$CONF_DIR/firewall.nft"
 FIREWALL_SERVICE=caddy-abuseguard-firewall.service
+POLICY_HELPER=/usr/local/libexec/caddy-abuseguard-policy
+POLICY_APPLIED="$CONF_DIR/intel-applied.json"
+INTEL_TABLE=caddy_abuseguard_intel
 SSHD_MAIN=/etc/ssh/sshd_config
 SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
 SSHD_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-port.conf"
@@ -187,9 +190,27 @@ intel_age_h() {
 	echo $(( (now - ts) / 3600 ))
 }
 
+# Root applier: validates the whitelist + feed through the engine, applies one
+# nft transaction, writes boot snapshots and regenerates fail2ban ignoreip.
+policy_apply() {
+	[ -x "$POLICY_HELPER" ] || { echo "  策略应用器缺失；请重新运行安装/更新。" >&2; return 1; }
+	"$POLICY_HELPER" apply
+}
+
+# Applied kernel policy count/age (from the root-owned snapshot metadata).
+intel_applied_count() { jq -r '.intel_entries // empty' "$POLICY_APPLIED" 2>/dev/null || true; }
+intel_applied_age_h() {
+	local ts gen now
+	gen="$(jq -r '.applied_at // empty' "$POLICY_APPLIED" 2>/dev/null)"
+	[ -n "$gen" ] || { echo ""; return; }
+	ts="$(date -d "$gen" +%s 2>/dev/null)" || { echo ""; return; }
+	now="$(date +%s)"
+	echo $(( (now - ts) / 3600 ))
+}
+
 header() {
-	local caddy f2b intel banned rep age version ssh_ports sites
-	local firewall_ok=0 issue_text='' protect_value report_value intel_note
+	local caddy f2b intel banned rep age version ssh_ports sites applied applied_age
+	local firewall_ok=0 issue_text='' protect_value report_value intel_note applied_note
 	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
@@ -211,6 +232,10 @@ header() {
 		[ -z "$issue_text" ] || issue_text+=' · '
 		issue_text+='防火墙未就绪'
 	fi
+	if ! nft list table inet "$INTEL_TABLE" >/dev/null 2>&1; then
+		[ -z "$issue_text" ] || issue_text+=' · '
+		issue_text+='情报策略未应用'
+	fi
 	if [ -z "$issue_text" ]; then
 		protect_value="${C_G}正常${C_0}（Caddy / Fail2Ban / 防火墙）"
 	else
@@ -229,11 +254,21 @@ header() {
 	elif [ "$age" -gt 12 ]; then intel_note="${C_Y}${age} 小时前，建议检查${C_0}"
 	else intel_note="${age} 小时前同步"
 	fi
+	applied="$(intel_applied_count)"
+	if [ -z "$applied" ]; then
+		applied_note="${C_Y}尚未应用${C_0}"
+	else
+		applied_age="$(intel_applied_age_h)"
+		if [ -z "$applied_age" ]; then applied_note="${C_H}$(thousands "$applied")${C_0} 条"
+		else applied_note="${C_H}$(thousands "$applied")${C_0} 条（${applied_age} 小时前应用）"
+		fi
+	fi
 
 	panel_start "AbuseGuard 控制中心"
 	panel_kv "防护状态" "$protect_value"
 	panel_kv "封禁记录" "${C_H}$(thousands "$banned")${C_0}"
 	panel_kv "情报库" "${C_H}$(thousands "$intel")${C_0} 条（${intel_note}）"
+	panel_kv "内核策略" "$applied_note"
 	panel_kv "自动上报" "$report_value"
 	panel_kv "SSH 端口" "${C_H}${ssh_ports}${C_0}"
 	panel_kv "保护站点" "${C_H}${sites}${C_0}"
@@ -294,15 +329,24 @@ act_banned() {
 }
 
 act_unban() {
-	local ip
+	local ip rc
 	read -r -p "输入要解封的 IP（留空取消）: " ip
 	ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
 	[ -z "$ip" ] && return
 	wl_valid "$ip" || { echo "  IP 格式无效。"; pause; return; }
 	if fail2ban-client unban "$ip" >/dev/null 2>&1; then
-		echo "  已解封 $ip（所有 jail）。"
+		echo "  已清除 $ip 的定时行为封禁（所有 jail）。"
 	else
 		echo "  解封失败，或该 IP 当前未被封禁。"
+	fi
+	# A cleared behaviour ban does not override the feed: say so instead of
+	# implying the source is now reachable.
+	rc=0
+	"$ENGINE" allowlist-check --ip "$ip" >/dev/null 2>&1 || rc=$?
+	if [ "$rc" = 0 ]; then
+		echo "  该 IP 在白名单中；内核情报例外已放行，仍受端口规则限制。"
+	elif nft get element inet "$INTEL_TABLE" block4 '{' "$ip" '}' >/dev/null 2>&1; then
+		echo "  ${C_Y}注意：$ip 仍在威胁情报名单上，内核仍会拦截。要放行请加入白名单。${C_0}"
 	fi
 	pause
 }
@@ -321,11 +365,11 @@ act_ban() {
 		1) ;;
 		*) echo "  无法可靠检查白名单，已取消封禁。"; pause; return ;;
 	esac
-	# 任一 AbuseGuard jail 都按源 IP 拦截所有端口和协议。
-	# 用 caddy-intel：它只做防火墙 drop、不挂上报动作，手动封禁不会被自动上报到
-	# AbuseIPDB（probe jail 带 queue 动作，手动封会误报一个管理员本地拉黑的 IP）。
-	if fail2ban-client set caddy-intel banip "$ip" >/dev/null 2>&1; then
-		echo "  已封禁 $ip。"
+	# All AbuseGuard jails drop every port/protocol by source IP. Use
+	# caddy-rate-local: it only drops and never queues an AbuseIPDB report, so a
+	# manual ban is never submitted as an observed attack.
+	if fail2ban-client set caddy-rate-local banip "$ip" >/dev/null 2>&1; then
+		echo "  已封禁 $ip（caddy-rate-local，90 天）。"
 	else
 		echo "  封禁失败（检查 jail 是否启用）。"
 	fi
@@ -356,8 +400,18 @@ wl_commit() {
 	mv -f -- "$candidate" "$WHITELIST"
 }
 
-# 重载 fail2ban 并清 ignore 缓存，让白名单改动立即生效
-wl_reload() { chown root:abuseguard "$WHITELIST" 2>/dev/null; chmod 0640 "$WHITELIST" 2>/dev/null; fail2ban-client reload >/dev/null 2>&1 || true; }
+# The root applier validates, applies the intel/allow nft transaction,
+# regenerates fail2ban ignoreip and clears bans for newly allowlisted sources.
+# A failure is reported to the operator instead of pretending the change is live.
+wl_apply() {
+	if policy_apply; then
+		echo "  白名单与内核/ fail2ban 策略已同步。"
+		return 0
+	fi
+	echo "  ${C_Y}白名单已保存，但策略应用失败；上一次生效的策略仍然保留。${C_0}"
+	echo "  修复上方错误后运行：sudo ag --policy-apply"
+	return 1
+}
 
 act_whitelist() {
 	local -a items
@@ -384,7 +438,7 @@ act_whitelist() {
 		case "$c" in
 			1)
 				echo "  批量添加：每行一个，或用空格/逗号分隔多个；输入空行结束。"
-				local added=0 skipped=0 tok; local -a added_ips=()
+				local added=0 skipped=0 tok
 				tmp="$(wl_candidate)" || { echo "  无法创建白名单候选文件。"; sleep 1; continue; }
 				while IFS= read -r ip; do
 					[ -z "$ip" ] && break
@@ -392,14 +446,13 @@ act_whitelist() {
 					for tok in $ip; do
 						if ! wl_valid "$tok"; then echo "    跳过(格式无效)：$tok"; skipped=$((skipped+1)); continue; fi
 						if grep -qxF "$tok" "$tmp" 2>/dev/null; then echo "    跳过(已存在)：$tok"; skipped=$((skipped+1)); continue; fi
-						printf '%s\n' "$tok" >> "$tmp"; added=$((added+1)); added_ips+=("$tok"); echo "    待添加：$tok"
+						printf '%s\n' "$tok" >> "$tmp"; added=$((added+1)); echo "    待添加：$tok"
 					done
 				done
 				if [ "$added" -gt 0 ] && wl_commit "$tmp"; then
-					tmp=""; wl_reload
-					# reload 只影响未来判定；正被封的 IP 需显式解封才能立即放行
-					for tok in "${added_ips[@]}"; do fail2ban-client unban "$tok" >/dev/null 2>&1; done
-					echo "  完成：新增 $added，跳过 $skipped（加白的 IP 若在封禁中已一并解封）"
+					tmp=""
+					echo "  新增 $added，跳过 $skipped。"
+					wl_apply
 				else
 					rm -f -- "$tmp"
 					[ "$added" -eq 0 ] && echo "  完成：新增 0，跳过 $skipped" \
@@ -417,7 +470,7 @@ act_whitelist() {
 				# 删掉“去注释去空格后 == target”的行，保留注释/空行/其它条目
 				if awk -v t="$target" '{l=$0; sub(/#.*/,"",l); gsub(/[ \t]/,"",l); if (l!=t) print}' "$WHITELIST" > "$tmp" \
 					&& wl_commit "$tmp"; then
-					tmp=""; wl_reload; echo "  已删除：$target"
+					tmp=""; echo "  已删除：$target"; wl_apply
 				else
 					rm -f -- "$tmp"; echo "  候选白名单无效，原文件保持不变。"
 				fi
@@ -425,13 +478,13 @@ act_whitelist() {
 			3)
 				tmp="$(wl_candidate)" || { echo "  无法创建白名单候选文件。"; sleep 1; continue; }
 				if "${EDITOR:-nano}" "$tmp" && wl_commit "$tmp"; then
-					tmp=""; wl_reload; echo "  白名单已保存。"
+					tmp=""; echo "  白名单已保存。"; wl_apply
 				else
 					rm -f -- "$tmp"; echo "  白名单格式无效或编辑失败，原文件保持不变。"
 				fi
 				sleep 1 ;;
 			'') return ;;
-			0) wl_reload; return ;;
+			0) return ;;
 			*) echo "请输入 0–3 之间的菜单编号。"; pause ;;
 		esac
 	done
@@ -443,11 +496,12 @@ firewall_running() { nft list table inet caddy_abuseguard >/dev/null 2>&1; }
 firewall_check_conflicts() {
 	local conflicts
 	# An accept here cannot override another base chain's drop. Ignore empty
-	# accept chains, our own table and Fail2Ban; reject competing input rules.
+	# accept chains, our managed tables (port + independent intel) and Fail2Ban;
+	# reject competing input rules.
 	conflicts="$(nft -j list ruleset | jq -r '
 		.nftables as $objects | $objects[] | .chain // empty |
 		select(.hook == "input" and (.family == "inet" or .family == "ip" or .family == "ip6")) |
-		select((.family != "inet" or .table != "caddy_abuseguard") and .table != "f2b-table") |
+		select(.table != "caddy_abuseguard" and .table != "caddy_abuseguard_intel" and .table != "f2b-table") |
 		. as $chain |
 		select(.policy == "drop" or any($objects[];
 			.rule.family == $chain.family and .rule.table == $chain.table and .rule.chain == $chain.name)) |
@@ -724,7 +778,7 @@ firewall_toggle_family() {
 }
 
 act_firewall() {
-	local choice ports line warning state boot state4 state6
+	local choice ports line warning state boot state4 state6 intel_state intel_n intel_note
 	nft list tables >/dev/null || { echo "无法访问 nftables。"; pause; return; }
 	while true; do
 		panel_start "防火墙"
@@ -733,6 +787,14 @@ act_firewall() {
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="${C_G}已开启${C_0}"; else boot="${C_R}未开启${C_0}"; fi
 		panel_row " $(panel_pad "防火墙" 24)$state"
 		panel_row " $(panel_pad "开机恢复" 24)$boot"
+		if nft list table inet "$INTEL_TABLE" >/dev/null 2>&1; then
+			intel_n="$(intel_applied_count)"
+			if [ -n "$intel_n" ]; then intel_note="（$(thousands "$intel_n") 条）"; else intel_note=""; fi
+			intel_state="${C_G}运行中${C_0}${intel_note}"
+		else
+			intel_state="${C_Y}未应用（sudo ag --policy-apply）${C_0}"
+		fi
+		panel_row " $(panel_pad "情报拦截" 24)$intel_state"
 		ports="$(firewall_ports)"
 		if [ -n "$ports" ]; then
 			panel_row " ${C_D}协议    端口  来源${C_0}"
@@ -1461,7 +1523,12 @@ act_sites() {
 	done
 }
 
-act_sync()  { runuser -u abuseguard -- "$ENGINE" sync-intel; pause; }
+act_sync() {
+	runuser -u abuseguard -- "$ENGINE" sync-intel
+	echo "  正在应用内核情报策略..."
+	policy_apply || echo "  策略应用失败；上一次生效的策略保持不变。"
+	pause
+}
 act_flush() { runuser -u abuseguard -- "$ENGINE" report send-auto; pause; }
 
 act_key() {
@@ -1650,11 +1717,12 @@ if [ "$(id -u)" != "0" ]; then
 	exit 1
 fi
 case "${1:-}" in
+	--policy-apply) policy_apply; exit $? ;;
 	--firewall-apply) firewall_apply; exit $? ;;
 	--firewall-open)
 		[ "$#" -eq 3 ] || { echo "用法：ag --firewall-open tcp|udp 端口" >&2; exit 2; }
 		firewall_change_port open "$2" "$3"; exit $? ;;
 	"") ;;
-	*) echo "用法：ag [--firewall-apply | --firewall-open tcp|udp 端口]" >&2; exit 2 ;;
+	*) echo "用法：ag [--policy-apply | --firewall-apply | --firewall-open tcp|udp 端口]" >&2; exit 2 ;;
 esac
 while true; do menu; done

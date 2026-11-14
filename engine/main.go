@@ -25,14 +25,14 @@ func main() {
 		fatalf("usage: caddy-abuseguard report send-auto")
 	case "sync-intel":
 		os.Exit(cmdSyncIntel(mustConfig()))
-	case "intel-ignore":
-		runIntelIgnore(args)
-	case "unknown-ignore":
-		runUnknownIgnore(args)
 	case "allowlist-validate":
 		runAllowlistValidate(args)
 	case "allowlist-check":
 		runAllowlistCheck(args)
+	case "allowlist-export":
+		runAllowlistExport(args)
+	case "intel-export":
+		runIntelExport(args)
 	case "version", "-v", "--version":
 		fmt.Println("abuseguard-engine " + version)
 	default:
@@ -42,7 +42,7 @@ func main() {
 }
 
 func usage() {
-	logf("subcommands: enqueue | report send-auto | sync-intel | intel-ignore --ip <ip> | unknown-ignore --ip <ip> | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | version")
+	logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | allowlist-export [--file <path>] | intel-export | version")
 }
 
 func mustConfig() *Config {
@@ -51,31 +51,6 @@ func mustConfig() *Config {
 		fatalf("load config: %v", err)
 	}
 	return c
-}
-
-// ignoreSafeConfig loads the config for the ignorecommand paths ONLY.
-// Those paths must fail SAFE: for fail2ban, exit 1 means "ban this IP", and the
-// intel jail matches every request with maxretry=1 -- so a config error must
-// never bubble up as exit 1, or an unreadable config would ban every visitor
-// (the whitelist check happens after this point and could not save them).
-// Any failure therefore exits 0 = "ignore this candidate": we skip one
-// possible ban rather than risk banning everyone.
-func ignoreSafeConfig() *Config {
-	c, err := loadConfig()
-	if err != nil {
-		logf("ignore: load config failed (%v); ignoring this candidate to avoid a false ban", err)
-		os.Exit(0)
-	}
-	return c
-}
-
-func ignoreSafeAllowlist(c *Config) *Allowlist {
-	allow, err := loadAllowlist(c.AllowlistFile)
-	if err != nil {
-		logf("ignore: load allowlist failed (%v); ignoring this candidate to avoid a false ban", err)
-		os.Exit(0)
-	}
-	return allow
 }
 
 func runEnqueue(args []string) {
@@ -96,41 +71,6 @@ func runEnqueue(args []string) {
 	}))
 }
 
-// runIntelIgnore is the fail2ban ignorecommand for the intel jail.
-// Exit 0 => ignore (no ban); exit 1 => proceed to ban.
-func runIntelIgnore(args []string) {
-	fs := flag.NewFlagSet("intel-ignore", flag.ExitOnError)
-	ip := fs.String("ip", "", "candidate IP")
-	fs.Parse(args)
-	if *ip == "" {
-		os.Exit(0)
-	}
-	c := ignoreSafeConfig()
-	if ignoreSafeAllowlist(c).Contains(*ip) {
-		os.Exit(0) // whitelisted => ignore
-	}
-	if intelContains(c, *ip) {
-		os.Exit(1) // on threat list => do NOT ignore (ban)
-	}
-	os.Exit(0) // not on threat list => ignore
-}
-
-// runUnknownIgnore is the fail2ban ignorecommand for the rate/probe jails.
-// Exit 0 => ignore (whitelisted); exit 1 => proceed to ban.
-func runUnknownIgnore(args []string) {
-	fs := flag.NewFlagSet("unknown-ignore", flag.ExitOnError)
-	ip := fs.String("ip", "", "candidate IP")
-	fs.Parse(args)
-	if *ip == "" {
-		os.Exit(0)
-	}
-	c := ignoreSafeConfig()
-	if ignoreSafeAllowlist(c).Contains(*ip) {
-		os.Exit(0) // whitelisted => ignore
-	}
-	os.Exit(1) // not whitelisted => proceed to ban
-}
-
 func runAllowlistValidate(args []string) {
 	fs := flag.NewFlagSet("allowlist-validate", flag.ExitOnError)
 	entry := fs.String("entry", "", "one IP or CIDR entry")
@@ -148,6 +88,52 @@ func runAllowlistValidate(args []string) {
 	}
 	if err != nil {
 		logf("allowlist-validate: %v", err)
+		os.Exit(1)
+	}
+}
+
+// runAllowlistExport emits the whitelist as canonical IP/CIDR lines for the
+// root-native policy applier. --file previews a candidate whitelist
+// transactionally; otherwise the configured whitelist is used. Validation
+// covers the whole file before anything is written, so failures produce no
+// partial stdout.
+func runAllowlistExport(args []string) {
+	fs := flag.NewFlagSet("allowlist-export", flag.ExitOnError)
+	path := fs.String("file", "", "allowlist file (default: configured whitelist)")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		logf("allowlist-export: unexpected arguments")
+		os.Exit(2)
+	}
+	if *path == "" {
+		*path = mustConfig().AllowlistFile
+	}
+	data, err := formatAllowlist(*path)
+	if err != nil {
+		logf("allowlist-export: %v", err)
+		os.Exit(1)
+	}
+	if _, err := os.Stdout.Write(data); err != nil {
+		os.Exit(1)
+	}
+}
+
+// runIntelExport emits validated canonical IPv4 lines for the root-native intel
+// set. A missing intel.txt succeeds with empty output so root can bootstrap
+// before the first sync; any existing invalid file fails with no output.
+func runIntelExport(args []string) {
+	fs := flag.NewFlagSet("intel-export", flag.ExitOnError)
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		logf("intel-export: unexpected arguments")
+		os.Exit(2)
+	}
+	data, err := formatIntel(mustConfig())
+	if err != nil {
+		logf("intel-export: %v", err)
+		os.Exit(1)
+	}
+	if _, err := os.Stdout.Write(data); err != nil {
 		os.Exit(1)
 	}
 }
