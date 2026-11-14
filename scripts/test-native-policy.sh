@@ -116,7 +116,7 @@ action = agtest
 EOF
 cat > "$F2B/filter.d/agtest.conf" <<'EOF'
 [Definition]
-failregex = ^ABUSE <HOST>$
+failregex = ^\s*ABUSE <HOST>$
 ignoreregex =
 EOF
 # Admin-managed native exemption: applies to sshd only, never to the Web jails.
@@ -151,6 +151,13 @@ apply() {
 }
 
 f2bc() { PATH="$TMP/bin:$PATH" fail2ban-client "$@"; }
+# fail2ban needs a parseable timestamp; epoch at line start is a default template.
+abuse_log() {
+	local ip
+	for ip in "$@"; do
+		printf '%s ABUSE %s\n' "$(date +%s)" "$ip" >> "$F2B/access.log"
+	done
+}
 banned_list() { f2bc status caddy-rate-local 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p'; }
 wait_ban() {
 	local ip="$1" i
@@ -366,7 +373,7 @@ grep -q '2001:db8::/64' "$F2B/jail.d/zzz-caddy-abuseguard-policy.local" \
 	|| fail "generated ignoreip missing the IPv6 whitelist entry"
 
 # Whitelisted source must not be banned; a non-whitelisted one must be.
-printf 'ABUSE %s\nABUSE %s\n' "$ALLOW_IP" "$BLOCK_IP" >> "$F2B/access.log"
+abuse_log "$ALLOW_IP" "$BLOCK_IP"
 wait_ban "$BLOCK_IP" || fail "non-whitelisted source was not banned"
 if banned_list | tr ' ' '\n' | grep -qxF "$ALLOW_IP"; then fail "whitelisted source was banned"; fi
 ping_ok "$ALLOW_IP" || fail "whitelisted source traffic was dropped"
@@ -374,7 +381,7 @@ echo 'PASS: generated ignoreip is enforced by a real fail2ban daemon'
 
 # An sshd-only native exemption must not make the source un-banable in the Web
 # jails, and removing it must propagate on the next apply (no frozen snapshot).
-printf 'ABUSE %s\n' "$SSH_ONLY_IP" >> "$F2B/access.log"
+abuse_log "$SSH_ONLY_IP"
 wait_ban "$SSH_ONLY_IP" || fail "sshd-only ignored source was not banned by caddy-rate-local"
 sleep 0.3
 if sshd_banned "$SSH_ONLY_IP"; then fail "sshd banned a natively ignored source"; fi
@@ -473,7 +480,7 @@ echo 'PASS: legacy intel bans replay per contract and whitelisted entries are sk
 # Existing ban stays in the jail while idle; new matching lines must not ban.
 f2bc set caddy-rate-local idle on >/dev/null || fail "fail2ban idle is unsupported"
 banned_list | tr ' ' '\n' | grep -qxF "$MIGRATE_IP" || fail "idle dropped an existing ban"
-printf 'ABUSE %s\n' "$IDLE_IP" >> "$F2B/access.log"
+abuse_log "$IDLE_IP"
 sleep 1
 if banned_list | tr ' ' '\n' | grep -qxF "$IDLE_IP"; then fail "idle jail still processed log lines"; fi
 
@@ -481,14 +488,14 @@ if banned_list | tr ' ' '\n' | grep -qxF "$IDLE_IP"; then fail "idle jail still 
 # them.
 pause_fail2ban_for_upgrade
 [ "$FAIL2BAN_PAUSED" = 1 ] || fail "installer pause helper did not idle fail2ban"
-printf 'ABUSE %s\n' "$IDLE2_IP" >> "$F2B/access.log"
+abuse_log "$IDLE2_IP"
 sleep 1
 if banned_list | tr ' ' '\n' | grep -qxF "$IDLE2_IP"; then fail "installer-paused jail still banned"; fi
 ENGINE_SWAPPED=0
 on_install_exit
-printf 'ABUSE %s\n' "$IDLE2_IP" >> "$F2B/access.log"
+abuse_log "$IDLE2_IP"
 wait_ban "$IDLE2_IP" || fail "pre-swap failure did not resume detection"
-printf 'ABUSE %s\n' "$IDLE3_IP" >> "$F2B/access.log"
+abuse_log "$IDLE3_IP"
 wait_ban "$IDLE3_IP" || fail "pre-swap recovery did not resume detection"
 echo 'PASS: idle pause keeps bans and a pre-swap failure resumes detection'
 
@@ -531,7 +538,7 @@ grep -q 'maxretry = 2' "$F2B/jail.d/caddy-abuseguard.local" \
 [ ! -e "$F2B_ROLLBACK_DIR" ] || fail "rollback directory was not cleaned up"
 # maxretry=2 is distinct from the new config's 3: two matching lines ban only
 # when the restored config is the one actually running.
-printf 'ABUSE %s\nABUSE %s\n' "$RECOVER_IP" "$RECOVER_IP" >> "$F2B/access.log"
+abuse_log "$RECOVER_IP" "$RECOVER_IP"
 wait_ban "$RECOVER_IP" || fail "detection did not resume after a post-swap failure"
 echo 'PASS: post-swap failure restores the old engine/config and resumes detection'
 
