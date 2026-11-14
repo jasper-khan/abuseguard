@@ -207,6 +207,13 @@ intel_applied_age_h() {
 	echo $(( (now - ts) / 3600 ))
 }
 
+# Terse listing avoids dumping feed elements; no grep -q (SIGPIPE under pipefail
+# would turn a successful match into rc 141). Whole-line declaration match so a
+# foreign rule comment naming the table cannot read as present.
+intel_table_present() {
+	nft -t list ruleset 2>/dev/null | grep -Fx "table inet $INTEL_TABLE {" >/dev/null
+}
+
 header() {
 	local caddy f2b intel banned rep age version ssh_ports sites applied applied_age
 	local firewall_ok=0 issue_text='' protect_value report_value intel_note applied_note
@@ -231,7 +238,7 @@ header() {
 		[ -z "$issue_text" ] || issue_text+=' · '
 		issue_text+='防火墙未就绪'
 	fi
-	if ! nft list table inet "$INTEL_TABLE" >/dev/null 2>&1; then
+	if ! intel_table_present; then
 		[ -z "$issue_text" ] || issue_text+=' · '
 		issue_text+='情报策略未应用'
 	fi
@@ -496,8 +503,9 @@ firewall_check_conflicts() {
 	local conflicts
 	# An accept here cannot override another base chain's drop. Ignore empty
 	# accept chains, our managed tables (port + independent intel) and Fail2Ban;
-	# reject competing input rules.
-	conflicts="$(nft -j list ruleset | jq -r '
+	# reject competing input rules. Terse output omits set elements; only chains
+	# and rules are inspected.
+	conflicts="$(nft -t -j list ruleset | jq -r '
 		.nftables as $objects | $objects[] | .chain // empty |
 		select(.hook == "input" and (.family == "inet" or .family == "ip" or .family == "ip6")) |
 		select(.table != "caddy_abuseguard" and .table != "caddy_abuseguard_intel" and .table != "f2b-table") |
@@ -778,7 +786,7 @@ firewall_toggle_family() {
 
 act_firewall() {
 	local choice ports line warning state boot state4 state6 intel_state intel_n intel_note
-	nft list tables >/dev/null || { echo "无法访问 nftables。"; pause; return; }
+	nft -t list ruleset >/dev/null || { echo "无法访问 nftables。"; pause; return; }
 	while true; do
 		panel_start "防火墙"
 		firewall_policy_load
@@ -786,7 +794,7 @@ act_firewall() {
 		if systemctl is-enabled --quiet "$FIREWALL_SERVICE"; then boot="${C_G}已开启${C_0}"; else boot="${C_R}未开启${C_0}"; fi
 		panel_row " $(panel_pad "防火墙" 24)$state"
 		panel_row " $(panel_pad "开机恢复" 24)$boot"
-		if nft list table inet "$INTEL_TABLE" >/dev/null 2>&1; then
+		if intel_table_present; then
 			intel_n="$(intel_applied_count)"
 			if [ -n "$intel_n" ]; then intel_note="（$(thousands "$intel_n") 条）"; else intel_note=""; fi
 			intel_state="${C_G}运行中${C_0}${intel_note}"

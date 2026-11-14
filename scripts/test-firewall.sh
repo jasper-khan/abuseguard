@@ -23,6 +23,8 @@ if [ "${1:-}" = --kernel ]; then
 set -euo pipefail
 source "$1"
 rules="$2"
+# Drain nft's listing: grep -q + SIGPIPE + pipefail would abort with rc 141.
+table_has() { nft list table "$1" "$2" | grep -F "$3" >/dev/null; }
 # Stand in for Fail2Ban's independent table, including an IPv4 ban set.
 nft -f - <<'NFT'
 table inet f2b-table {
@@ -50,30 +52,30 @@ systemctl() {
 	esac
 }
 firewall_apply </dev/null
-nft list table inet caddy_abuseguard | grep -q 'tcp dport 2222 accept'
-if nft list table inet caddy_abuseguard | grep -q 'tcp dport 80 accept'; then exit 1; fi
+table_has inet caddy_abuseguard 'tcp dport 2222 accept'
+if table_has inet caddy_abuseguard 'tcp dport 80 accept'; then exit 1; fi
 firewall_change_port open tcp 54321 </dev/null
 firewall_change_port open udp 54321 </dev/null
-nft list table inet caddy_abuseguard | grep -q 'tcp dport 54321 accept'
-nft list table inet caddy_abuseguard | grep -q 'udp dport 54321 accept'
+table_has inet caddy_abuseguard 'tcp dport 54321 accept'
+table_has inet caddy_abuseguard 'udp dport 54321 accept'
 printf 'tcp 22\ntcp 8080\nudp 443\n' | firewall_render > "$rules"
 nft -c -f "$rules"
 nft -f "$rules"
-nft list table inet caddy_abuseguard | grep -q 'tcp dport 8080 accept'
+table_has inet caddy_abuseguard 'tcp dport 8080 accept'
 printf 'tcp 22\nudp 443\n' | firewall_render > "$rules"
 nft -f "$rules"
 nft -f "$rules" # repeat application must not duplicate rules
 [ "$(nft list table inet caddy_abuseguard | grep -c 'tcp dport 22 accept')" = 1 ]
-if nft list table inet caddy_abuseguard | grep -q 'dport 8080'; then exit 1; fi
+if table_has inet caddy_abuseguard 'dport 8080'; then exit 1; fi
 [ "$(nft list table inet f2b-table)" = "$before" ]
 nft delete table inet caddy_abuseguard
 [ "$(nft list table inet f2b-table)" = "$before" ]
 systemctl start "$FIREWALL_SERVICE" # boot restores the saved policy
-nft list table inet caddy_abuseguard | grep -q 'tcp dport 22 accept'
+table_has inet caddy_abuseguard 'tcp dport 22 accept'
 nft 'add table inet foreign_filter; add chain inet foreign_filter input { type filter hook input priority 0; policy drop; }'
 if firewall_apply </dev/null; then echo 'conflicting policy was accepted' >&2; exit 1; fi
-nft list table inet foreign_filter | grep -q 'policy drop'
-nft list table inet caddy_abuseguard | grep -q 'tcp dport 22 accept'
+table_has inet foreign_filter 'policy drop'
+table_has inet caddy_abuseguard 'tcp dport 22 accept'
 echo 'firewall kernel transaction tests: pass'
 KERNEL
 	exit
@@ -98,8 +100,9 @@ fail() { echo "firewall test failed: $*" >&2; exit 1; }
 nft() {
 	printf '%s\n' "$*" >> "$TMP/nft.calls"
 	case "$*" in
-		'-j list ruleset') printf '%s\n' "$RULESET_JSON" ;;
-		'list tables') return 0 ;;
+		'-t -j list ruleset')
+			[ "${NFT_LIST_FAIL:-0}" = 0 ] || return 1
+			printf '%s\n' "$RULESET_JSON" ;;
 		'list table inet caddy_abuseguard') [ -f "$TMP/live.nft" ] ;;
 		'-c -f '*) [ "$CHECK_FAIL" = 0 ] ;;
 		'-f '*) [ "$APPLY_FAIL" = 0 ] && cp -- "$2" "$TMP/live.nft" ;;
@@ -126,6 +129,11 @@ RULESET_JSON='{"nftables":[{"chain":{"family":"ip","table":"filter","name":"INPU
 if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored existing input rules'; fi
 RULESET_JSON='invalid-json'
 if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored unreadable nft state'; fi
+# A failed nft listing must stop takeover instead of looking like an empty ruleset.
+RULESET_JSON='{"nftables":[]}'
+NFT_LIST_FAIL=1
+if firewall_apply </dev/null >/dev/null 2>&1; then fail 'ignored nft listing failure'; fi
+NFT_LIST_FAIL=0
 # Empty accepting chains and forwarded/container traffic do not compete with
 # the input policy; Fail2Ban and our own table are managed by AbuseGuard.
 RULESET_JSON='{"nftables":[{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"accept"}},{"chain":{"family":"ip","table":"docker","name":"forward","hook":"forward","policy":"drop"}},{"chain":{"family":"inet","table":"f2b-table","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"f2b-table","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard_intel","name":"input","hook":"input","policy":"accept"}},{"rule":{"family":"inet","table":"caddy_abuseguard_intel","chain":"input"}},{"chain":{"family":"inet","table":"caddy_abuseguard","name":"input","hook":"input","policy":"drop"}}]}'

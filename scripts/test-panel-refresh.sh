@@ -121,6 +121,53 @@ actions="$(printf '%s\n' "$navigation" | sed -n 's/^action://p')"
 expected=$'status\ncftoken\nport-open\nport-close\nfamily-ipv4\nfamily-ipv6\nbanned\nban\nunban\nwhitelist\nrules\napply\nssh-port\nssh-passwordauthentication\nssh-pubkeyauthentication\nssh-key-add\nssh-key-remove\nssh-password\nsync\nflush\nkey\ntoggle\nlogs\nupdate\nuninstall'
 [ "$actions" = "$expected" ] || { printf 'unexpected menu actions:\n%s\n' "$actions" >&2; exit 1; }
 
+# The firewall page must resolve the intel table from a terse ruleset listing:
+# present = running, absent = actionable hint, unreadable = access error.
+firewall_status="$(
+	bash --noprofile --norc -s -- "$PANEL_SOURCE" <<'FIREWALL'
+set -euo pipefail
+source "$1"
+firewall_policy_load() { fw_ipv4_in=1; fw_ipv6_in=0; }
+firewall_running() { return 0; }
+firewall_ports() { :; }
+firewall_check_conflicts() { :; }
+intel_applied_count() { echo 107018; }
+systemctl() { return 1; }
+pause() { :; }
+panel_start() { :; }
+panel_sep() { :; }
+panel_pair() { :; }
+panel_footer() { :; }
+panel_row() { printf '%s\n' "$1" | sed $'s/\033\\[[0-9;]*m//g'; }
+MODE=present
+nft() {
+	case "$MODE:$*" in
+		present:'-t list ruleset') printf 'table inet caddy_abuseguard_intel {\n}\n' ;;
+		absent:'-t list ruleset') printf 'table inet other {\n}\n' ;;
+		fail:'-t list ruleset') return 1 ;;
+		comment:'-t list ruleset') printf 'table inet foreign {\n\tchain input {\n\t\ttype filter hook input priority 0; policy accept;\n\t\ttcp dport 80 accept comment "table inet caddy_abuseguard_intel { stale note"\n\t}\n}\n' ;;
+		*) return 0 ;;
+	esac
+}
+render() { printf '0\n' | act_firewall; }
+render
+printf '%s\n' '=== absent ==='
+MODE=absent; render
+printf '%s\n' '=== fail ==='
+MODE=fail; render
+printf '%s\n' '=== comment ==='
+MODE=comment; render
+FIREWALL
+)"
+present_out="${firewall_status%%=== absent ===*}"
+absent_out="${firewall_status#*=== absent ===}"; absent_out="${absent_out%%=== fail ===*}"
+fail_out="${firewall_status#*=== fail ===}"
+printf '%s\n' "$present_out" | grep -F '情报拦截' | grep -F '运行中（107,018 条）' >/dev/null
+printf '%s\n' "$absent_out" | grep -F '情报拦截' | grep -F '未应用（sudo ag --policy-apply）' >/dev/null
+printf '%s\n' "$fail_out" | grep -F '无法访问 nftables。' >/dev/null
+comment_out="${firewall_status#*=== comment ===}"
+printf '%s\n' "$comment_out" | grep -F '情报拦截' | grep -F '未应用（sudo ag --policy-apply）' >/dev/null
+
 # Preserve long Chinese text and align paired actions without box borders.
 bash --noprofile --norc -s -- "$PANEL_SOURCE" <<'LAYOUT'
 set -euo pipefail
