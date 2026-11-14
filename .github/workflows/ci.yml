@@ -101,7 +101,14 @@ jobs:
           sudo install -m 0755 assets/policy/abuseguard-policy.sh /usr/local/libexec/caddy-abuseguard-policy
           sudo useradd --system --no-create-home abuseguard 2>/dev/null || true
           sudo install -d /etc/caddy-abuseguard /var/lib/caddy-abuseguard /run/fail2ban
-          systemd-analyze verify assets/systemd/*.service assets/systemd/*.timer
+          # caddy.service is excluded: this job installs neither /usr/local/bin/caddy nor the caddy user.
+          systemd-analyze verify \
+            assets/systemd/caddy-abuseguard-firewall.service \
+            assets/systemd/caddy-abuseguard-policy.service \
+            assets/systemd/caddy-abuseguard-report.service \
+            assets/systemd/caddy-abuseguard-report.timer \
+            assets/systemd/caddy-abuseguard-sync.service \
+            assets/systemd/caddy-abuseguard-sync.timer
       - name: Verify native allowlist + intel enforcement
         run: sudo env ABUSEGUARD_ENGINE_BIN=/tmp/caddy-abuseguard bash ./scripts/test-native-policy.sh --kernel
       - name: Verify the installed sandboxed sync and boot policy services
