@@ -22,9 +22,9 @@ intel feed ──(6h sync, engine validates)──▶ root apply ──▶ dedic
 
 - Caddy tags each request to a protected site and logs only what fail2ban needs (client IP, protocol, tags) — no paths, hosts, headers, or query strings.
 - Installation enables three behavioural Web jails and `sshd`, sharing one allowlist. A ban from any jail drops that source IP on every port and protocol at the origin, including SSH.
-- Threat intel no longer runs through fail2ban: after a sync, a root applier loads the validated list into a dedicated kernel set, so listed sources are dropped at the first packet before reaching Caddy or SSH. The set is independent of the port firewall table, so port edits never rebuild it.
+- Threat intel no longer runs through fail2ban: after a sync, the engine's root-only `policy-apply` loads the validated list into a dedicated kernel set, so listed sources are dropped at the first packet before reaching Caddy or SSH. The set is independent of the port firewall table, so port edits never rebuild it.
 - The allowlist is one file: panel edits update fail2ban `ignoreip` and the nft intel exception together. Hand edits need an explicit apply; see Threat intel.
-- A Go engine (stdlib only, single static binary) validates feeds, flushes queued reports and exports strictly parsed policy input. It stays unprivileged; a separate root oneshot loads the firewall.
+- A Go engine (stdlib only, single static binary) validates feeds, flushes queued reports and loads kernel policy. Only the root-only `policy-apply` subcommand writes nftables/fail2ban; sync, report and enqueue still run unprivileged.
 
 ## Requirements
 
@@ -165,7 +165,7 @@ Newly generated Caddy configurations enable only HTTP/1.1 and HTTP/2, leaving UD
 
 Threat intel is enforced as a kernel set, not as a "one hit then 90-day ban" jail. Every 6h (and on demand from the panel) the engine pulls a public AbuseIPDB-derived blocklist: it keeps IPv4 only, refuses a list that is implausibly small (<90k) or large (>120k), and writes `intel.txt` atomically once validation passes. Any download or parse failure keeps the previous list.
 
-The root applier (`/usr/local/libexec/caddy-abuseguard-policy`, run by `caddy-abuseguard-policy.service` at boot and by `caddy-abuseguard-sync.service` after each sync) then rebuilds the set from the engine's exported, line-by-line validated address list: it validates the whole input first, replaces the set in one nft transaction, and only then writes a root-owned boot snapshot. An empty set is allowed only when no policy was ever established; a missing, corrupt, undersized, oversized, or failed apply keeps the last effective kernel policy and snapshot instead of replacing it with an empty or partial list.
+The root-only `caddy-abuseguard policy-apply` (run by `caddy-abuseguard-policy.service` at boot and by `caddy-abuseguard-sync.service` after each sync) then validates the whitelist and feed in-process, rebuilds the set in one nft transaction, and only then writes a root-owned boot snapshot. An empty set is allowed only when no policy was ever established; a missing, corrupt, undersized, oversized, or failed apply keeps the last effective kernel policy and snapshot instead of replacing it with an empty or partial list.
 
 Enforcement follows the feed: a newly listed source is dropped on the next sync, and a source that leaves the list stops being dropped — there is no fixed 90-day intel ban. The allowlist exception only `return`s from the intel chain, never globally accepts traffic, so whitelisted IPs still pass through the normal port firewall; overlapping CIDR exceptions work. Port edits rebuild only the port table; the intel set is independent.
 
@@ -204,8 +204,7 @@ The Cloudflare token in this example is only for DNS-01 certificate issuance.
 ```
 /usr/local/bin/caddy                          Caddy (with caddy-dns/cloudflare)
 /usr/local/bin/ag                             control panel
-/usr/local/libexec/caddy-abuseguard           Go engine
-/usr/local/libexec/caddy-abuseguard-policy    root policy applier
+/usr/local/libexec/caddy-abuseguard           Go engine (root-only policy-apply subcommand)
 /etc/caddy/Caddyfile                          global config + AbuseGuard imports
 /etc/caddy/abuseguard.caddy                   the (abuseguard) snippet
 /etc/caddy/sites/<domain>.caddy               one file per protected site
@@ -256,7 +255,7 @@ Uninstall also removes this project's port table, independent intel table, root-
 - The installer's self-test site binds `127.0.0.1:8080` only.
 - Secrets (`*.key`, `.env`) are mode 0640 and git-ignored; never commit them.
 - Downloaded binaries are verified against `SHA256SUMS.txt` (see the integrity check under "Slow network / China mirror").
-- Threat intel takes effect only through a root-owned snapshot and kernel set: the root applier validates the engine's plain address export line by line and never executes downloaded text as nft rules. `/var/lib/caddy-abuseguard` is writable by the unprivileged `abuseguard` user, so it is never used as executable policy input.
+- Threat intel takes effect only through a root-owned snapshot and kernel set: the root-only applier validates the whitelist and stored feed in-process line by line and never executes downloaded text as nft rules. `/var/lib/caddy-abuseguard` is writable by the unprivileged `abuseguard` user, so it is never used as executable policy input.
 - Caddy runs under a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, restricted capability set, syscall filtering); the two engine timers and the root policy applier are hardened too.
 
 ## Build / release

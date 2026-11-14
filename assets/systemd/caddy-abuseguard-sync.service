@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# The sync process itself stays unprivileged; the root oneshot helper below is
-# the only part that needs CAP_NET_ADMIN and writes root-owned snapshots.
+# The sync process itself stays unprivileged; the root policy-apply subcommand
+# below is the only part that needs CAP_NET_ADMIN and writes root-owned snapshots.
 ExecStart=/usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard sync-intel
-ExecStartPost=/usr/local/libexec/caddy-abuseguard-policy apply
+ExecStartPost=/usr/local/libexec/caddy-abuseguard policy-apply
 
 # --- sandboxing --------------------------------------------------------------
 # runuser needs setuid/setgid; the root applier needs CAP_NET_ADMIN and writes

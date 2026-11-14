@@ -22,8 +22,12 @@ trap cleanup EXIT
 fail() { echo "system test failed: $* (evidence: $WORK)" >&2; exit 1; }
 systemctl stop caddy-abuseguard-sync.timer caddy-abuseguard-report.timer
 fail2ban-client -t
-[ -x /usr/local/libexec/caddy-abuseguard-policy ] || fail 'policy applier missing'
+[ -x /usr/local/libexec/caddy-abuseguard ] || fail 'engine missing'
 systemctl is-enabled --quiet caddy-abuseguard-policy.service || fail 'policy boot restore not enabled'
+policy_exec="$(systemctl show -p ExecStart caddy-abuseguard-policy.service)"
+grep -q 'policy-apply' <<<"$policy_exec" \
+	|| fail 'policy boot restore does not call the engine policy-apply subcommand'
+[ ! -e /usr/local/libexec/caddy-abuseguard-policy ] || fail 'legacy policy helper was not removed'
 for jail in caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd; do
 	fail2ban-client status "$jail" >/dev/null || fail "jail not enabled: $jail"
 done
@@ -85,7 +89,12 @@ for kind, port in [(socket.SOCK_STREAM, 22), (socket.SOCK_STREAM, 8443), (socket
         assert reachable == (expected == 'allow'), (source, kind, port, expected, reachable)
 PY
 probe() { ip netns exec "$NS" python3 "$WORK/probe.py" "$1" "${3:-198.18.0.1}" "$2"; }
-has_ban() { fail2ban-client get "$1" banip | tr ' ' '\n' | grep -qxF "$2"; }
+has_ban() {
+	local out
+	out="$(fail2ban-client get "$1" banip 2>/dev/null)" || return 1
+	case " $out " in *" $2 "*) return 0 ;; esac
+	return 1
+}
 wait_ban() {
 	for _ in {1..50}; do has_ban "$1" "$2" && return 0; sleep 0.2; done
 	fail "no ban in $1 for $2"
@@ -128,9 +137,11 @@ chmod 0640 /etc/caddy-abuseguard/whitelist
 /usr/local/bin/ag --policy-apply >/dev/null || fail 'policy apply failed'
 probe "$INTEL" drop
 probe "$TRUSTED" allow
-if fail2ban-client status sshd 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p' | tr ' ' '\n' | grep -qxF "$INTEL"; then
-	fail 'intel enforcement still used fail2ban'
-fi
+sshd_ips="$(fail2ban-client status sshd 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p')"
+case " $sshd_ips " in
+	*" $INTEL "*)
+		fail 'intel enforcement still used fail2ban' ;;
+esac
 echo 'PASS: native intel table drops feed sources; the allowlist exception lets a listed source through without fail2ban'
 
 for ((i=0; i<retries+1; i++)); do ssh_failure "$TRUSTED"; done

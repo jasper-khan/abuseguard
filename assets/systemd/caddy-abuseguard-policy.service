@@ -9,7 +9,7 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/libexec/caddy-abuseguard-policy apply
+ExecStart=/usr/local/libexec/caddy-abuseguard policy-apply
 
 # --- sandboxing --------------------------------------------------------------
 # Root oneshot: nft needs CAP_NET_ADMIN; the applier writes its snapshots and

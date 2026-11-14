@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
-# Real kernel + native fail2ban tests for the AbuseGuard policy applier.
+# Real kernel + native fail2ban tests for the AbuseGuard root policy applier
+# implemented by engine subcommand `caddy-abuseguard policy-apply`.
 #
 # Runs only on Linux as root, inside a private network namespace with a private
 # fail2ban server/config directory: no host firewall, jail or daemon is touched.
 # CI: sudo --preserve-env=ABUSEGUARD_ENGINE_BIN bash ./scripts/test-native-policy.sh --kernel
 #
+# The root-only AG_CONF_DIR/AG_F2B_JAIL_DIR hooks point the applier at the
+# fixture root; whitelist and state paths come from $AG_CONF_DIR/config.json.
+#
 # Proves behaviour, not source text:
 #   - feed IPv4 entries are dropped before the port firewall
 #   - one whitelist entry and one overlapping CIDR return only from the intel
 #     chain (an independent drop rule still applies)
-#   - feed removal unblocks an address; empty/invalid exports keep the last
-#     good kernel+disk policy
-#   - a broken fail2ban config cannot prevent boot restore of that snapshot
-#   - a post-swap installer failure restores the old engine+config and detection
+#   - feed removal unblocks an address; empty/invalid/missing config and feed
+#     keep or restore the last-good kernel+disk policy
+#   - a broken fail2ban config or a missing config cannot prevent boot restore
+#   - whitelisting a banned behaviour source clears it, including CIDR coverage
+#   - an unusable fail2ban target refuses before any change; a reload failure
+#     rolls back kernel policy, snapshots and the generated ignoreip together
+#   - a post-swap installer failure restores the old engine/config/units and
+#     detection
 #   - generated fail2ban ignoreip comes from the same whitelist and clears an
 #     existing behavioural ban when an address is added
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APPLIER="$ROOT/assets/policy/abuseguard-policy.sh"
 TMP="$(mktemp -d)"
 CONF="$TMP/conf"
 STATE="$TMP/state"
@@ -30,7 +37,9 @@ VETH_C=ag-policy-cli0
 HOST_IP=10.200.0.1
 ALLOW_IP=10.200.0.2
 CIDR_IP=10.200.0.4
+CIDR_NEIGHBOR=10.200.0.5
 BLOCK_IP=10.200.0.6
+NEW_BLOCK_IP=10.200.0.7
 SSH_ONLY_IP=10.200.0.8
 MIGRATE_IP=10.200.0.10
 IDLE_IP=10.200.0.12
@@ -56,7 +65,7 @@ fail() { echo "native-policy test failed: $*" >&2; exit 1; }
 [ "${1:-}" = --kernel ] || { echo "usage: sudo bash $0 --kernel" >&2; exit 2; }
 [ "$(uname -s)" = Linux ] || { echo "requires Linux" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 2; }
-for bin in nft ip fail2ban-server fail2ban-client python3; do
+for bin in nft ip fail2ban-server fail2ban-client python3 runuser ping; do
 	command -v "$bin" >/dev/null 2>&1 || { echo "missing: $bin" >&2; exit 2; }
 done
 
@@ -68,7 +77,7 @@ if [ ! -x "$ENGINE" ]; then
 		|| fail "could not build the engine"
 	ENGINE="$TMP/engine"
 fi
-[ -x "$APPLIER" ] || fail "missing applier: $APPLIER"
+[ -x "$ENGINE" ] || fail "missing engine: $ENGINE"
 
 mkdir -p "$CONF" "$STATE" "$F2B/filter.d" "$F2B/action.d" "$F2B/jail.d" "$TMP/bin"
 
@@ -139,6 +148,12 @@ EOF
 : > "$F2B/access.log"
 cat > "$TMP/bin/fail2ban-client" <<EOF
 #!/bin/sh
+# Gate for injected reload-failure coverage: every other call reaches the real
+# private daemon; only reload is forced to fail while the marker exists.
+if [ -e "$F2B/fail-reload" ] && [ "\${1:-}" = reload ]; then
+	echo 'injected fail2ban reload failure' >&2
+	exit 1
+fi
 exec $(command -v fail2ban-client) -c "$F2B" -s "$F2B/socket" "\$@"
 EOF
 chmod 0755 "$TMP/bin/fail2ban-client"
@@ -147,9 +162,9 @@ export PATH="$TMP/bin:$PATH"
 
 apply() {
 	ip netns exec "$NS_H" env \
-		AG_CONF_DIR="$CONF" AG_STATE_DIR="$STATE" AG_ENGINE="$ENGINE" \
-		AG_F2B_JAIL_DIR="$F2B/jail.d" PATH="$TMP/bin:$PATH" \
-		bash "$APPLIER" apply
+		AG_CONF_DIR="$CONF" AG_F2B_JAIL_DIR="$F2B/jail.d" \
+		PATH="$TMP/bin:$PATH" \
+		"$ENGINE" policy-apply
 }
 
 f2bc() { PATH="$TMP/bin:$PATH" fail2ban-client "$@"; }
@@ -161,10 +176,13 @@ abuse_log() {
 	done
 }
 banned_list() { f2bc status caddy-rate-local 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p'; }
+# A case match instead of `grep -q` on the list: grep -q exits on the first
+# match and the producer can die with SIGPIPE under `set -o pipefail`.
+has_ban() { case " $(banned_list) " in *" $1 "*) return 0 ;; esac; return 1; }
 wait_ban() {
 	local ip="$1" i
 	for i in {1..100}; do
-		banned_list | tr ' ' '\n' | grep -qxF "$ip" && return 0
+		has_ban "$ip" && return 0
 		sleep 0.1
 	done
 	return 1
@@ -172,7 +190,7 @@ wait_ban() {
 wait_unban() {
 	local ip="$1" i
 	for i in {1..100}; do
-		banned_list | tr ' ' '\n' | grep -qxF "$ip" || return 0
+		has_ban "$ip" || return 0
 		sleep 0.1
 	done
 	return 1
@@ -197,7 +215,12 @@ section_has() { # JAIL IP
 		END { exit !found }
 	' "$F2B/jail.d/zzz-caddy-abuseguard-policy.local"
 }
-sshd_banned() { f2bc status sshd 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p' | tr ' ' '\n' | grep -qxF "$1"; }
+sshd_banned() {
+	local out
+	out="$(f2bc status sshd 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p')" || return 1
+	case " $out " in *" $1 "*) return 0 ;; esac
+	return 1
+}
 
 # --- isolated packet path -----------------------------------------------------
 # The applier runs in NS_H (where input rules live); the sender is in NS_C.
@@ -235,6 +258,35 @@ ping_ok "$ALLOW_IP" && fail "whitelist bypassed an independent port/input drop"
 ip netns exec "$NS_H" nft delete table inet ag_test_port
 ping_ok "$ALLOW_IP" || fail "whitelisted IP did not recover after the test drop"
 echo 'PASS: native intel drops feed sources; single/CIDR exceptions return only from the intel chain'
+
+# --- panel entry -------------------------------------------------------------
+# Drive the panel's real --policy-apply entry (extracted, not reimplemented) so
+# the caller migration is proven end to end, not just the engine subcommand.
+PANEL_FUNC="$TMP/panel-policy.sh"
+awk '/^policy_apply\(\) \{/,/^\}$/' "$ROOT/abuseguard.sh" > "$PANEL_FUNC"
+ip netns exec "$NS_H" env AG_CONF_DIR="$CONF" AG_F2B_JAIL_DIR="$F2B/jail.d" \
+	ENGINE="$ENGINE" PANEL_FUNC="$PANEL_FUNC" \
+	bash -c 'source "$PANEL_FUNC"; policy_apply' >/dev/null \
+	|| fail "panel --policy-apply entry failed"
+ping_ok "$BLOCK_IP" && fail "panel policy entry changed the kernel policy"
+ping_ok "$ALLOW_IP" || fail "panel policy entry lost the whitelist exception"
+echo 'PASS: panel --policy-apply routes through the engine subcommand'
+
+# --- caller guards -----------------------------------------------------------
+# Root is required before any privileged operation: an unprivileged caller must
+# fail without touching the kernel policy or the snapshots.
+chmod 0755 "$TMP" "$CONF"
+if ip netns exec "$NS_H" runuser -u abuseguard -- env \
+	AG_CONF_DIR="$CONF" AG_F2B_JAIL_DIR="$F2B/jail.d" \
+	"$ENGINE" policy-apply >/dev/null 2>"$TMP/refuse.err"; then
+	fail "policy-apply accepted a non-root caller"
+fi
+grep -qi root "$TMP/refuse.err" || fail "non-root refusal did not explain the requirement"
+ping_ok "$BLOCK_IP" && fail "non-root refusal changed the kernel policy"
+if "$ENGINE" policy-apply unexpected >/dev/null 2>&1; then
+	fail "policy-apply accepted an unexpected argument"
+fi
+echo 'PASS: policy-apply refuses non-root callers and unexpected arguments'
 
 # --- bootstrap/last-good: missing or malformed feed never weakens policy -----
 printf '%s\n%s\n%s\n' "$ALLOW_IP" "$CIDR_IP" "$BLOCK_IP" > "$STATE/intel.txt"
@@ -280,6 +332,20 @@ rm -f -- "$F2B/jail.d/broken.local"
 apply >/dev/null || fail "apply after removing the broken fail2ban config failed"
 echo 'PASS: broken fail2ban config does not prevent boot snapshot restore'
 
+# A missing config at boot must fail visibly but never prevent restoring the
+# validated root snapshot: restore happens before config/feed parsing.
+snapshot_sum="$(sha256sum "$CONF/intel.nft" "$CONF/intel-allow.nft" "$CONF/intel-applied.json")"
+mv -f -- "$CONF/config.json" "$TMP/config.saved"
+ip netns exec "$NS_H" nft delete table inet caddy_abuseguard_intel
+if apply >/dev/null 2>&1; then fail "missing boot config was accepted"; fi
+ping_ok "$BLOCK_IP" && fail "missing boot config prevented snapshot restore"
+ping_ok "$ALLOW_IP" || fail "missing boot config restore lost the whitelist exception"
+[ "$(sha256sum "$CONF/intel.nft" "$CONF/intel-allow.nft" "$CONF/intel-applied.json")" = "$snapshot_sum" ] \
+	|| fail "missing boot config changed the snapshots"
+mv -f -- "$TMP/config.saved" "$CONF/config.json"
+apply >/dev/null || fail "apply after restoring the config failed"
+echo 'PASS: missing config at boot restores the snapshot and fails visibly'
+
 # A whitelist exception must never bypass the normal port/default-drop policy.
 ip netns exec "$NS_H" nft add table inet caddy_abuseguard
 ip netns exec "$NS_H" nft 'add chain inet caddy_abuseguard input { type filter hook input priority 0; policy drop; }'
@@ -318,7 +384,8 @@ ip netns exec "$NS_H" nft delete table inet caddy_abuseguard
 ip netns exec "$NS_H" nft add table inet caddy_abuseguard
 ip netns exec "$NS_H" nft 'add chain inet caddy_abuseguard input { type filter hook input priority 0; policy drop; }'
 ip netns exec "$NS_H" nft 'add rule inet caddy_abuseguard input tcp dport 8443 accept'
-ip netns exec "$NS_H" nft list table inet caddy_abuseguard | grep -q 'tcp dport 8443 accept' \
+port_out="$(ip netns exec "$NS_H" nft list table inet caddy_abuseguard)"
+grep -q 'tcp dport 8443 accept' <<<"$port_out" \
 	|| fail "port edit did not apply"
 [ "$(ip netns exec "$NS_H" nft list table inet caddy_abuseguard_intel)" = "$intel_before" ] \
 	|| fail "port edit changed the independent intel table"
@@ -350,8 +417,20 @@ ping_ok "$BLOCK_IP" && fail "failed apply lost the last-good kernel block"
 	|| fail "failed apply changed the snapshots"
 grep -q "$BLOCK_IP" "$CONF/intel.nft" || fail "intel snapshot missing the blocked entry"
 grep -q '"intel_entries":1' "$CONF/intel-applied.json" || fail "applied metadata missing entry count"
-[ "$(stat -c %U "$CONF/intel.nft")" = root ] || fail "intel snapshot is not root-owned"
-echo 'PASS: feed replacement follows the file; invalid input keeps kernel and disk policy'
+for f in intel.nft intel-allow.nft intel-applied.json; do
+	[ "$(stat -c '%U:%G:%a' "$CONF/$f")" = root:root:640 ] \
+		|| fail "$CONF/$f is not a root-owned 0640 snapshot"
+done
+[ -f "$CONF/policy.lock" ] || fail "policy lock was not created in the config root"
+
+# A missing config with a live policy must fail without changing kernel/disk.
+mv -f -- "$CONF/config.json" "$TMP/config.saved"
+if apply >/dev/null 2>&1; then fail "missing config was accepted over a live policy"; fi
+[ "$(sha256sum "$CONF/intel.nft" "$CONF/intel-allow.nft" "$CONF/intel-applied.json")" = "$snapshot_sum" ] \
+	|| fail "missing config changed the snapshots"
+ping_ok "$BLOCK_IP" && fail "missing config lost the last-good kernel block"
+mv -f -- "$TMP/config.saved" "$CONF/config.json"
+echo 'PASS: feed replacement follows the file; invalid/missing input keeps kernel and disk policy'
 
 # --- native fail2ban ignoreip and ban clearing -------------------------------
 printf '%s\n%s\n%s\n' "$ALLOW_IP" "$CIDR_IP" "$BLOCK_IP" > "$STATE/intel.txt"
@@ -367,6 +446,52 @@ echo 'PASS: native ignoreip is preserved per jail and not broadened'
 
 start_f2b
 
+# --- unusable fail2ban target: refuse before changing the kernel ------------
+# Point the generated fail2ban policy at a directory: the applier must fail
+# before touching kernel or disk, keeping the last-good policy authoritative.
+printf '%s\n' "$NEW_BLOCK_IP" > "$STATE/intel.txt"
+good_sum="$(sha256sum "$CONF/intel.nft" "$CONF/intel-allow.nft" "$CONF/intel-applied.json")"
+mv -f -- "$F2B/jail.d/zzz-caddy-abuseguard-policy.local" "$TMP/f2b.saved"
+mkdir "$F2B/jail.d/zzz-caddy-abuseguard-policy.local"
+if apply >/dev/null 2>"$TMP/persist.err"; then
+	fail "apply succeeded despite an unwritable fail2ban policy target"
+fi
+ping_ok "$BLOCK_IP" && fail "injected write failure did not roll the kernel back"
+ping_ok "$NEW_BLOCK_IP" && fail "injected write failure left the new kernel policy installed"
+[ "$(sha256sum "$CONF/intel.nft" "$CONF/intel-allow.nft" "$CONF/intel-applied.json")" = "$good_sum" ] \
+	|| fail "injected write failure changed the last-good snapshots"
+rmdir "$F2B/jail.d/zzz-caddy-abuseguard-policy.local"
+mv -f -- "$TMP/f2b.saved" "$F2B/jail.d/zzz-caddy-abuseguard-policy.local"
+printf '%s\n%s\n%s\n' "$ALLOW_IP" "$CIDR_IP" "$BLOCK_IP" > "$STATE/intel.txt"
+apply >/dev/null || fail "apply after the injected write failure failed"
+ping_ok "$BLOCK_IP" && fail "restored feed did not block again"
+echo 'PASS: an unusable fail2ban target refuses before changing kernel or disk'
+
+# --- injected reload failure: kernel and ignoreip roll back together ---------
+# Force a generated-file change (new whitelist entry) plus a feed change, then
+# fail only the fail2ban reload. The applier must restore the previous kernel
+# policy and ignoreip file, leaving no split-brain policy.
+good_sum="$(sha256sum "$CONF/intel.nft" "$CONF/intel-allow.nft" "$CONF/intel-applied.json")"
+printf '%s\n%s\n%s\n' "$ALLOW_IP" "$CIDR_IP" "$NEW_BLOCK_IP" > "$STATE/intel.txt"
+printf '10.200.0.20\n' >> "$CONF/whitelist"
+touch "$F2B/fail-reload"
+if apply >/dev/null 2>"$TMP/reload.err"; then
+	fail "injected fail2ban reload failure did not fail the apply"
+fi
+ping_ok "$BLOCK_IP" && fail "reload failure did not roll the kernel back"
+ping_ok "$NEW_BLOCK_IP" && fail "reload failure left the new kernel policy installed"
+[ "$(sha256sum "$CONF/intel.nft" "$CONF/intel-allow.nft" "$CONF/intel-applied.json")" = "$good_sum" ] \
+	|| fail "reload failure changed the last-good snapshots"
+grep -q '10.200.0.20' "$F2B/jail.d/zzz-caddy-abuseguard-policy.local" \
+	&& fail "reload failure left the new ignoreip file installed"
+rm -f -- "$F2B/fail-reload"
+grep -vxF '10.200.0.20' "$CONF/whitelist" > "$TMP/whitelist.saved"
+mv -f -- "$TMP/whitelist.saved" "$CONF/whitelist"
+printf '%s\n%s\n%s\n' "$ALLOW_IP" "$CIDR_IP" "$BLOCK_IP" > "$STATE/intel.txt"
+apply >/dev/null || fail "apply after the injected reload failure failed"
+ping_ok "$BLOCK_IP" && fail "restored feed did not block again"
+echo 'PASS: a fail2ban reload failure rolls back kernel and ignoreip'
+
 grep -q '^\[caddy-rate-local\]' "$F2B/jail.d/zzz-caddy-abuseguard-policy.local" \
 	|| fail "generated ignoreip file missing the jail"
 grep -q "$ALLOW_IP" "$F2B/jail.d/zzz-caddy-abuseguard-policy.local" \
@@ -377,7 +502,7 @@ grep -q '2001:db8::/64' "$F2B/jail.d/zzz-caddy-abuseguard-policy.local" \
 # Whitelisted source must not be banned; a non-whitelisted one must be.
 abuse_log "$ALLOW_IP" "$BLOCK_IP"
 wait_ban "$BLOCK_IP" || fail "non-whitelisted source was not banned"
-if banned_list | tr ' ' '\n' | grep -qxF "$ALLOW_IP"; then fail "whitelisted source was banned"; fi
+if has_ban "$ALLOW_IP"; then fail "whitelisted source was banned"; fi
 ping_ok "$ALLOW_IP" || fail "whitelisted source traffic was dropped"
 echo 'PASS: generated ignoreip is enforced by a real fail2ban daemon'
 
@@ -400,6 +525,14 @@ wait_unban "$BLOCK_IP" || fail "newly whitelisted source kept its behavioural ba
 ping_ok "$BLOCK_IP" || fail "newly whitelisted source remained blocked in the kernel"
 echo 'PASS: one whitelist change updates kernel and clears the existing fail2ban ban'
 
+# An address covered only by a whitelisted CIDR must be cleared as well: the
+# in-process allowlist check is not limited to exact single-IP entries.
+f2bc set caddy-rate-local banip "$CIDR_NEIGHBOR" >/dev/null \
+	|| fail "could not seed a CIDR-covered ban"
+apply >/dev/null || fail "CIDR-covered whitelist apply failed"
+wait_unban "$CIDR_NEIGHBOR" || fail "CIDR-covered whitelisted address kept its ban"
+echo 'PASS: a whitelisted CIDR clears a banned address inside it'
+
 # --- legacy ban migration against the real daemon ---------------------------
 # Extract the installer's own cutover helpers and drive them with a real
 # fail2ban daemon: old intel-jail bans must replay into caddy-rate-local after
@@ -419,6 +552,8 @@ done
 source "$INSTALL_FUNCS"
 ENGINE_BIN="$ENGINE"
 ENGINE_BACKUP=""
+UNIT_ROLLBACK_DIR=""
+POLICY_UNIT_DIR="$TMP/units"
 INSTALL_COMPLETE=0
 CONF_DIR="$CONF"
 LEGACY_BANS=""
@@ -466,25 +601,25 @@ start_f2b
 f2bc set caddy-intel banip "$MIGRATE_IP" >/dev/null || fail "could not seed an old intel ban"
 f2bc set sshd-intel banip "$ALLOW_IP" >/dev/null || fail "could not seed a whitelisted old ban"
 LEGACY_BANS="$(legacy_intel_bans)"
-printf '%s\n' "$LEGACY_BANS" | grep -qxF "$MIGRATE_IP" || fail "old intel ban was not captured"
-printf '%s\n' "$LEGACY_BANS" | grep -qxF "$ALLOW_IP" || fail "whitelisted old ban was not captured"
+grep -qxF "$MIGRATE_IP" <<<"$LEGACY_BANS" || fail "old intel ban was not captured"
+grep -qxF "$ALLOW_IP" <<<"$LEGACY_BANS" || fail "whitelisted old ban was not captured"
 printf '%s\n' "$LEGACY_BANS" > "$CONF/legacy-intel-bans.pending"
 stop_f2b
 rm -f -- "$F2B/jail.d/old-intel.local"
 start_f2b
 migrate_legacy_bans
-banned_list | tr ' ' '\n' | grep -qxF "$MIGRATE_IP" || fail "legacy ban was not replayed into caddy-rate-local"
-if banned_list | tr ' ' '\n' | grep -qxF "$ALLOW_IP"; then fail "whitelisted legacy ban was replayed"; fi
+has_ban "$MIGRATE_IP" || fail "legacy ban was not replayed into caddy-rate-local"
+if has_ban "$ALLOW_IP"; then fail "whitelisted legacy ban was replayed"; fi
 [ ! -f "$CONF/legacy-intel-bans.pending" ] || fail "pending ban file was not cleared"
 echo 'PASS: legacy intel bans replay per contract and whitelisted entries are skipped'
 
 # --- idle pause preserves bans and stops detection --------------------------
 # Existing ban stays in the jail while idle; new matching lines must not ban.
 f2bc set caddy-rate-local idle on >/dev/null || fail "fail2ban idle is unsupported"
-banned_list | tr ' ' '\n' | grep -qxF "$MIGRATE_IP" || fail "idle dropped an existing ban"
+has_ban "$MIGRATE_IP" || fail "idle dropped an existing ban"
 abuse_log "$IDLE_IP"
 sleep 1
-if banned_list | tr ' ' '\n' | grep -qxF "$IDLE_IP"; then fail "idle jail still processed log lines"; fi
+if has_ban "$IDLE_IP"; then fail "idle jail still processed log lines"; fi
 
 # The installer helper must idle every existing jail; a pre-swap failure resumes
 # them.
@@ -492,7 +627,7 @@ pause_fail2ban_for_upgrade
 [ "$FAIL2BAN_PAUSED" = 1 ] || fail "installer pause helper did not idle fail2ban"
 abuse_log "$IDLE2_IP"
 sleep 1
-if banned_list | tr ' ' '\n' | grep -qxF "$IDLE2_IP"; then fail "installer-paused jail still banned"; fi
+if has_ban "$IDLE2_IP"; then fail "installer-paused jail still banned"; fi
 ENGINE_SWAPPED=0
 on_install_exit
 abuse_log "$IDLE2_IP"
@@ -514,6 +649,20 @@ printf '[caddy-rate-local]\nenabled = true\nmaxretry = 2\n' \
 	> "$F2B/jail.d/caddy-abuseguard.local"
 printf '# old generated ignoreip\n[caddy-rate-local]\nignoreip = %s\n' "$ALLOW_IP" \
 	> "$F2B/jail.d/zzz-caddy-abuseguard-policy.local"
+# Simulate the installer's policy-unit cutover: it backs up the active units
+# only after the engine swap and must restore them when the install fails.
+UNIT_ROLLBACK_DIR="$TMP/unitroll"
+mkdir -p "$POLICY_UNIT_DIR" "$UNIT_ROLLBACK_DIR"
+printf 'old policy unit\n' > "$POLICY_UNIT_DIR/caddy-abuseguard-policy.service"
+printf 'old sync unit\n' > "$POLICY_UNIT_DIR/caddy-abuseguard-sync.service"
+cp -a -- "$POLICY_UNIT_DIR/caddy-abuseguard-policy.service" \
+	"$UNIT_ROLLBACK_DIR/caddy-abuseguard-policy.service.present"
+cp -a -- "$POLICY_UNIT_DIR/caddy-abuseguard-sync.service" \
+	"$UNIT_ROLLBACK_DIR/caddy-abuseguard-sync.service.present"
+printf 'present caddy-abuseguard-policy.service\npresent caddy-abuseguard-sync.service\n' \
+	> "$UNIT_ROLLBACK_DIR/manifest"
+printf 'new policy unit\n' > "$POLICY_UNIT_DIR/caddy-abuseguard-policy.service"
+printf 'new sync unit\n' > "$POLICY_UNIT_DIR/caddy-abuseguard-sync.service"
 ENGINE_BIN="$TMP/engine-slot"
 cp -a -- "$ENGINE" "$ENGINE_BIN"
 cp -a -- "$ENGINE" "$TMP/engine.old"
@@ -537,6 +686,11 @@ grep -q 'OLD-ABUSE' "$F2B/filter.d/caddy-abuseguard-any.conf" \
 	|| fail "old fail2ban filter config was not restored"
 grep -q 'maxretry = 2' "$F2B/jail.d/caddy-abuseguard.local" \
 	|| fail "old fail2ban jail config was not restored"
+grep -q 'old policy unit' "$POLICY_UNIT_DIR/caddy-abuseguard-policy.service" \
+	|| fail "old policy unit was not restored after a post-swap failure"
+grep -q 'old sync unit' "$POLICY_UNIT_DIR/caddy-abuseguard-sync.service" \
+	|| fail "old sync unit was not restored after a post-swap failure"
+[ ! -e "$UNIT_ROLLBACK_DIR" ] || fail "unit rollback directory was not cleaned up"
 [ ! -e "$F2B_ROLLBACK_DIR" ] || fail "rollback directory was not cleaned up"
 # maxretry=2 is distinct from the new config's 3: two matching lines ban only
 # when the restored config is the one actually running.

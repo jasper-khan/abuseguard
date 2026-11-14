@@ -33,6 +33,8 @@ func main() {
 		runAllowlistExport(args)
 	case "intel-export":
 		runIntelExport(args)
+	case "policy-apply":
+		runPolicyApply(args)
 	case "version", "-v", "--version":
 		fmt.Println("abuseguard-engine " + version)
 	default:
@@ -42,7 +44,7 @@ func main() {
 }
 
 func usage() {
-	logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | allowlist-export [--file <path>] | intel-export | version")
+	logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | allowlist-export [--file <path>] | intel-export | policy-apply (root, Linux) | version")
 }
 
 func mustConfig() *Config {

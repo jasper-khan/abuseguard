@@ -3,10 +3,10 @@
 # All jails read the same privacy-trimmed Caddy access log and block with
 # nftables (drop) on every port and protocol.
 #
-# Whitelist handling is native: /etc/caddy-abuseguard/whitelist is exported by
+# Whitelist handling is native: /etc/caddy-abuseguard/whitelist is validated by
 # the engine and written as `ignoreip` into
 # /etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local by
-# `caddy-abuseguard-policy apply` (Ag panel / install / six-hour sync). There is
+# `caddy-abuseguard policy-apply` (Ag panel / install / six-hour sync). There is
 # no per-request ignorecommand and no intel-only jail: the kernel intel set
 # decides feed enforcement, and these jails enforce behaviour only.
 #

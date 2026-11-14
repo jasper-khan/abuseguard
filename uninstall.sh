@@ -19,6 +19,7 @@ CONF_DIR=/etc/caddy-abuseguard
 STATE_DIR=/var/lib/caddy-abuseguard
 LOG_DIR=/var/log/caddy
 ENGINE_BIN=/usr/local/libexec/caddy-abuseguard
+# Legacy Shell applier from releases before the Go policy-apply migration.
 POLICY_BIN=/usr/local/libexec/caddy-abuseguard-policy
 POLICY_F2B=/etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local
 PANEL_BIN=/usr/local/bin/ag

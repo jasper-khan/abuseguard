@@ -67,7 +67,10 @@ REPORTS_DIR="$STATE_DIR/reports"
 LOG_DIR=/var/log/caddy
 LIBEXEC_DIR=/usr/local/libexec
 ENGINE_BIN="$LIBEXEC_DIR/caddy-abuseguard"
+# Legacy Shell applier left by releases before the Go policy-apply migration;
+# removed only after the new engine+unit pair is proven usable.
 POLICY_BIN="$LIBEXEC_DIR/caddy-abuseguard-policy"
+POLICY_UNIT_DIR=/etc/systemd/system
 PANEL_BIN=/usr/local/bin/ag
 LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
@@ -165,6 +168,7 @@ FAIL2BAN_PAUSED=0
 FAIL2BAN_STOPPED=0
 ENGINE_SWAPPED=0
 ENGINE_BACKUP=""
+UNIT_ROLLBACK_DIR=""
 INSTALL_COMPLETE=0
 STAGED_BIN=""
 F2B_ROLLBACK_DIR=""
@@ -278,6 +282,7 @@ on_install_exit() {
 	[ -z "$STAGED_BIN" ] || rm -f -- "$STAGED_BIN"
 	if [ "$INSTALL_COMPLETE" = 1 ]; then
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
+		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 		[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
 		return 0
 	fi
@@ -285,19 +290,37 @@ on_install_exit() {
 		restore_f2b_assets
 		resume_fail2ban_after_failure
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
+		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 	elif restore_engine_backup; then
+		# Restore the old units only after their engine is back: the new units
+		# run policy-apply, which the old engine does not implement.
+		if [ -n "${UNIT_ROLLBACK_DIR:-}" ] && [ -s "$UNIT_ROLLBACK_DIR/manifest" ]; then
+			local state unit
+			while IFS=' ' read -r state unit; do
+				case "$state" in
+					present) cp -a -- "$UNIT_ROLLBACK_DIR/$unit.present" "$POLICY_UNIT_DIR/$unit" \
+						|| warn "警告：无法恢复旧策略服务单元 $unit。" ;;
+					absent)
+						systemctl disable "$unit" >/dev/null 2>&1 || true
+						rm -f -- "$POLICY_UNIT_DIR/$unit" \
+							|| warn "警告：无法移除新策略服务单元 $unit。" ;;
+				esac
+			done < "$UNIT_ROLLBACK_DIR/manifest"
+			systemctl daemon-reload >/dev/null 2>&1 || warn "警告：systemd 未能重新加载恢复后的策略单元。"
+		fi
 		# Restore the old config only after its engine is back: old jails run the
 		# engine as ignorecommand, which the new CLI no longer supports.
 		restore_f2b_assets
 		if systemctl restart fail2ban >/dev/null 2>&1; then
-			warn "安装未完成：已恢复旧引擎与旧 fail2ban 配置，检测已恢复；修复问题后请重新运行安装器。"
+			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，检测已恢复；修复问题后请重新运行安装器。"
 		else
-			warn "安装未完成：已恢复旧引擎与旧 fail2ban 配置，但 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
+			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，但 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
 		fi
 	else
 		# Fresh install (no previous engine) or unreadable backup: the new
-		# config never invokes the engine, so keep it and start detection.
+		# engine+unit pair is compatible, so keep it and start detection.
 		[ -z "$ENGINE_BACKUP" ] || warn "警告：旧引擎备份仍保留在 $ENGINE_BACKUP。"
+		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 		if systemctl restart fail2ban >/dev/null 2>&1; then
 			warn "安装未完成：已保留新 fail2ban 配置并恢复检测；修复问题后请重新运行安装器。"
 		else
@@ -305,6 +328,7 @@ on_install_exit() {
 		fi
 	fi
 	[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
+	[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 }
 
 # Re-apply captured legacy bans to the retained non-reporting jail after the new
@@ -1074,11 +1098,8 @@ chmod 0640 "$LOG_DIR/abuseguard-access.json"
 # --- systemd timers + panel --------------------------------------------------
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.timer"   /etc/systemd/system/
-install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.service"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-firewall.service" /etc/systemd/system/
-install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-policy.service" /etc/systemd/system/
-install -m 0755 -o root -g root "$SRC_DIR/assets/policy/abuseguard-policy.sh" "$POLICY_BIN"
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
 # Older releases installed the panel as `abuseguard`. Remove that stale copy
 # so `ag` is the only shortcut, but only when the file really is our panel.
@@ -1144,6 +1165,24 @@ verify_fail2ban_jails config
 # keeps running. Pause it only for the binary swap, then restart below.
 pause_fail2ban_for_upgrade
 commit_engine
+# The new policy and sync units run `policy-apply`, which only the new engine
+# provides. Install and back them up only after the engine swap, so an ordinary
+# failure restores a compatible engine+unit+helper triple.
+UNIT_ROLLBACK_DIR="$(mktemp -d)" || die "无法创建策略服务回滚目录。"
+: > "$UNIT_ROLLBACK_DIR/manifest"
+for unit in caddy-abuseguard-policy.service caddy-abuseguard-sync.service; do
+	if [ -e "$POLICY_UNIT_DIR/$unit" ]; then
+		cp -a -- "$POLICY_UNIT_DIR/$unit" "$UNIT_ROLLBACK_DIR/$unit.present" \
+			|| die "无法备份 $POLICY_UNIT_DIR/$unit。"
+		printf 'present %s\n' "$unit" >> "$UNIT_ROLLBACK_DIR/manifest"
+	else
+		printf 'absent %s\n' "$unit" >> "$UNIT_ROLLBACK_DIR/manifest"
+	fi
+done
+install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-policy.service" "$POLICY_UNIT_DIR/caddy-abuseguard-policy.service" \
+	|| die "无法安装策略服务单元。"
+install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.service" "$POLICY_UNIT_DIR/caddy-abuseguard-sync.service" \
+	|| die "无法安装同步服务单元。"
 log "引擎已更新；正在应用新策略"
 
 systemctl daemon-reload
@@ -1152,7 +1191,7 @@ systemctl enable caddy-abuseguard-policy.service >/dev/null 2>&1 \
 log "正在启用 AbuseGuard 防火墙并设置开机恢复"
 "$PANEL_BIN" --firewall-apply || die "防火墙接管失败，安装未完成。请检查上方错误后重试。"
 log "正在应用原生白名单/情报策略"
-"$POLICY_BIN" apply || die "原生白名单/情报策略应用失败，安装未完成。请检查上方错误后重试。"
+"$ENGINE_BIN" policy-apply || die "原生白名单/情报策略应用失败，安装未完成。请检查上方错误后重试。"
 log "正在启用并启动服务"
 # Prefer a non-disruptive reload, but restart when the existing Caddy has its
 # admin API disabled and therefore cannot accept `caddy reload`.
@@ -1165,14 +1204,22 @@ verify_fail2ban_jails running
 migrate_legacy_bans || die "旧封禁迁移失败，安装未完成。"
 # Re-run against the live daemon: writes/validates ignoreip, reloads if it
 # changed, and clears bans that a newly allowlisted source still carries.
-"$POLICY_BIN" apply || die "fail2ban 就绪后应用策略失败，安装未完成。"
+"$ENGINE_BIN" policy-apply || die "fail2ban 就绪后应用策略失败，安装未完成。"
 # Only now is the cutover usable; before this point a failure restores the old
 # engine+config. Reclaim the rollback copy without waiting for the EXIT trap
 # (the interactive path execs the panel, which skips EXIT traps).
 INSTALL_COMPLETE=1
 [ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 ENGINE_BACKUP=""
+[ -z "$UNIT_ROLLBACK_DIR" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
+UNIT_ROLLBACK_DIR=""
 [ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
+# Only now is the new unit live; drop the legacy helper an older release left
+# behind. Keeping it during the swap preserves a bootable old engine+unit pair
+# until a failure rollback is no longer possible.
+if [ -e "$POLICY_BIN" ]; then
+	rm -f -- "$POLICY_BIN" || warn "警告：无法移除旧策略助手 $POLICY_BIN。"
+fi
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"

@@ -2,7 +2,7 @@ name: ci
 
 # Runs on every push/PR. Five gates:
 #   1. the Go engine tests must pass and it must compile/vet clean, and the
-#      shell policy/panel tests must pass with their scripted command doubles;
+#      shell panel/installer tests must pass with their scripted command doubles;
 #   2. the Caddy-log <-> fail2ban-filter contract must hold, checked against
 #      upstream-latest Caddy. Because release.yml deliberately tracks Caddy
 #      latest, this is what turns "upstream silently changed the log schema and
@@ -69,7 +69,7 @@ jobs:
       - name: Syntax-check the shell scripts
         run: |
           set -eu
-          for f in install.sh uninstall.sh abuseguard.sh scripts/*.sh assets/policy/*.sh; do
+          for f in install.sh uninstall.sh abuseguard.sh scripts/*.sh; do
             bash -n "$f" && echo "ok: $f"
           done
           bash ./scripts/test-panel-refresh.sh
@@ -89,7 +89,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: 'stable'
-      - name: Build the engine for the applier exports
+      - name: Build the engine for policy-apply
         working-directory: engine
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/caddy-abuseguard .
       - name: Install nftables, fail2ban and network test tools
@@ -98,7 +98,6 @@ jobs:
         run: |
           sudo install -d -m 0755 /usr/local/libexec
           sudo install -m 0755 /tmp/caddy-abuseguard /usr/local/libexec/caddy-abuseguard
-          sudo install -m 0755 assets/policy/abuseguard-policy.sh /usr/local/libexec/caddy-abuseguard-policy
           sudo useradd --system --no-create-home abuseguard 2>/dev/null || true
           sudo install -d /etc/caddy-abuseguard /var/lib/caddy-abuseguard /run/fail2ban
           # caddy.service is excluded: this job installs neither /usr/local/bin/caddy nor the caddy user.

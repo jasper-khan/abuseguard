@@ -40,7 +40,11 @@ func configPath() string {
 }
 
 func loadConfig() (*Config, error) {
-	b, err := os.ReadFile(configPath())
+	return loadConfigAt(configPath())
+}
+
+func loadConfigAt(path string) (*Config, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

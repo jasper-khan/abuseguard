@@ -17,7 +17,6 @@ JAILS="caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd"
 PANEL_REFRESH_SECONDS=1800
 FIREWALL_FILE="$CONF_DIR/firewall.nft"
 FIREWALL_SERVICE=caddy-abuseguard-firewall.service
-POLICY_HELPER=/usr/local/libexec/caddy-abuseguard-policy
 POLICY_APPLIED="$CONF_DIR/intel-applied.json"
 INTEL_TABLE=caddy_abuseguard_intel
 SSHD_MAIN=/etc/ssh/sshd_config
@@ -190,11 +189,11 @@ intel_age_h() {
 	echo $(( (now - ts) / 3600 ))
 }
 
-# Root applier: validates the whitelist + feed through the engine, applies one
+# Root engine subcommand: validates the whitelist + feed in-process, applies one
 # nft transaction, writes boot snapshots and regenerates fail2ban ignoreip.
 policy_apply() {
-	[ -x "$POLICY_HELPER" ] || { echo "  策略应用器缺失；请重新运行安装/更新。" >&2; return 1; }
-	"$POLICY_HELPER" apply
+	[ -x "$ENGINE" ] || { echo "  引擎缺失；请重新运行安装/更新。" >&2; return 1; }
+	"$ENGINE" policy-apply
 }
 
 # Applied kernel policy count/age (from the root-owned snapshot metadata).
@@ -400,7 +399,7 @@ wl_commit() {
 	mv -f -- "$candidate" "$WHITELIST"
 }
 
-# The root applier validates, applies the intel/allow nft transaction,
+# The root engine subcommand validates, applies the intel/allow nft transaction,
 # regenerates fail2ban ignoreip and clears bans for newly allowlisted sources.
 # A failure is reported to the operator instead of pretending the change is live.
 wl_apply() {

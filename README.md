@@ -24,7 +24,7 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
 - 安装时启用三个 Web 行为 jail 和 `sshd`，共用同一份白名单。任一 jail 封禁某个 IP 后，nftables 会拦截该源 IP 到本机所有端口、所有协议的流量，包括 SSH。
 - 威胁情报不再经过 fail2ban：同步后由根权限应用把整份名单装进独立的内核集合，名单内的源 IP 在建立连接前即被丢弃；集合独立于端口防火墙表，修改端口不会重建它。
 - 白名单只有一份：面板改动会同时更新 fail2ban 的 `ignoreip` 和 nft 情报例外。手工编辑文件后需要显式应用，见「威胁情报」。
-- 一个 Go 引擎（仅用标准库、单个静态二进制）负责校验名单、冲刷上报队列并导出经过严格解析的策略输入；它始终以非特权用户运行，真正加载防火墙的是独立的根权限一次性服务。
+- 一个 Go 引擎（仅用标准库、单个静态二进制）负责校验名单、冲刷上报队列并加载内核策略。只有根权限子命令 `policy-apply` 会写 nftables/fail2ban；同步、上报、入队等普通命令始终以非特权用户运行。
 
 ## 环境要求
 
@@ -133,7 +133,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 威胁情报以内核集合的形式生效，不再是“命中一次就封 90 天”的 jail。每 6 小时（也可通过面板手动触发）引擎拉取一份公开的、源自 AbuseIPDB 的名单：只保留 IPv4，拒绝明显异常偏小（<9 万）或偏大（>12 万）的结果，校验通过后原子写入 `intel.txt`；任何下载或解析失败都保留上一份名单。
 
-随后的根权限应用（`/usr/local/libexec/caddy-abuseguard-policy`，由 `caddy-abuseguard-policy.service` 在开机时、以及 `caddy-abuseguard-sync.service` 在每次同步后运行）会用引擎导出的、逐行严格校验的地址列表重建集合：先校验整份输入，再以单次 nft 事务替换，成功后写入根所有的开机快照。从未建立过策略时允许空集合；已有名单缺失、损坏、超界或应用/保存失败时，保留上一次生效的内核策略和快照，不会用空集合或半份名单覆盖。
+随后的根权限应用（`caddy-abuseguard policy-apply`，由 `caddy-abuseguard-policy.service` 在开机时、以及 `caddy-abuseguard-sync.service` 在每次同步后运行）会在进程内逐行严格校验白名单和情报名单，再以单次 nft 事务重建集合，成功后写入根所有的开机快照。从未建立过策略时允许空集合；已有名单缺失、损坏、超界或应用/保存失败时，保留上一次生效的内核策略和快照，不会用空集合或半份名单覆盖。
 
 名单跟随：新列入的源 IP 在下一次同步后即被拦截，移出名单后不再被拦截，不再有固定 90 天的情报封禁。白名单例外只在情报链内 `return`，不会全局接受流量，所以白名单 IP 仍受端口防火墙约束；重叠的 CIDR 例外同样有效。修改端口只重建端口表，情报集合独立存在。
 
@@ -172,8 +172,7 @@ example.com {
 ```
 /usr/local/bin/caddy                          Caddy（内置 caddy-dns/cloudflare）
 /usr/local/bin/ag                             控制面板
-/usr/local/libexec/caddy-abuseguard           Go 引擎
-/usr/local/libexec/caddy-abuseguard-policy    根权限策略应用助手
+/usr/local/libexec/caddy-abuseguard           Go 引擎（policy-apply 为根权限子命令）
 /etc/caddy/Caddyfile                          全局配置 + AbuseGuard 导入
 /etc/caddy/abuseguard.caddy                   (abuseguard) 片段
 /etc/caddy/sites/<域名>.caddy                 每个受保护站点一个文件
@@ -216,7 +215,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 - 安装器的自检站点只绑定 `127.0.0.1:8080`。
 - 密钥（`*.key`、`.env`）权限为 0640 且已被 git 忽略；切勿提交。
 - 下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络慢 / 大陆镜像」的完整性校验说明）。
-- 威胁情报只以根所有的快照和内核集合生效：根权限应用服务逐行校验引擎导出的纯地址列表，绝不把下载到的原始文本当作 nft 规则执行；`/var/lib/caddy-abuseguard` 对 `abuseguard` 用户可写，因此不作为可执行策略来源。
+- 威胁情报只以根所有的快照和内核集合生效：根权限子命令在进程内逐行校验白名单和已存储名单，绝不把下载到的原始文本当作 nft 规则执行；`/var/lib/caddy-abuseguard` 对 `abuseguard` 用户可写，因此不作为可执行策略来源。
 - Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务和根权限策略应用单元同样加固。
 
 ## 构建 / 发布
