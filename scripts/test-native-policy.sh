@@ -142,6 +142,8 @@ cat > "$TMP/bin/fail2ban-client" <<EOF
 exec $(command -v fail2ban-client) -c "$F2B" -s "$F2B/socket" "\$@"
 EOF
 chmod 0755 "$TMP/bin/fail2ban-client"
+# Sourced installer helpers call fail2ban-client directly; use the private daemon.
+export PATH="$TMP/bin:$PATH"
 
 apply() {
 	ip netns exec "$NS_H" env \
