@@ -26,6 +26,8 @@ fixture_paths() {
 	STATE_DIR="$TMP/state"
 	MODE_FILE="$CONF_DIR/web-server"
 	PACKAGE_RECORD="$CONF_DIR/package-ownership"
+	POLICY_RC="$TMP/policy-rc.d"
+	POLICY_RC_SAVED="$TMP/policy-rc.d.abuseguard-saved"
 	AG_NGINX_CF_CREDENTIALS="$CONF_DIR/cloudflare.ini"
 	NGINX_HTTP_CONF="$TMP/nginx/conf.d/abuseguard.conf"
 	NGINX_SELFTEST_CONF="$TMP/nginx/conf.d/zz-abuseguard-selftest.conf"
@@ -227,5 +229,42 @@ fi
 	resolve_proxy_mode
 	[ "$PROXY_MODE" = nginx ] || exit 1
 ) || fail "an in-progress first install must preserve its selection"
+
+# --- nginx must never be started by apt ------------------------------------
+# nginx-common's postinst starts the unit through deb-systemd-invoke, which
+# passes the unit name (nginx.service) to policy-rc.d; nginx.postinst uses
+# invoke-rc.d and passes nginx. Blocking only one of them leaves apt starting
+# nginx with the distro default site on :80 during install.
+
+# No previous policy: both names blocked, other units allowed, nothing left.
+(
+	reset_fixture
+	POLICY_RC_ACTIVE=0
+	inhibit_proxy_autostart || exit 1
+	[ -x "$POLICY_RC" ] || exit 2
+	"$POLICY_RC" nginx start; [ "$?" = 101 ] || exit 3
+	"$POLICY_RC" nginx.service start; [ "$?" = 101 ] || exit 4
+	"$POLICY_RC" rsyslog start || exit 5
+	restore_proxy_autostart || exit 6
+	[ ! -e "$POLICY_RC" ] || exit 7
+) || fail "a temporary policy-rc.d must block nginx and nginx.service"
+
+# Existing policy: our wrapper blocks both names and chains everything else;
+# restore puts the original file back, proven by it receiving later calls.
+(
+	reset_fixture
+	searched="$TMP/original-policy.calls"
+	printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s\nexit 0\n' "$searched" > "$POLICY_RC"
+	chmod 0755 "$POLICY_RC"
+	POLICY_RC_ACTIVE=0
+	inhibit_proxy_autostart || exit 1
+	"$POLICY_RC" nginx.service start; [ "$?" = 101 ] || exit 2
+	"$POLICY_RC" nginx start; [ "$?" = 101 ] || exit 3
+	"$POLICY_RC" rsyslog start || exit 4
+	[ "$(cat "$searched")" = "rsyslog start" ] || exit 5
+	restore_proxy_autostart || exit 6
+	"$POLICY_RC" cron start || exit 7
+	[ "$(tail -n 1 "$searched")" = "cron start" ] || exit 8
+) || fail "a chained policy-rc.d must block nginx and restore the original"
 
 echo "proxy-selection test OK"

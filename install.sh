@@ -428,14 +428,14 @@ inhibit_proxy_autostart() {
 		cat > "$POLICY_RC" <<EOF || die "无法写入临时 $POLICY_RC。"
 #!/bin/sh
 # AbuseGuard temporary policy: block package-started nginx only.
-if [ "\$1" = nginx ]; then exit 101; fi
+if [ "\$1" = nginx ] || [ "\$1" = nginx.service ]; then exit 101; fi
 exec $POLICY_RC_SAVED "\$@"
 EOF
 	else
 		cat > "$POLICY_RC" <<'EOF' || die "无法写入临时 $POLICY_RC。"
 #!/bin/sh
 # AbuseGuard temporary policy: block package-started nginx only.
-if [ "$1" = nginx ]; then exit 101; fi
+if [ "$1" = nginx ] || [ "$1" = nginx.service ]; then exit 101; fi
 exit 0
 EOF
 	fi
