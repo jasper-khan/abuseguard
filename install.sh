@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # AbuseGuard installer for Debian/Ubuntu (amd64/arm64).
 #
-# Installs a hardened Caddy (with the caddy-dns/cloudflare DNS module),
+# Installs the selected reverse proxy (Caddy, or distro Nginx + Certbot DNS),
 # fail2ban jails that block abusive IPs with nftables, a threat-intel sync,
 # an optional AbuseIPDB auto-reporter, and the `ag` control panel.
 #
 # Usage:
-#   sudo ./install.sh                 # download the prebuilt engine (GitHub release)
-#   sudo ./install.sh --from-source   # build the Go engine here (needs `go`)
-#   sudo ABUSEGUARD_ENGINE_BIN=/path/engine ./install.sh   # use a prebuilt engine
+#   sudo ./install.sh                        # Caddy (default), prebuilt engine
+#   sudo ./install.sh --proxy=nginx          # distro Nginx + Certbot DNS-01
+#   sudo ./install.sh --from-source          # build the Go engine here (needs `go`)
+#   sudo ./install.sh --proxy=nginx --from-source
+#   sudo ABUSEGUARD_ENGINE_BIN=/path/engine ./install.sh
+#
+# The reverse proxy is chosen once on the first install and recorded in
+# /etc/caddy-abuseguard/web-server. Later runs must not switch it.
 #
 set -euo pipefail
 
@@ -61,7 +66,9 @@ gh_fetch() {
 	esac
 }
 
-CONF_DIR=/etc/caddy-abuseguard
+# Test hook: scripts/test-proxy-selection.sh sources this file with a private
+# config root. Production always uses /etc/caddy-abuseguard.
+CONF_DIR="${ABUSEGUARD_CONF_DIR:-/etc/caddy-abuseguard}"
 STATE_DIR=/var/lib/caddy-abuseguard
 REPORTS_DIR="$STATE_DIR/reports"
 LOG_DIR=/var/log/caddy
@@ -74,18 +81,366 @@ POLICY_UNIT_DIR=/etc/systemd/system
 PANEL_BIN=/usr/local/bin/ag
 LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
+CADDY_SERVICE=/etc/systemd/system/caddy.service
 CADDY_ETC=/etc/caddy
 CADDY_ENV="$CADDY_ETC/.env"
 CADDYFILE="$CADDY_ETC/Caddyfile"
 SNIPPET="$CADDY_ETC/abuseguard.caddy"
 SITES_DIR="$CADDY_ETC/sites"
 
+# First-install proxy choice: root-owned immutable mode record.
+MODE_FILE="$CONF_DIR/web-server"
+NGINX_RUNTIME_PATH="$LIBEXEC_DIR/abuseguard-nginx.sh"
+NGINX_DEPLOY_HOOK="$LIBEXEC_DIR/abuseguard-nginx-deploy"
+NGINX_HTTP_CONF=/etc/nginx/conf.d/abuseguard.conf
+NGINX_SELFTEST_CONF=/etc/nginx/conf.d/zz-abuseguard-selftest.conf
+NGINX_CF_TRUST_INCLUDE=/etc/nginx/snippets/abuseguard-cloudflare.conf
+NGINX_SITES_AVAILABLE=/etc/nginx/sites-available
+NGINX_SITES_ENABLED=/etc/nginx/sites-enabled
+NGINX_LOG_DIR=/var/log/nginx
+NGINX_ACCESS_LOG="$NGINX_LOG_DIR/abuseguard-access.json"
+NGINX_LOGROTATE=/etc/logrotate.d/abuseguard-nginx
+NGINX_LETSENCRYPT_DIR=/etc/letsencrypt
+AG_NGINX_CF_CREDENTIALS="$CONF_DIR/cloudflare.ini"
+# Root-trusted package ownership (CONF_DIR is root-owned, not abuseguard-writable).
+PACKAGE_RECORD="$CONF_DIR/package-ownership"
+POLICY_RC=/usr/sbin/policy-rc.d
+POLICY_RC_SAVED=/usr/sbin/policy-rc.d.abuseguard-saved
+
 FROM_SOURCE=0
-[ "${1:-}" = "--from-source" ] && FROM_SOURCE=1
+REQUESTED_PROXY=""
+PROXY_MODE=""
+PROXY_MODE_ORIGIN=""
+RECORDED_MODE=""
+FRESH_PROXY=""
+POLICY_RC_ACTIVE=0
 
 log()  { printf '\033[1;32m[abuseguard]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[abuseguard]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<'EOF'
+用法：sudo ./install.sh [--from-source] [--proxy=caddy|nginx]
+
+  --proxy=caddy   使用 Caddy（首次安装默认）
+  --proxy=nginx   使用发行版 Nginx + Certbot Cloudflare DNS（首次安装）
+  --from-source   本地编译 Go 引擎（可与 --proxy 以任意顺序组合）
+EOF
+}
+
+die_usage() { printf '\033[1;31m[abuseguard]\033[0m %s\n' "$*" >&2; exit 2; }
+
+set_requested_proxy() {
+	local value="$1"
+	case "$value" in
+		caddy|nginx) : ;;
+		*) die_usage "无效的 --proxy 值：'$value'（仅支持 caddy 或 nginx）。" ;;
+	esac
+	if [ -n "$REQUESTED_PROXY" ] && [ "$REQUESTED_PROXY" != "$value" ]; then
+		die_usage "冲突的 --proxy 参数：$REQUESTED_PROXY / $value。"
+	fi
+	REQUESTED_PROXY="$value"
+}
+
+parse_install_args() {
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--from-source) FROM_SOURCE=1 ;;
+			--proxy=*) set_requested_proxy "${1#--proxy=}" ;;
+			--proxy)
+				[ "$#" -ge 2 ] || die_usage "--proxy 需要 caddy 或 nginx。"
+				set_requested_proxy "$2"
+				shift ;;
+			-h|--help) usage; exit 0 ;;
+			--) shift; [ "$#" -eq 0 ] || die_usage "未知参数：$1" ;;
+			*) die_usage "未知参数：$1" ;;
+		esac
+		shift
+	done
+}
+
+proxy_mode_valid() {
+	case "${1:-}" in caddy|nginx) return 0 ;; esac
+	return 1
+}
+
+# Reads the immutable mode record. Never sources it; a tampered/corrupt record
+# aborts before any host change. Missing record returns 1 for the caller.
+# The mode is returned through RECORDED_MODE so die() runs in the caller's
+# shell instead of a command-substitution subshell.
+read_recorded_mode() {
+	local mode bits
+	[ -e "$MODE_FILE" ] || [ -L "$MODE_FILE" ] || return 1
+	[ -f "$MODE_FILE" ] && [ ! -L "$MODE_FILE" ] \
+		|| die "代理模式记录 $MODE_FILE 不是普通文件；安装已中止，未改动系统。"
+	mode="$(cat -- "$MODE_FILE" 2>/dev/null)" \
+		|| die "无法读取代理模式记录 $MODE_FILE；安装已中止，未改动系统。"
+	proxy_mode_valid "$mode" \
+		|| die "代理模式记录 $MODE_FILE 内容无效（只允许 caddy 或 nginx）；安装已中止，未改动系统。"
+	if [ "$(id -u)" = 0 ]; then
+		[ "$(stat -c %u -- "$MODE_FILE" 2>/dev/null)" = 0 ] \
+			|| die "代理模式记录 $MODE_FILE 不是 root 所有；安装已中止，未改动系统。"
+		bits="$(stat -c %a -- "$MODE_FILE" 2>/dev/null)" || bits=""
+		# Reject group/other write (mask 022), not just a writable last digit.
+		if [ -n "$bits" ] && [ "$((0$bits & 022))" -ne 0 ]; then
+			die "代理模式记录 $MODE_FILE 可被非 root 修改；安装已中止，未改动系统。"
+		fi
+	fi
+	RECORDED_MODE="$mode"
+}
+
+# Marker missing: old releases only ever installed Caddy. Anything that looks
+# like an Nginx AbuseGuard install without a marker is ambiguous, not Caddy.
+legacy_manifest_mode() {
+	local manifest="$STATE_DIR/install-manifest" mode
+	[ -f "$manifest" ] || return 1
+	mode="$(sed -n 's/^web_server=//p' "$manifest" | head -n 1)"
+	case "$mode" in
+		"")  printf 'caddy' ;;
+		caddy) printf 'caddy' ;;
+		*) return 2 ;;
+	esac
+}
+
+has_nginx_abuse_artifacts() {
+	local f
+	if [ -e "$NGINX_HTTP_CONF" ] || [ -e "$NGINX_RUNTIME_PATH" ] || [ -e "$NGINX_DEPLOY_HOOK" ] \
+		|| [ -e "$AG_NGINX_CF_CREDENTIALS" ] || [ -e "$NGINX_SELFTEST_CONF" ] \
+		|| [ -e "$NGINX_CF_TRUST_INCLUDE" ]; then
+		return 0
+	fi
+	for f in "$NGINX_SITES_AVAILABLE"/abuseguard-*.conf "$NGINX_SITES_ENABLED"/abuseguard-*.conf; do
+		[ -e "$f" ] || [ -L "$f" ] || continue
+		return 0
+	done
+	return 1
+}
+
+has_caddy_abuse_artifacts() {
+	[ -e "$SNIPPET" ] || [ -e "$CADDY_SERVICE" ] \
+		|| [ -e "$CADDY_ETC/Caddyfile.pre-abuseguard" ]
+}
+
+choose_fresh_proxy() {
+	local choice
+	if [ -n "$REQUESTED_PROXY" ]; then
+		FRESH_PROXY="$REQUESTED_PROXY"
+		return 0
+	fi
+	if [ -n "${ABUSEGUARD_NONINTERACTIVE:-}" ] || ! { exec 3</dev/tty; } 2>/dev/null; then
+		FRESH_PROXY=caddy
+		return 0
+	fi
+	printf '  选择反向代理：[1] Caddy（默认，内置 Cloudflare DNS） [2] Nginx（发行版包 + Certbot）: ' >&2
+	IFS= read -r choice <&3 || choice=""
+	exec 3<&-
+	case "$choice" in
+		''|1|caddy|Caddy|CADDY) FRESH_PROXY=caddy ;;
+		2|nginx|Nginx|NGINX) FRESH_PROXY=nginx ;;
+		*) die_usage "无效的代理选择：'$choice'（请选择 1 或 2）。" ;;
+	esac
+}
+
+# Must run before apt or any host mutation.
+resolve_proxy_mode() {
+	local legacy
+	if read_recorded_mode; then
+		PROXY_MODE="$RECORDED_MODE"
+		PROXY_MODE_ORIGIN=recorded
+		if [ -n "$REQUESTED_PROXY" ] && [ "$REQUESTED_PROXY" != "$RECORDED_MODE" ]; then
+			die "此安装已固定使用 $RECORDED_MODE，不能用 --proxy=$REQUESTED_PROXY 切换反向代理。安装未改动系统。"
+		fi
+		return 0
+	fi
+
+	if [ "$UPDATE_MODE" = 1 ]; then
+		if has_nginx_abuse_artifacts; then
+			die "检测到现有 AbuseGuard Nginx 文件，但缺少模式记录 $MODE_FILE；状态不明确，拒绝继续。请手动核对后重试。安装未改动系统。"
+		fi
+		if ! legacy="$(legacy_manifest_mode)"; then
+			die "安装清单记录的代理模式与 $MODE_FILE 不一致；拒绝猜测。请手动核对后重试。安装未改动系统。"
+		fi
+		PROXY_MODE="$legacy"
+		PROXY_MODE_ORIGIN=legacy
+		if [ -n "$REQUESTED_PROXY" ] && [ "$REQUESTED_PROXY" != "$legacy" ]; then
+			die "旧版 AbuseGuard 安装使用 $legacy，不能用 --proxy=$REQUESTED_PROXY 切换。安装未改动系统。"
+		fi
+		log "未找到代理模式记录；按旧版 AbuseGuard+$legacy 安装继续"
+		return 0
+	fi
+
+	choose_fresh_proxy
+	if [ "$FRESH_PROXY" = caddy ] && has_nginx_abuse_artifacts; then
+		die "检测到现有 AbuseGuard Nginx 文件但缺少模式记录；不能静默改用 Caddy。请手动核对，或以 --proxy=nginx 重试。安装未改动系统。"
+	fi
+	if [ "$FRESH_PROXY" = nginx ] && has_caddy_abuse_artifacts; then
+		die "检测到现有 AbuseGuard Caddy 文件但缺少模式记录；不能静默改用 Nginx。请手动核对，或以 --proxy=caddy 重试。安装未改动系统。"
+	fi
+	PROXY_MODE="$FRESH_PROXY"
+	PROXY_MODE_ORIGIN=fresh
+}
+
+pkg_installed() {
+	command -v dpkg-query >/dev/null 2>&1 || return 1
+	[ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" = "install ok installed" ]
+}
+
+# 0 = installed, 1 = not installed, unknown = cannot tell.
+pkg_state() {
+	if ! command -v dpkg-query >/dev/null 2>&1; then
+		printf 'unknown'
+		return 0
+	fi
+	if pkg_installed "$1"; then
+		printf '0'
+	else
+		printf '1'
+	fi
+}
+
+# 1 = existed before this install (keep it), 0 = absent before (ours to remove).
+pkg_preexisting() {
+	case "$(pkg_state "$1")" in
+		0) printf '1' ;;
+		1) printf '0' ;;
+		*) printf 'unknown' ;;
+	esac
+}
+
+# Old certbot-dns-cloudflare releases only understand the Global API Key
+# (email + key); `dns_cloudflare_api_token` is the only credential this
+# installer writes. Importing the module proves nothing, so probe the
+# installed package for the token key and refuse an unsupported plugin here
+# instead of failing at issuance or silently falling back to a Global API Key.
+certbot_cf_supports_api_token() {
+	python3 - <<'PY' >/dev/null 2>&1
+import pathlib
+import sys
+
+try:
+    import certbot_dns_cloudflare as package
+except Exception:
+    sys.exit(1)
+root = pathlib.Path(package.__file__).resolve().parent
+for path in root.rglob("*.py"):
+    try:
+        if "dns_cloudflare_api_token" in path.read_text(encoding="utf-8", errors="ignore"):
+            sys.exit(0)
+    except OSError:
+        continue
+sys.exit(1)
+PY
+}
+
+proxy_backend_present() {
+	local mode="$1" unit=""
+	case "$mode" in
+		caddy)
+			pkg_installed caddy && return 0
+			command -v caddy >/dev/null 2>&1 && return 0
+			[ -x /usr/local/bin/caddy ] && return 0
+			unit=caddy.service ;;
+		nginx)
+			pkg_installed nginx && return 0
+			pkg_installed nginx-core && return 0
+			pkg_installed nginx-common && return 0
+			command -v nginx >/dev/null 2>&1 && return 0
+			[ -x /usr/sbin/nginx ] && return 0
+			unit=nginx.service ;;
+		*) return 1 ;;
+	esac
+	[ -e "/etc/systemd/system/$unit" ] || [ -e "/lib/systemd/system/$unit" ] \
+		|| [ -e "/usr/lib/systemd/system/$unit" ]
+}
+
+# No co-installed reverse proxies: even an inactive opposite backend refuses.
+preflight_exclusive_proxy() {
+	local opposite
+	if [ "$PROXY_MODE" = caddy ]; then opposite=nginx; else opposite=caddy; fi
+	if proxy_backend_present "$opposite"; then
+		die "检测到已安装的 $opposite（二进制/软件包/服务，即使未运行）。AbuseGuard 只使用一种反向代理；请先手动移除 $opposite 后重试。安装未改动系统。"
+	fi
+}
+
+write_mode_record() {
+	local tmp
+	proxy_mode_valid "$PROXY_MODE" || die "内部错误：代理模式 '$PROXY_MODE' 无效；安装未完成。"
+	[ -e "$MODE_FILE" ] && return 0
+	install -d -m 0750 "$CONF_DIR" || die "无法创建 $CONF_DIR。"
+	tmp="$(mktemp "$CONF_DIR/.web-server.XXXXXX")" || die "无法创建代理模式记录。"
+	printf '%s\n' "$PROXY_MODE" > "$tmp" || { rm -f -- "$tmp"; die "无法写入代理模式记录。"; }
+	chown root:root "$tmp" || { rm -f -- "$tmp"; die "无法设置代理模式记录所有者。"; }
+	chmod 0644 "$tmp" || { rm -f -- "$tmp"; die "无法设置代理模式记录权限。"; }
+	mv -f -- "$tmp" "$MODE_FILE" || { rm -f -- "$tmp"; die "无法保存代理模式记录。"; }
+	log "已记录反向代理：$PROXY_MODE（$MODE_FILE，之后不可切换）"
+}
+
+record_package_ownership() {
+	local tmp
+	[ -f "$PACKAGE_RECORD" ] && return 0
+	install -d -m 0750 "$CONF_DIR" || die "无法创建 $CONF_DIR。"
+	tmp="$(mktemp "$CONF_DIR/.package-ownership.XXXXXX")" || die "无法创建软件包归属记录。"
+	{
+		printf 'version=1\n'
+		printf 'nginx_preexisting=%s\n' "${PRE_NGINX_PKG:-unknown}"
+		printf 'nginx_any_preexisting=%s\n' "${PRE_NGINX_ANY:-unknown}"
+		printf 'nginx_core_preexisting=%s\n' "${PRE_NGINX_CORE_PKG:-unknown}"
+		printf 'nginx_common_preexisting=%s\n' "${PRE_NGINX_COMMON_PKG:-unknown}"
+		printf 'certbot_preexisting=%s\n' "${PRE_CERTBOT_PKG:-unknown}"
+		printf 'certbot_dns_cloudflare_preexisting=%s\n' "${PRE_CERTBOT_CF_PKG:-unknown}"
+	} > "$tmp" || { rm -f -- "$tmp"; die "无法写入软件包归属记录。"; }
+	chown root:root "$tmp" || { rm -f -- "$tmp"; die "无法设置软件包归属记录所有者。"; }
+	chmod 0640 "$tmp" || { rm -f -- "$tmp"; die "无法设置软件包归属记录权限。"; }
+	mv -f -- "$tmp" "$PACKAGE_RECORD" || { rm -f -- "$tmp"; die "无法保存软件包归属记录。"; }
+}
+
+# Debian/Ubuntu package postinst starts nginx unless policy-rc.d says no. Block
+# only nginx, chain any pre-existing policy, and restore it immediately after
+# apt (and again from the EXIT trap if apt fails).
+restore_proxy_autostart() {
+	if [ "$POLICY_RC_ACTIVE" != 1 ] && [ ! -e "$POLICY_RC_SAVED" ]; then
+		return 0
+	fi
+	if [ -e "$POLICY_RC_SAVED" ]; then
+		mv -f -- "$POLICY_RC_SAVED" "$POLICY_RC" || warn "警告：无法恢复原有 $POLICY_RC。"
+	else
+		rm -f -- "$POLICY_RC" || warn "警告：无法移除临时 $POLICY_RC。"
+	fi
+	POLICY_RC_ACTIVE=0
+}
+
+inhibit_proxy_autostart() {
+	if [ -e "$POLICY_RC_SAVED" ]; then
+		mv -f -- "$POLICY_RC_SAVED" "$POLICY_RC"
+	elif [ -f "$POLICY_RC" ] && grep -q 'AbuseGuard temporary policy' "$POLICY_RC" 2>/dev/null; then
+		# A previous run died before restoring; drop our own stale wrapper.
+		rm -f -- "$POLICY_RC"
+	fi
+	if [ -e "$POLICY_RC" ]; then
+		mv -f -- "$POLICY_RC" "$POLICY_RC_SAVED" \
+			|| die "无法暂存现有 $POLICY_RC；安装未改动系统。"
+	fi
+	# Mark active before writing, so a partial write is still restored by the
+	# EXIT trap.
+	POLICY_RC_ACTIVE=1
+	if [ -e "$POLICY_RC_SAVED" ]; then
+		cat > "$POLICY_RC" <<EOF || die "无法写入临时 $POLICY_RC。"
+#!/bin/sh
+# AbuseGuard temporary policy: block package-started nginx only.
+if [ "\$1" = nginx ]; then exit 101; fi
+exec $POLICY_RC_SAVED "\$@"
+EOF
+	else
+		cat > "$POLICY_RC" <<'EOF' || die "无法写入临时 $POLICY_RC。"
+#!/bin/sh
+# AbuseGuard temporary policy: block package-started nginx only.
+if [ "$1" = nginx ]; then exit 101; fi
+exit 0
+EOF
+	fi
+	chmod 0755 "$POLICY_RC" || die "无法设置临时 $POLICY_RC 权限。"
+}
 
 # Resolve once before changing the host; bootstrap and assets share this tag.
 # The redirect avoids requiring jq before dependencies have been installed.
@@ -171,6 +526,7 @@ ENGINE_BACKUP=""
 UNIT_ROLLBACK_DIR=""
 INSTALL_COMPLETE=0
 STAGED_BIN=""
+STAGED_RELEASE_BIN=""
 F2B_ROLLBACK_DIR=""
 PAUSE_JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
 PAUSED_JAILS_DONE=""
@@ -279,7 +635,11 @@ restore_engine_backup() {
 }
 
 on_install_exit() {
+	if declare -F restore_proxy_autostart >/dev/null 2>&1; then
+		restore_proxy_autostart
+	fi
 	[ -z "$STAGED_BIN" ] || rm -f -- "$STAGED_BIN"
+	[ -z "$STAGED_RELEASE_BIN" ] || rm -f -- "$STAGED_RELEASE_BIN"
 	if [ "$INSTALL_COMPLETE" = 1 ]; then
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
@@ -370,6 +730,27 @@ validate_caddyfile() {
 	CF_API_TOKEN="$cf_token" "$CADDY_BIN" validate --config "$config" --adapter caddyfile
 }
 
+# Source-tree runtime helper for this install. The helper installs itself
+# (root-owned) through nginx_install_assets, together with only our HTTP-level
+# snippets, selftest, logrotate entry and deploy hook.
+setup_nginx_proxy() {
+	local runtime="$SRC_DIR/assets/nginx/runtime.sh"
+	[ -f "$runtime" ] || die "缺少 Nginx 运行时助手：$runtime"
+	# shellcheck disable=SC1090
+	. "$runtime" || die "无法加载 Nginx 运行时助手。"
+	declare -F nginx_install_assets >/dev/null 2>&1 \
+		|| die "Nginx 运行时助手缺少 nginx_install_assets。"
+	declare -F nginx_validate >/dev/null 2>&1 \
+		|| die "Nginx 运行时助手缺少 nginx_validate。"
+	declare -F nginx_reload >/dev/null 2>&1 \
+		|| die "Nginx 运行时助手缺少 nginx_reload。"
+	nginx_install_assets "$SRC_DIR" \
+		|| die "Nginx 配置/资源安装失败；安装未完成。"
+	nginx_validate \
+		|| die "Nginx 配置校验失败；安装未完成。"
+	log "Nginx 配置与资源已就绪（$NGINX_HTTP_CONF）"
+}
+
 # Remove only a mktemp-created checkout, one entry at a time. Refuse symlinks
 # and any path outside the exact temporary-directory shapes used by mktemp.
 cleanup_temp_tree() {
@@ -390,7 +771,25 @@ cleanup_temp_tree() {
 	rmdir -- "$root"
 }
 
+if [ "${ABUSEGUARD_LIB_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+	return 0
+fi
+parse_install_args "$@"
 [ "$(id -u)" = "0" ] || die "请以 root 运行（sudo）。"
+
+# Resolve the immutable proxy mode and reject an opposite proxy before apt or
+# any other host change. An in-progress install keeps its marker, so a retry
+# cannot switch backends.
+UPDATE_MODE=0
+if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ] || [ -x "$LEGACY_PANEL_BIN" ]; then UPDATE_MODE=1; fi
+if [ -n "${ABUSEGUARD_PROXY_CHOICE:-}" ]; then
+	[ -n "$REQUESTED_PROXY" ] || set_requested_proxy "$ABUSEGUARD_PROXY_CHOICE"
+	unset ABUSEGUARD_PROXY_CHOICE
+fi
+resolve_proxy_mode
+preflight_exclusive_proxy
+# Pass an interactive fresh choice through the release bootstrap unchanged.
+export ABUSEGUARD_PROXY_CHOICE="$PROXY_MODE"
 
 # --- self-bootstrap ----------------------------------------------------------
 # Default installs, including those from a clone, use the latest published
@@ -415,11 +814,21 @@ if [ "$fetch_release" = 1 ] || [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/as
 	tar -xzf "$AG_TMP/repo.tar.gz" -C "$AG_TMP" --strip-components=1 \
 		|| die "自举解压失败。"
 	rm -f "$AG_TMP/repo.tar.gz"
+	# Never hand an nginx request to a release without nginx support.
+	if [ "${PROXY_MODE:-caddy}" = nginx ] \
+		&& { [ ! -f "$AG_TMP/assets/nginx/runtime.sh" ] || ! grep -q -- '--proxy' "$AG_TMP/install.sh"; }; then
+		die "目标版本 $AG_REF 不支持 Nginx 安装（缺少运行时或 --proxy 处理）。请使用 --from-source 或改用 --proxy=caddy。安装未改动系统。"
+	fi
 	export ABUSEGUARD_REPO ABUSEGUARD_REF
 	# Run (not exec) the unpacked installer so the EXIT trap above still fires
-	# and cleans the temp checkout; propagate its exit code.
-	ABUSEGUARD_RELEASE_TAG="$RELEASE_TAG" bash "$AG_TMP/install.sh" "$@"
+	# and cleans the temp checkout; propagate its exit code. The choice must
+	# survive even when the user picked nginx interactively.
+	ABUSEGUARD_RELEASE_TAG="$RELEASE_TAG" ABUSEGUARD_PROXY_CHOICE="${PROXY_MODE:-caddy}" \
+		bash "$AG_TMP/install.sh" "$@"
 	exit $?
+fi
+if [ "${PROXY_MODE:-caddy}" = nginx ] && [ ! -f "$SRC_DIR/assets/nginx/runtime.sh" ]; then
+	die "当前源码缺少 assets/nginx/runtime.sh，无法安装 Nginx。请使用完整源码或改用 --proxy=caddy。安装未改动系统。"
 fi
 
 TARGET_VERSION="$(tr -d '[:space:]' < "$SRC_DIR/VERSION" 2>/dev/null || true)"
@@ -441,11 +850,84 @@ case "$(uname -m)" in
 esac
 log "目标系统：${PRETTY_NAME:-Debian/Ubuntu}（$ARCH）"
 
+# --- proxy mode record + package ownership (before apt touches the host) -----
+# A failed install keeps the mode record, so a retry cannot switch backends.
+write_mode_record
+if [ "$PROXY_MODE" = nginx ]; then
+	PRE_NGINX_PKG="$(pkg_preexisting nginx)"
+	PRE_NGINX_ANY=0
+	if proxy_backend_present nginx; then PRE_NGINX_ANY=1; fi
+	PRE_NGINX_CORE_PKG="$(pkg_preexisting nginx-core)"
+	PRE_NGINX_COMMON_PKG="$(pkg_preexisting nginx-common)"
+	PRE_CERTBOT_PKG="$(pkg_preexisting certbot)"
+	PRE_CERTBOT_CF_PKG="$(pkg_preexisting python3-certbot-dns-cloudflare)"
+	record_package_ownership
+	# A retry after a partial apt run must keep using the original ownership,
+	# not the now-installed package state.
+	recorded_nginx_owner="$(sed -n 's/^nginx_preexisting=//p' "$PACKAGE_RECORD" 2>/dev/null | head -n 1)"
+	case "$recorded_nginx_owner" in
+		0|1) PRE_NGINX_PKG="$recorded_nginx_owner" ;;
+	esac
+	recorded_nginx_any="$(sed -n 's/^nginx_any_preexisting=//p' "$PACKAGE_RECORD" 2>/dev/null | head -n 1)"
+	case "$recorded_nginx_any" in
+		0|1) PRE_NGINX_ANY="$recorded_nginx_any" ;;
+		"") PRE_NGINX_ANY="$PRE_NGINX_PKG" ;;
+	esac
+fi
+
 # --- dependencies ------------------------------------------------------------
-log "正在安装依赖（fail2ban、rsyslog、nftables、curl、jq、libcap2-bin）..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq fail2ban rsyslog nftables curl jq ca-certificates libcap2-bin >/dev/null
+if [ "$PROXY_MODE" = caddy ]; then
+	log "正在安装依赖（fail2ban、rsyslog、nftables、curl、jq、libcap2-bin）..."
+	apt-get update -qq
+	apt-get install -y -qq fail2ban rsyslog nftables curl jq ca-certificates libcap2-bin >/dev/null
+else
+	log "正在安装依赖（fail2ban、rsyslog、nftables、curl、jq、nginx、certbot、certbot-dns-cloudflare）..."
+	apt-get update -qq
+	for pkg in nginx certbot python3-certbot-dns-cloudflare; do
+		apt-cache show "$pkg" >/dev/null 2>&1 \
+			|| die "软件源中没有 $pkg；无法安装 Nginx 方案。安装未完成。"
+	done
+	trap on_install_exit EXIT
+	inhibit_proxy_autostart
+	apt-get install -y -qq fail2ban rsyslog nftables curl jq ca-certificates \
+		nginx certbot python3-certbot-dns-cloudflare >/dev/null \
+		|| die "Nginx/Certbot 依赖安装失败。"
+	restore_proxy_autostart
+	# The package may have enabled nginx before our config exists. Keep it from
+	# starting an empty/default site on reboot until the install succeeds. This
+	# applies to a fresh install or a retry before the manifest exists; an
+	# update must not disable an already serving proxy.
+	if [ "$PRE_NGINX_ANY" = 0 ] && [ "$UPDATE_MODE" = 0 ]; then
+		systemctl disable nginx >/dev/null 2>&1 || true
+	fi
+	# Capability preflight: the distro build must provide what our managed
+	# sites need, and the DNS authenticator must import before we touch config.
+	command -v nginx >/dev/null 2>&1 || die "nginx 可执行文件不可用。"
+	command -v certbot >/dev/null 2>&1 || die "certbot 可执行文件不可用。"
+	nginx_build="$(nginx -V 2>&1 || true)"
+	case "$nginx_build" in
+		*--with-http_ssl_module*) : ;;
+		*) die "发行版 Nginx 缺少 http_ssl_module，无法提供 HTTPS。" ;;
+	esac
+	case "$nginx_build" in
+		*--with-http_v2_module*) : ;;
+		*) die "发行版 Nginx 缺少 http_v2_module，无法提供 HTTP/2。" ;;
+	esac
+	python3 -c 'import certbot_dns_cloudflare' >/dev/null 2>&1 \
+		|| die "certbot-dns-cloudflare 插件不可用。"
+	certbot_cf_supports_api_token \
+		|| die "当前 certbot-dns-cloudflare 插件不支持 Cloudflare API Token（旧版只支持 Global API Key）。请升级 python3-certbot-dns-cloudflare 后重试；AbuseGuard 不会回退到 Global API Key，安装未完成。"
+	[ -f /etc/nginx/nginx.conf ] || die "缺少 /etc/nginx/nginx.conf。"
+	# Only a package we just installed created the distro default site. Disable
+	# it instead of exposing port 80; a pre-existing Nginx keeps its own sites.
+	if [ "$PRE_NGINX_ANY" = 0 ] && [ "$UPDATE_MODE" = 0 ] \
+		&& { [ -e /etc/nginx/sites-enabled/default ] || [ -L /etc/nginx/sites-enabled/default ]; }; then
+		rm -f -- /etc/nginx/sites-enabled/default
+		log "已禁用发行版默认 80 端口站点（/etc/nginx/sites-enabled/default）"
+	fi
+	nginx -t >/dev/null 2>&1 || die "发行版 Nginx 现有配置预检失败；请先修复后再安装。"
+fi
 systemctl enable --now rsyslog >/dev/null 2>&1 || die "rsyslog 启动失败（查看：journalctl -u rsyslog）。"
 [ -e /var/log/auth.log ] || install -m 0640 -o root -g adm /dev/null /var/log/auth.log
 
@@ -460,11 +942,9 @@ PRE_CADDYFILE=0;  [ -e "$CADDYFILE" ] && PRE_CADDYFILE=1 || :
 PRE_CADDY_ETC=0;  [ -e "$CADDY_ETC" ] && PRE_CADDY_ETC=1 || :
 PRE_LOG_DIR=0;    [ -e "$LOG_DIR" ] && PRE_LOG_DIR=1 || :
 PRE_CADDY_LIB=0;  [ -e /var/lib/caddy ] && PRE_CADDY_LIB=1 || :
-UPDATE_MODE=0
-if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ] || [ -x "$LEGACY_PANEL_BIN" ]; then UPDATE_MODE=1; fi
 
 # --- service accounts --------------------------------------------------------
-if ! id caddy >/dev/null 2>&1; then
+if [ "$PROXY_MODE" = caddy ] && ! id caddy >/dev/null 2>&1; then
 	log "创建系统用户 'caddy'"
 	useradd --system --user-group --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
 fi
@@ -474,15 +954,19 @@ if ! id abuseguard >/dev/null 2>&1; then
 fi
 
 # --- directories -------------------------------------------------------------
-install -d -m 0755 "$LIBEXEC_DIR" "$CADDY_ETC"
+install -d -m 0755 "$LIBEXEC_DIR"
+if [ "$PROXY_MODE" = caddy ]; then
+	install -d -m 0755 "$CADDY_ETC"
+	install -d -m 0750 -o caddy -g caddy "$LOG_DIR"
+fi
 install -d -m 0750 -o root -g abuseguard "$CONF_DIR"
 install -d -m 0750 -o abuseguard -g abuseguard "$STATE_DIR" "$REPORTS_DIR"
-install -d -m 0750 -o caddy -g caddy "$LOG_DIR"
 
 # Write the install manifest ONCE (first install); a re-run must not overwrite
 # the original pre-install snapshot.
 if [ ! -f "$STATE_DIR/install-manifest" ]; then
 	cat > "$STATE_DIR/install-manifest" <<EOF
+web_server=$PROXY_MODE
 caddy_bin_preexisting=$PRE_CADDY_BIN
 caddy_service_preexisting=$PRE_CADDY_SVC
 caddy_user_preexisting=$PRE_CADDY_USER
@@ -532,6 +1016,14 @@ install -m 0644 "$SRC_DIR"/assets/fail2ban/filter.d/*.conf "$F2B_ETC/filter.d/"
 install -m 0644 "$SRC_DIR"/assets/fail2ban/action.d/*.conf "$F2B_ETC/action.d/"
 install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/caddy-abuseguard.local" "$F2B_ETC/jail.d/caddy-abuseguard.local"
 install -m 0644 "$SRC_DIR/assets/fail2ban/jail.d/zz-caddy-abuseguard-report.local" "$F2B_ETC/jail.d/zz-caddy-abuseguard-report.local"
+# Same jail IDs/filters/thresholds; only where the access log lives changes.
+if [ "$PROXY_MODE" = nginx ]; then
+	sed -i 's#/var/log/caddy/abuseguard-access.json#/var/log/nginx/abuseguard-access.json#g' \
+		"$F2B_ETC/jail.d/caddy-abuseguard.local" \
+		|| die "无法将 fail2ban jail 的日志路径切换到 Nginx。"
+	grep -Eq '^[[:space:]]*logpath[[:space:]]*=[[:space:]]*/var/log/nginx/abuseguard-access\.json[[:space:]]*$' "$F2B_ETC/jail.d/caddy-abuseguard.local" \
+		|| die "fail2ban jail 的 Nginx 日志路径未生效；安装未完成。"
+fi
 # Disable retired intel jails before the engine swap, even if a copy lives in
 # jail.local: the first policy apply rewrites this file with the full generated
 # ignoreip, but this early version already prevents old jails from ever running
@@ -628,7 +1120,7 @@ stage_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
 		warn "$label 版本不匹配（需要 $expected），保留当前版本。"
 		return 1
 	fi
-	STAGED_BIN="$tmp"
+	STAGED_RELEASE_BIN="$tmp"
 }
 commit_staged_binary() {  # DEST LABEL
 	if ! mv -f -- "$STAGED_BIN" "$1"; then
@@ -640,8 +1132,15 @@ commit_staged_binary() {  # DEST LABEL
 	STAGED_BIN=""
 }
 install_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
+	local staged
 	stage_release_binary "$@" || return 1
-	commit_staged_binary "$2" "$4"
+	staged="$STAGED_RELEASE_BIN"
+	STAGED_RELEASE_BIN=""
+	if ! mv -f -- "$staged" "$2"; then
+		rm -f -- "$staged"
+		warn "$4 无法替换当前二进制。"
+		return 1
+	fi
 }
 
 # --- engine ------------------------------------------------------------------
@@ -672,6 +1171,8 @@ stage_engine() {
 	log "正在下载引擎（linux-$ARCH，自动选择线路，稍候）..."
 	stage_release_binary "$url" "$ENGINE_BIN" "$fn" "引擎" "$TARGET_VERSION" \
 		|| die "引擎下载、校验或启动检查失败。可用 --from-source 或设置 ABUSEGUARD_ENGINE_BIN。"
+	STAGED_BIN="$STAGED_RELEASE_BIN"
+	STAGED_RELEASE_BIN=""
 }
 commit_engine() {
 	if [ -e "$ENGINE_BIN" ]; then
@@ -718,6 +1219,8 @@ if [ ! -f "$CONF_DIR/abuseipdb-report.key" ]; then
 fi
 printf '%s\n' "$ABUSEGUARD_REPO" > "$CONF_DIR/repo"; chmod 0644 "$CONF_DIR/repo"
 
+# --- backend setup -----------------------------------------------------------
+if [ "$PROXY_MODE" = caddy ]; then
 # --- Caddy binary with the cloudflare DNS module -----------------------------
 # Downloaded from our own GitHub release (built by CI with xcaddy), so it gets
 # the same direct-then-mirror fallback as the engine. caddyserver.com's custom
@@ -1091,6 +1594,9 @@ migrate_caddy_sites "$caddy_migration_source"
 [ -e "$LOG_DIR/abuseguard-access.json" ] || install -m 0640 -o caddy -g caddy /dev/null "$LOG_DIR/abuseguard-access.json"
 chown caddy:caddy "$LOG_DIR/abuseguard-access.json"
 chmod 0640 "$LOG_DIR/abuseguard-access.json"
+else
+	setup_nginx_proxy
+fi
 
 # Legacy bans and ignoreip were captured before the engine swap (see above).
 
@@ -1126,8 +1632,13 @@ elif [ -z "${ABUSEGUARD_NONINTERACTIVE:-}" ] && { exec 3</dev/tty; } 2>/dev/null
 			printf '    请粘贴 Cloudflare API token（回车确认）: '
 			IFS= read -r cf_token <&3 || cf_token=""
 			if [ -n "$cf_token" ]; then
-				printf 'CF_API_TOKEN=%s\n' "$cf_token" > "$CADDY_ENV"
-				chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
+				if [ "$PROXY_MODE" = caddy ]; then
+					printf 'CF_API_TOKEN=%s\n' "$cf_token" > "$CADDY_ENV"
+					chown root:caddy "$CADDY_ENV"; chmod 0640 "$CADDY_ENV"
+				else
+					nginx_save_token "$cf_token" \
+						|| die "无法保存 Cloudflare token（$AG_NGINX_CF_CREDENTIALS）；安装未完成。"
+				fi
 				log "已保存 Cloudflare token"
 			else
 				log "未输入，跳过 Cloudflare token"
@@ -1156,8 +1667,13 @@ else
 fi
 
 # --- validate + enable -------------------------------------------------------
-log "正在校验 Caddyfile"
-validate_caddyfile "$CADDYFILE" >/dev/null || die "Caddyfile 校验失败。"
+if [ "$PROXY_MODE" = caddy ]; then
+	log "正在校验 Caddyfile"
+	validate_caddyfile "$CADDYFILE" >/dev/null || die "Caddyfile 校验失败。"
+else
+	log "正在校验 Nginx 配置"
+	nginx_validate || die "Nginx 配置校验失败。"
+fi
 log "正在校验 fail2ban 配置"
 fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
 verify_fail2ban_jails config
@@ -1193,10 +1709,22 @@ log "正在启用 AbuseGuard 防火墙并设置开机恢复"
 log "正在应用原生白名单/情报策略"
 "$ENGINE_BIN" policy-apply || die "原生白名单/情报策略应用失败，安装未完成。请检查上方错误后重试。"
 log "正在启用并启动服务"
-# Prefer a non-disruptive reload, but restart when the existing Caddy has its
-# admin API disabled and therefore cannot accept `caddy reload`.
-systemctl enable caddy >/dev/null 2>&1 || true
-systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy || die "caddy 启动失败（查看：journalctl -u caddy）"
+if [ "$PROXY_MODE" = caddy ]; then
+	# Prefer a non-disruptive reload, but restart when the existing Caddy has
+	# its admin API disabled and therefore cannot accept `caddy reload`.
+	systemctl enable caddy >/dev/null 2>&1 || true
+	systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy || die "caddy 启动失败（查看：journalctl -u caddy）"
+else
+	if systemctl is-active --quiet nginx; then
+		nginx_reload || die "Nginx 重载失败（查看：journalctl -u nginx）；安装未完成。"
+	else
+		systemctl start nginx || die "nginx 启动失败（查看：journalctl -u nginx）"
+	fi
+	systemctl is-active --quiet nginx || die "nginx 未处于运行状态；安装未完成。"
+	# Enable only after a successful start, so a failed install does not leave
+	# an autostart policy behind.
+	systemctl enable nginx >/dev/null 2>&1 || warn "警告：无法让 nginx 开机自启。"
+fi
 systemctl enable fail2ban >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
 systemctl restart fail2ban || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
@@ -1225,6 +1753,7 @@ systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer
 log "AbuseGuard 安装完成。"
 log "已启用 SSH 防护；Web、SSH 和手动封禁共用白名单，并按源 IP 拦截所有端口。"
 log "原生白名单/情报策略已应用；外部修改白名单后运行：sudo ag --policy-apply"
+if [ "$PROXY_MODE" = caddy ]; then
 cat <<EOF
 
   文件位置：
@@ -1241,6 +1770,31 @@ cat <<EOF
 否则都是公开的。安装器自带的自检站点只绑定 127.0.0.1。
 
 EOF
+else
+	nginx_token_state="未设置（添加站点前请在 ag 中设置 Cloudflare token）"
+	if nginx_token_is_set; then
+		nginx_token_state="已设置（$AG_NGINX_CF_CREDENTIALS，root:root 0600）"
+	fi
+cat <<EOF
+
+  文件位置：
+    Nginx 主配置: $NGINX_HTTP_CONF
+    受保护站点:   $NGINX_SITES_AVAILABLE/abuseguard-<域名>.conf
+    白名单:       $CONF_DIR/whitelist
+    配置:         $CONF_DIR/config.json
+    情报快照:     $CONF_DIR/intel.nft（开机恢复）
+    访问日志:     $NGINX_ACCESS_LOG
+    Cloudflare:   $nginx_token_state
+
+  在 ag 面板中添加受保护站点；证书通过 Cloudflare DNS-01 自动签发。
+  手动重载：sudo systemctl reload nginx
+  安装器自带的自检站点只绑定 127.0.0.1:8080，不开放 80 端口。
+
+安全提示：Nginx 本身不提供鉴权。凡是你对外暴露的站点，除非自行加鉴权，
+否则都是公开的。
+
+EOF
+fi
 
 # On an interactive terminal, drop straight into the control panel; otherwise
 # just leave the summary above and tell the user how to open it.

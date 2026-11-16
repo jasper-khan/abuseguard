@@ -3,14 +3,16 @@
 ## Goals
 
 - Ban abusive / known-bad IPs that connect directly to the origin at the firewall, with minimal moving parts.
+- Support Caddy or the distro Nginx as the reverse proxy, chosen once at first install and fixed for the installation's lifetime.
 - Optional, privacy-safe AbuseIPDB auto-reporting.
 - Fail-safe by default: never ban a whitelisted IP; prefer "do nothing" over a wrong ban; keep last-good data on any fetch failure.
 - Debian/Ubuntu, amd64/arm64, systemd.
 
 ## Components
 
-- **Caddy** (with `caddy-dns/cloudflare`) — the reverse proxy. The `(abuseguard)` snippet tags requests and writes a privacy-trimmed JSON access log.
-- **fail2ban** — watches the log, counts hits, and enforces behavioural bans with the `nftables` action, using a generated per-jail `ignoreip` from AbuseGuard's allowlist plus each jail's preserved native entries, and the report-queue action on the probe and SSH jails.
+- **Reverse proxy backend** — either a hardened Caddy (with `caddy-dns/cloudflare`) or the distro Nginx plus Certbot/`certbot-dns-cloudflare`. The backend tags requests and writes the same privacy-trimmed JSON schema; everything below is shared.
+- **Nginx runtime helper** (`/usr/local/libexec/abuseguard-nginx.sh`, Nginx mode only) — a source-only Bash library that owns managed site files, DNS-01 issuance/renewal wiring, the Cloudflare trust include, full-config validation and reload. It is never dispatched as a program.
+- **fail2ban** — watches the backend's log, counts hits, and enforces behavioural bans with the `nftables` action, using a generated per-jail `ignoreip` from AbuseGuard's allowlist plus each jail's preserved native entries, and the report-queue action on the probe and SSH jails.
 - **engine** (`/usr/local/libexec/caddy-abuseguard`) — a small stdlib-only Go binary. It validates the allowlist/feed, syncs the feed, flushes the report queue, and hosts the root-only `policy-apply` subcommand. Sync, report and enqueue stay unprivileged; only `policy-apply` touches nftables/fail2ban.
 - **root policy applier** (`caddy-abuseguard policy-apply`; run by the `caddy-abuseguard-policy.service` oneshot) — validates the whitelist and feed in-process under a root-owned lock, applies the independent intel table in one nft transaction, generates the fail2ban `ignoreip`, and writes the root-owned boot snapshot.
 - **systemd units** — `caddy-abuseguard-sync.timer` (6h) runs the unprivileged sync command under a root oneshot that invokes the applier afterwards; `caddy-abuseguard-report.timer` flushes the report queue; `caddy-abuseguard-policy.service` restores the intel policy at boot.
@@ -20,20 +22,34 @@ Installation and updates apply the host input firewall through the panel's nonin
 
 As specified by the [nftables verdict semantics](https://www.netfilter.org/projects/nftables/manpage.html), an accept in the port table cannot override a drop in another base chain. Applying or editing the firewall therefore rejects competing nftables input chains containing rules or a default-drop policy, except the managed table and Fail2Ban's `f2b-table`. Empty accepting input chains and forwarding chains are left alone. Cloud firewalls and forwarded/container traffic remain outside this manager's control.
 
+## Backend selection and immutability
+
+The installer records the chosen backend in root-owned `/etc/caddy-abuseguard/web-server`, whose content is exactly `caddy` or `nginx`. It is read as data, never sourced, and strict enum validation rejects anything else. The marker lives in the root-owned config directory rather than the `abuseguard`-writable state directory, so unprivileged code cannot change the package/cleanup decisions derived from it.
+
+A fresh interactive install offers Caddy (default) or Nginx. A fresh non-interactive install defaults to Caddy unless `--proxy=nginx` is passed. `--proxy=caddy|nginx` may appear in either order with `--from-source`; unknown arguments fail. Existing installations never re-read the flag: updates use the recorded value, and an explicitly supplied different `--proxy` is rejected before packages are installed or host state changes. A legacy AbuseGuard+Caddy installation is recognised as Caddy only when its manifest exists and does not record a backend; a missing manifest, corrupt record, or ambiguous state aborts rather than silently installing the other backend. There is no switch or migration mode, and the installer refuses to proceed when the other proxy's binary/package/unit is present (even inactive), so the two backends are never co-installed.
+
 ## Canonical Caddy layout
 
 The main `/etc/caddy/Caddyfile` contains global settings and imports the shared `/etc/caddy/abuseguard.caddy` snippet plus `/etc/caddy/sites/*.caddy`. Every protected site lives in its own `/etc/caddy/sites/<domain>.caddy` file and uses `import abuseguard`.
 
 During install or update, protected single-domain site blocks found in the main Caddyfile are moved to that canonical layout. Legacy inline AbuseGuard log/probe directives are replaced by the shared import while the rest of each site block (TLS, matchers, routes, and upstreams) is preserved. The candidate main file and migrated site files are installed only if the complete Caddy configuration validates; an ambiguous protected block or an existing target filename aborts the migration instead of leaving two configuration layouts active.
 
+## Canonical Nginx layout
+
+Nginx mode uses the distro service and standard include directories. `/etc/nginx/conf.d/abuseguard.conf` holds only project-owned HTTP-level definitions: the `abuseguard_json` log format, the WebSocket upgrade map, and the case-insensitive probe-path map (Caddy's matcher is case-insensitive too). The Cloudflare trust snippet lives at `/etc/nginx/snippets/abuseguard-cloudflare.conf`; it contains validated `set_real_ip_from` lines from official IPv4/IPv6 ranges plus `real_ip_header CF-Connecting-IP` and `real_ip_recursive off`, so a spoofed header from any other source is ignored. The loopback self-test is `/etc/nginx/conf.d/zz-abuseguard-selftest.conf` on `127.0.0.1:<selftest port>`; it sorts after the shared log-format file under Debian/Ubuntu's `include /etc/nginx/conf.d/*.conf`.
+
+Each protected site is `/etc/nginx/sites-available/abuseguard-<domain>.conf` with an enabled symlink in `sites-enabled`. The managed file contains only a 443 TLS server (no port 80), a certificate from the `abuseguard-<domain>` lineage, the trust include, the privacy log, and a plain HTTP/1.1 reverse proxy with WebSocket upgrade headers, `proxy_buffering off` and a 1h `proxy_read_timeout` (so streamed/SSE bodies are not delayed and idle WebSockets are not cut at 60s like Nginx's defaults), and no accidental body-size cap. It guards the implicit default-vhost case: an empty `Host`, a `$host` that differs from its domain, or a TLS SNI that differs from its domain (compared case-insensitively as RFC 6066 requires) gets a direct 404 instead of being proxied to the site upstream, matching Caddy's unmatched-host behaviour without a public bootstrap listener. Forwarding preserves the original `Host` (including port), rewrites `X-Real-IP`/`X-Forwarded-For` to the trusted client, and never passes client-supplied XFF. Adding a site requires the root-owned DNS-01 credential; Certbot issues/reuses one lineage per domain. Every add/delete writes only managed files, validates the complete loaded configuration (`nginx -T`, including existing sites), and reloads; any failure restores the previous enabled state and leaves certificate material intact. Delete never revokes certificates or touches other lineages.
+
+Installation does not autostart the packaged port-80 default site: the installer inhibits/restores package autostart safely and disables only the newly created distro default. No public HTTP bootstrap site and no UDP/443/HTTP/3 listener are generated. Renewal uses the system Certbot timer with the DNS-01 authenticator, root-only credentials, and the deploy hook `/usr/local/libexec/abuseguard-nginx-deploy`, which runs `nginx -t`, reloads Nginx, and confirms a new worker generation actually took over; a reload that did not apply fails the renewal deployment instead of claiming success.
+
 ## Request → ban flow
 
-1. A request hits a site with `import abuseguard`. Caddy appends `caddy_abuseguard_site=protected`, and if the path looks like a scan, `caddy_abuseguard_probe=web-probe`, then logs `{ts, client_ip, proto, ...tags}`.
+1. A request hits a protected site. The backend marks it `caddy_abuseguard_site=protected`, and if the path looks like a scan, `caddy_abuseguard_probe=web-probe`, then logs `{ts, client_ip, proto, ...tags}`. The tag/field names are shared so the fail2ban filters are identical for Caddy and Nginx.
 2. fail2ban filters match on those tags (order-independent JSON lookaheads).
 3. On enough hits within the window, the jail's `caddy-abuseguard-drop` action drops direct-origin traffic from that source IP on all ports and protocols for 90 days. It inherits Fail2Ban's nftables action with no protocol/port matcher. Independent per-jail address sets prevent an unban in one jail from undoing another jail's active ban.
 4. The probe jails additionally run `enqueue`, appending the offender to the report queue. The rate jail remains a local firewall ban only, and is also where panel manual bans land, so they are never reported.
 
-The installer enables `[sshd]`, using the same global ban action and generated allowlist as the Web jails, plus the queue action. It keeps the system's SSH log/backend and detection thresholds, and sets the ban time to 90 days. Caddy's JSON `datepattern` is scoped to the three Caddy jails so it cannot replace SSH system-log date detection. A brute-force ban queues only the IP, failure count, effective find window, `ssh-bruteforce` profile, and timestamp; raw authentication matches and usernames never enter the report queue.
+The installer enables `[sshd]`, using the same global ban action and generated allowlist as the Web jails, plus the queue action. It keeps the system's SSH log/backend and detection thresholds, and sets the ban time to 90 days. The backend JSON `datepattern` is scoped to the three Web jails so it cannot replace SSH system-log date detection. A brute-force ban queues only the IP, failure count, effective find window, `ssh-bruteforce` profile, and timestamp; raw authentication matches and usernames never enter the report queue.
 
 Threat-intel enforcement never waits for a request. A separate path syncs the feed, validates it, and applies it to an independent kernel set, so a listed source is dropped at the first packet without a fail2ban filter or per-request ignore lookup.
 
@@ -62,7 +78,7 @@ The intel table is independent of the port table and exempted from the competing
 
 | Profile | Evidence source | AbuseIPDB categories | Public comment fields |
 | --- | --- | --- | --- |
-| `web-probe` | five tagged sensitive-path requests within the Caddy probe jail window | `21` | standardized behavior, count, window, HTTP protocol |
+| `web-probe` | five tagged sensitive-path requests within the web probe jail window | `21` | standardized behavior, count, window, HTTP protocol |
 | `ssh-bruteforce` | a ban event from the enabled fail2ban `sshd` jail | `18,22` | standardized behavior, count, window |
 
 Request-rate bans, threat-intel hits, and manual bans never enqueue reports. One short filesystem lock atomically rotates `queue.jsonl` into a processing batch; new `enqueue` calls then write a fresh queue while the batch is sent. A separate reporter lock prevents two flushers from processing the same batch. The reporter strictly loads the whitelist and its dedupe/daily state before sending, skips whitelisted IPs, and honors `daily_report_cap`. After each confirmed 2xx response, one atomic checkpoint records the remaining batch, dedupe state, and daily usage; an interrupted run replays that checkpoint before sending again, so a confirmed report is not repeated. AbuseIPDB's duplicate window is per IP rather than per category: a later queued event for the same IP is retained and retried after `dedupe_window` instead of being discarded. Network failures and responses that end before an HTTP status is known remain queued because the remote result is uncertain. 401/403, 429, 5xx, and unexpected statuses likewise keep the unprocessed batch and return failure. Record-specific 400/422 responses and malformed queue lines are logged and discarded so later valid records can proceed; the run still returns failure so systemd exposes the problem.
@@ -73,33 +89,37 @@ also rolls over at UTC midnight during a long-running batch.
 
 ## Privacy
 
-The Caddy access log deletes headers, TLS, host, remote_ip/port, method, uri and resp_headers — keeping essentially `ts`, `client_ip`, `proto`, and the abuseguard tags. Fail2ban converts a matched web path to the generic `web-probe` profile before queuing, so the URI cannot reach the reporter. The SSH action likewise passes no raw auth-log match or username. Reports carry only the IP, fixed categories, timestamp, and an objective comment; comments never name AbuseGuard or include hostnames, paths, query strings, headers, bodies, user agents, usernames, or raw logs.
+Both backends emit the same minimal JSON. Caddy's format filter deletes headers, TLS, host, remote_ip/port, method, uri and resp_headers; Nginx uses an explicit `log_format` containing only `ts`, `client_ip`, `proto`, and the two AbuseGuard tags. Neither logs the URI, query, Host, headers, body, or forwarded identity. The probe detector turns only a path match into the generic `web-probe` tag, so the URI cannot reach the reporter. The SSH action likewise passes no raw auth-log match or username. Reports carry only the IP, fixed categories, timestamp, and an objective comment; comments never name AbuseGuard or include hostnames, paths, query strings, headers, bodies, user agents, usernames, or raw logs.
 
 ## Trust boundary
 
-Bans/reports target Caddy's `client_ip`, so Caddy must trust the edge proxy (`trusted_proxies` + `trusted_proxies_strict`) to log and report the correct visitor. The installer pre-fills the current Cloudflare ranges plus loopback when it generates a Caddyfile. Get this wrong and fail2ban acts on the proxy IP instead of the visitor. If the live Cloudflare-range fetch fails, the installer falls back to a bundled snapshot (`assets/caddy/cloudflare-ips.fallback`).
+Bans/reports target the reverse proxy's `client_ip`, so the proxy must trust the edge correctly. Caddy uses `trusted_proxies` + `trusted_proxies_strict`; the installer pre-fills the current Cloudflare ranges plus loopback. Nginx trusts `CF-Connecting-IP` only when the connection peer is inside a validated official Cloudflare IPv4/IPv6 range (`set_real_ip_from` plus `real_ip_recursive off`); a spoofed header from any other source is ignored and the real peer address is logged. Both backends reuse the same bundled fallback snapshot (`assets/caddy/cloudflare-ips.fallback`) when the live range fetch fails, so trust never collapses to loopback-only or becomes arbitrary. Get this wrong and fail2ban acts on the proxy IP instead of the visitor.
 
-Native intel enforcement matches the packet source address, not Caddy's `client_ip`. Behind a CDN or own proxy those differ: proxied visitor traffic arrives from the proxy edge, so feed blocking cannot act on it, and a behavioural ban decided from `client_ip` cannot stop it at the origin either. Native enforcement therefore protects direct-origin traffic only; it is not a defence against unknown-IP or distributed CC.
+Native intel enforcement matches the packet source address, not the proxy's `client_ip`. Behind a CDN or own proxy those differ: proxied visitor traffic arrives from the proxy edge, so feed blocking cannot act on it, and a behavioural ban decided from `client_ip` cannot stop it at the origin either. Native enforcement therefore protects direct-origin traffic only; it is not a defence against unknown-IP or distributed CC.
 
 ## Users & permissions
 
-- `caddy` runs the proxy and owns the log dir.
+- `caddy` runs Caddy and owns its log dir; in Nginx mode the distro `nginx` user (`www-data`) runs workers, and the protected log is `0640 www-data:adm` when those accounts exist.
 - `abuseguard` runs the engine (report / sync / enqueue) with no shell and no firewall rights; root runs only `policy-apply` (or the legacy exports during an upgrade).
 - fail2ban (root) owns behavioural nftables bans; only the engine's root-only `policy-apply` subcommand replaces the intel table and boot snapshot. Ordinary engine commands never touch the firewall.
-- The config dir is `root:abuseguard 0750`; secrets are `0640`.
-- Caddy, both engine timers, and the root policy subcommand run under hardened systemd units (`NoNewPrivileges`, `ProtectSystem=strict` with explicit `ReadWritePaths`, restricted address families/capabilities, `SystemCallFilter=@system-service`).
+- The config dir is `root:abuseguard 0750`; secrets are `0640`, except the Nginx DNS-01 credential, which is `root:root 0600`.
+- The selected backend is recorded in root-owned `/etc/caddy-abuseguard/web-server`; it is data, never executed, and unprivileged state cannot alter it.
+- Caddy, both engine timers, and the root policy subcommand run under hardened systemd units (`NoNewPrivileges`, `ProtectSystem=strict` with explicit `ReadWritePaths`, restricted address families/capabilities, `SystemCallFilter=@system-service`). Nginx mode uses the distro-provided `nginx.service` without replacing it; the root-owned runtime helper and deploy hook are ordinary files sourced/executed by the installer, panel, and Certbot.
 
 ## Supply chain
 
-Prebuilt binaries (engine + cloudflare-enabled Caddy) ship from the repo's GitHub release. Because downloads may traverse third-party GitHub proxies (the mainland-China fallback), `install.sh` verifies each binary against the release `SHA256SUMS.txt`, fetching that sums file over every available route (direct GitHub first, then the mirror chain, with retries). Verification is mandatory: if the sums cannot be obtained, or a checksum is missing or mismatched, the install aborts rather than proceeding unverified. Each download is staged beside its destination; checksum, executable mode, and a `version` startup check must pass before an atomic replacement, so a failed update keeps the installed binary. The sums are fetched lazily, only when a binary is actually downloaded. This defeats a passive/caching mirror; a single forced mirror carrying both the sums and the binaries is outside the guarantee. `--from-source` and a caller-supplied `ABUSEGUARD_ENGINE_BIN` skip verification (locally trusted).
+Caddy-mode prebuilt binaries (engine + cloudflare-enabled Caddy) ship from the repo's GitHub release. Because downloads may traverse third-party GitHub proxies (the mainland-China fallback), `install.sh` verifies each binary against the release `SHA256SUMS.txt`, fetching that sums file over every available route (direct GitHub first, then the mirror chain, with retries). Verification is mandatory: if the sums cannot be obtained, or a checksum is missing or mismatched, the install aborts rather than proceeding unverified. Each download is staged beside its destination; checksum, executable mode, and a `version` startup check must pass before an atomic replacement, so a failed update keeps the installed binary. The sums are fetched lazily, only when a binary is actually …
 
 Default installs and panel updates resolve the latest published release once, then bootstrap from that tag and fetch its assets and checksums using tag-specific URLs. The staged engine must report the expected version before replacing the installed binary. Explicit local source/preset-binary installs keep using the local checkout.
 
-An engine is built only for a version tag and remains immutable under that release. Scheduled/manual refreshes download those existing engine assets, rebuild only Caddy against upstream, and regenerate the combined checksums plus metadata while preserving engine provenance.
+An engine is built only for a version tag and remains immutable under that release. Scheduled/manual refreshes download those existing engine assets, rebuild only Caddy against upstream, and regenerate the combined checksums plus metadata while preserving engine provenance. Nginx mode consumes no release binaries beyond the same engine: it installs distro `nginx`, `certbot`, and `python3-certbot-dns-cloudflare`, records whether each package pre-existed, and never runs a broad autoremove or removes shared software on purge.
 
 ## Non-goals
 
 - No web UI, no daemon, no database.
+- No backend switching or migration after first install; uninstall and reinstall instead.
+- No HTTP-01/standalone/webroot issuance or public port-80 bootstrap site in Nginx mode; DNS-01 only.
+- No HTTP/3/QUIC listener in either mode.
 - No IPv6 threat intel (the list is IPv4); IPv6 clients can still be rate/probe banned.
 - No authentication for your sites — that is your application's job.
 - No blocking of proxied/CDN visitor traffic by source: kernel enforcement only sees the packet source reaching the origin, so it cannot act on visitors hidden behind an edge proxy.

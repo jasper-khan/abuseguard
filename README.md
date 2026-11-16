@@ -2,14 +2,14 @@
 
 [English](README.en.md) | **简体中文**
 
-AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
+AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 或 Nginx 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
 
-一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）、nftables 入站防火墙、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `ag` 控制面板。
+一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）或发行版 Nginx（首次安装二选一，之后不可切换）、nftables 入站防火墙、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `ag` 控制面板。
 
 ## 工作原理
 
 ```
-访客 ─▶ Caddy（受保护站点：`import abuseguard`）
+访客 ─▶ Caddy / Nginx（受保护站点）
              │  写入隐私精简的 JSON 访问日志
              ▼
          fail2ban ──(速率/探测/SSH 行为)──▶ nftables 按源 IP DROP 全部端口/协议
@@ -20,7 +20,7 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
                                                    └─ 白名单例外只在情报链 return
 ```
 
-- Caddy 为每个到受保护站点的请求打标签，只记录 fail2ban 所需的字段（客户端 IP、协议、标签）——不记录路径、主机名、请求头或查询串。
+- 反向代理（Caddy 或 Nginx）为每个到受保护站点的请求打标签，只记录 fail2ban 所需的字段（客户端 IP、协议、标签）——不记录路径、主机名、请求头或查询串。
 - 安装时启用三个 Web 行为 jail 和 `sshd`，共用同一份白名单。任一 jail 封禁某个 IP 后，nftables 会拦截该源 IP 到本机所有端口、所有协议的流量，包括 SSH。
 - 威胁情报不再经过 fail2ban：同步后由根权限应用把整份名单装进独立的内核集合，名单内的源 IP 在建立连接前即被丢弃；集合独立于端口防火墙表，修改端口不会重建它。
 - 白名单只有一份：面板改动会同时更新 fail2ban 的 `ignoreip` 和 nft 情报例外。手工编辑文件后需要显式应用，见「威胁情报」。
@@ -29,7 +29,7 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
 ## 环境要求
 
 - Debian 11/12 或 Ubuntu 20.04+（amd64 或 arm64），需 root（sudo）。
-- 所有 nftables 封禁都按“到达本机的源 IP”执行，因此只对客户端直接连接源站的站点有效（包括 Cloudflare DNS-only）。经 CDN 或自建代理转发时，内核看到的源地址是代理的边缘 IP，不是访客 IP：威胁情报拦截无法作用于这类被代理的请求；行为 jail 依据 Caddy 记录的 `client_ip` 决定封谁，但同样无法阻止经代理到达的访客流量。本工具不解决未知 IP 或分布式 CC。
+- 所有 nftables 封禁都按“到达本机的源 IP”执行，因此只对客户端直接连接源站的站点有效（包括 Cloudflare DNS-only）。经 CDN 或自建代理转发时，内核看到的源地址是代理的边缘 IP，不是访客 IP：威胁情报拦截无法作用于这类被代理的请求；行为 jail 依据反代记录的 `client_ip` 决定封谁，但同样无法阻止经代理到达的访客流量。本工具不解决未知 IP 或分布式 CC。
 
 ## 安装
 
@@ -46,13 +46,14 @@ git clone https://github.com/jasper-khan/abuseguard
 cd abuseguard
 sudo ./install.sh                 # 从最新 release 下载预编译引擎
 sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go）
+sudo ./install.sh --proxy=nginx   # 首次安装选择 Nginx（可与 --from-source 任意顺序组合）
 ```
 
 默认安装和面板更新会先确定 GitHub 最新已发布 release，再使用该版本的源码、配置和引擎；从克隆目录运行默认安装也遵循此规则。引擎在临时文件中通过校验和、启动及目标版本检查后才替换旧文件。`--from-source` 和 `ABUSEGUARD_ENGINE_BIN` 仍使用本地源码及配置。
 
-安装器是幂等的：已有的 config、whitelist、key 和无关 Caddy 配置都会保留。旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；主配置、已有站点和防护片段先在候选副本上处理，完整配置通过校验后才替换正式文件，替换失败会回滚。
+安装器是幂等的：已有的 config、whitelist、key 和无关的反代配置都会保留。Caddy 模式下，旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；主配置、已有站点和防护片段先在候选副本上处理，完整配置通过校验后才替换正式文件，替换失败会回滚。Nginx 模式下不改动既有站点文件，安装/添加/删除站点都先对包含现有站点与候选文件的完整配置做 `nginx -t` 检查。
 
-安装器会自动补齐 `fail2ban`、`rsyslog`、`nftables` 等运行依赖；`rsyslog` 为 Debian/Ubuntu 默认的 `sshd` jail 提供 `/var/log/auth.log`，AbuseGuard 的网站防护仍使用独立的 Caddy JSON 日志。已有 Caddy 服务中的 Cloudflare token 会安全写入 AbuseGuard 的 `/etc/caddy/.env`，不会在终端显示。
+安装器会自动补齐 `fail2ban`、`rsyslog`、`nftables` 等运行依赖；`rsyslog` 为 Debian/Ubuntu 默认的 `sshd` jail 提供 `/var/log/auth.log`，AbuseGuard 的网站防护仍使用独立的隐私精简 JSON 日志。已有 Caddy 服务中的 Cloudflare token 会安全写入 `/etc/caddy/.env`，Nginx 模式则写入 `/etc/caddy-abuseguard/cloudflare.ini`；两者都不会在终端显示。
 
 首次安装会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，AbuseIPDB key 输入时不会回显；两者都能之后随时在面板里设置。更新时会保留现有密钥、跳过这些询问，并在成功后自动重新加载面板。装完终端会醒目显示进面板的命令：
 
@@ -63,6 +64,30 @@ ag
 > 在无终端的环境（CI / nohup / 管道）里，安装会自动跳过询问；也可显式设 `ABUSEGUARD_NONINTERACTIVE=1` 强制跳过。
 >
 > 设置 `ABUSEGUARD_REPO=you/abuseguard` 可从你自己的 fork 安装。
+
+### 反向代理后端：Caddy 或 Nginx
+
+首次安装必须选定一个反向代理后端；选择会写入 root 所有的 `/etc/caddy-abuseguard/web-server`（内容严格为 `caddy` 或 `nginx`，只读取、不 source），并在该安装的整个生命周期内固定：
+
+- 交互安装会询问使用 Caddy（默认，直接回车）还是 Nginx。非交互安装默认 Caddy；要装 Nginx 请显式传 `--proxy=nginx`。
+- `--proxy=caddy|nginx` 可与 `--from-source` 以任意顺序组合；未知参数或非法值直接报错退出。
+- 更新不需要、也不读取该参数，始终沿用已记录的后端；若显式传入的 `--proxy` 与已记录值不同，安装会在安装软件包或改动主机之前报错。只有在安装清单存在但清单未记录后端的旧版 AbuseGuard+Caddy 安装才按 Caddy 识别；清单缺失、记录损坏或状态含糊时安装会中止，不会静默安装另一个后端。
+- 不提供在 Caddy 与 Nginx 之间切换或迁移的功能。要更换后端只能卸载后重装。
+- 安装拒绝与另一种反向代理共存：目标机器上只要检测到另一后端的二进制/软件包/服务（即使未运行），安装会在改动主机前中止；请先手动移除该后端。
+
+两种后端共用同一 Go 引擎、fail2ban jail/filter/action 标识、nftables 白名单与情报、上报队列和 `ag` 面板；区别只在反向代理、TLS 签发与访问日志来源。
+
+Caddy 后端保留原有行为：加固的 `/usr/local/bin/caddy`（内置 `caddy-dns/cloudflare`）、`/etc/caddy` 布局、DNS-01 与 `import abuseguard`。
+
+Nginx 后端使用发行版 `nginx` 服务、`certbot` 与 `certbot-dns-cloudflare`，不替换或新增 Nginx systemd 单元。安装前会预检发行版 Nginx 是否编译了 `http_ssl_module`/`http_v2_module`，并确认 Cloudflare DNS 插件可导入；不满足时在改动站点前中止：
+
+- 证书只用 DNS-01（`certbot certonly --dns-cloudflare`），每个域一个 `--cert-name abuseguard-<域名>`；不使用 `--nginx`/`--standalone`/webroot/HTTP-01，也不监听或开放 80/tcp。续期沿用系统 certbot 定时器，并保存认证器、凭据与部署钩子；证书部署成功后由 `/usr/local/libexec/abuseguard-nginx-deploy` 执行 `nginx -t`、reload，并确认新 worker 真正接管（重载未生效会报告失败，不会假装成功）。
+- Cloudflare API token 保存在 root:root 0600 的 `/etc/caddy-abuseguard/cloudflare.ini`，不会打印、不会 source，也不随保存动作重启 Nginx。安装时可跳过 token，但之后添加站点会明确失败，直到在面板中设置；没有 acme.sh 或 HTTP-01 回退。
+- 受保护站点为 `/etc/nginx/sites-available/abuseguard-<域名>.conf`，软链到 `sites-enabled`；HTTP 级共享配置在 `/etc/nginx/conf.d/abuseguard.conf`。部署钩子与共享片段由项目所有，其他 Nginx 配置不受影响。
+- 访问日志为 `/var/log/nginx/abuseguard-access.json`：最小 JSON，只保留 `ts`、`client_ip`、`proto` 和 AbuseGuard 标签，不记录 URI、查询串、Host、请求头或正文；受保护站点不再额外写默认 combined 访问日志。
+- 只信任来自官方 Cloudflare IPv4/IPv6 网段的 `CF-Connecting-IP`；其他来源伪造的同名头会被忽略，日志使用归一化后的可信客户端地址。Cloudflare 网段拉取失败时使用内置快照，绝不信任所有来源。反代保留原始 `Host`（含端口），`X-Real-IP`/`X-Forwarded-For` 重写为可信客户端地址，不转发客户端伪造的 XFF；不是受管域名的 Host/SNI 直接返回 404，不会落到其他站点上游。
+- 公网只监听 443/tcp（HTTP/1.1 与 HTTP/2），不启用 HTTP/3/QUIC。由安装器新装 Nginx 时会抑制软件包自启并只删除本次新建的发行版默认站点；已有的 Nginx 站点保持不动。AbuseGuard 自己不生成 `listen 80`，自检站点只绑定回环地址。
+- 证书在 Cloudflare 灰云（DNS-only）和橙云（代理）下都可用；橙云时 Cloudflare 的 SSL/TLS 模式需为 Full (strict)。经 CDN 代理的源站 IP 限制问题见「环境要求」。
 
 ### 网络慢 / 大陆镜像
 
@@ -75,13 +100,13 @@ sudo ABUSEGUARD_MIRROR=cn ./install.sh          # 直接走代理链
 sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个代理
 ```
 
-引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建），因此都享受上面的直连→镜像回退，大陆无需额外配置。`ag` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，安装器会自动检测并保留、跳过下载。
+引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建），因此都享受上面的直连→镜像回退，大陆无需额外配置。Nginx 模式只从 release 下载 Go 引擎，Nginx/Certbot 使用发行版软件包，同样受镜像设置影响不大。`ag` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，Caddy 模式安装器会自动检测并保留、跳过下载。
 
 **完整性校验（强制）**：下载的 engine 与 Caddy **必须**通过 release 里 `SHA256SUMS.txt` 的校验。校验文件体积极小，因此会尽力拿到：先直连 GitHub（被限速也能拿到），失败再走整条镜像链，并带重试。**校验不符、或校验文件就是拿不到，都会中止安装**（不会“跳过校验继续装”）；如遇网络问题，请重试或用 `--from-source` 本地编译。诚实说明边界：若你用 `ABUSEGUARD_MIRROR=<prefix>/` 强制单一镜像，校验文件也会走该镜像，此时只能防"被动缓存型"镜像、防不住对该线路的主动篡改。
 
-**Cloudflare IP 段兜底**：生成 Caddyfile 时会拉取 Cloudflare 的 IP 段填入 `trusted_proxies`；若网络受限拉取失败，会退回内置快照（`assets/caddy/cloudflare-ips.fallback`），避免 `trusted_proxies` 只剩回环——那会让 Caddy 把所有访客都当成 Cloudflare 边缘 IP，进而封禁 Cloudflare 自身、导致整站不可用。
+**Cloudflare IP 段兜底**：生成 Caddyfile 的 `trusted_proxies` 或 Nginx 的信任来源配置时会拉取 Cloudflare 的官方 IPv4/IPv6 网段；若网络受限拉取失败，会退回内置快照（`assets/caddy/cloudflare-ips.fallback`），避免信任范围只剩回环或过窄——那会让所有访客都被当成 Cloudflare 边缘 IP（或反之信任伪造头），导致误封或整站不可用。
 
-**已有 Caddy 迁移**：若安装前已有 Caddyfile，安装器会先备份原文件，再把其中可明确识别的“单一公网域名 + `reverse_proxy`”站点完整迁入 `/etc/caddy/sites/<域名>.caddy`，并加入 `import abuseguard`。站点原有的 TLS、路由、请求头和上游配置均保留；全局块、snippet、IP/端口监听及非反代站点仍留在主 Caddyfile。迁移后的完整配置必须通过 Caddy 校验才会生效。
+**已有 Caddy 迁移（仅 Caddy 模式）**：若安装前已有 Caddyfile，安装器会先备份原文件，再把其中可明确识别的“单一公网域名 + `reverse_proxy`”站点完整迁入 `/etc/caddy/sites/<域名>.caddy`，并加入 `import abuseguard`。站点原有的 TLS、路由、请求头和上游配置均保留；全局块、snippet、IP/端口监听及非反代站点仍留在主 Caddyfile。迁移后的完整配置必须通过 Caddy 校验才会生效。Nginx 模式不迁移或改写其他站点，只管理项目自己的 `conf.d/abuseguard.conf`、`abuseguard-<域名>.conf` 和部署钩子。
 
 ## 控制面板
 
@@ -98,9 +123,9 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 | `[5]` 情报与上报 | 情报同步：立即同步（校验后应用内核策略）；AbuseIPDB 上报：发送队列、设置 API Key、开关自动上报 |
 | `[6]` 系统维护 | 运行诊断：近期日志；版本维护：更新；卸载 |
 
-添加站点只需输入域名和上游（本地或公网 IP:端口），面板自动生成受保护的反代配置（`import abuseguard` 和按需 TLS）。白名单支持面板内增删：改动会同时应用到 fail2ban 的 `ignoreip` 与 nft 情报例外，**新增条目会解封它覆盖的行为封禁（含 CIDR 内的地址）**；若该 IP 仍在情报名单中，需要白名单条目才能放行。首页分别显示防火墙状态、情报名单条目数与行为封禁数，不会把整份情报集合打印到终端。
+添加站点只需输入域名和上游（本地或公网 IP:端口），面板按当前后端生成受保护反代配置：Caddy 写 `import abuseguard` 与按需 DNS-01 TLS；Nginx 写 `abuseguard-<域名>.conf`（反代、仅 443/h1/h2、DNS-01 证书名 `abuseguard-<域名>`）。Nginx 模式在写入受管文件后，对包含现有站点与候选文件的完整加载配置执行 `nginx -T` 校验，通过后才 reload；校验或 reload 失败会移除新站点并恢复原有启用状态（证书材料保留），不会留下半启用站点。未设置 Cloudflare token 时，添加站点会明确失败而不会退回 HTTP-01。白名单支持面板内增删：改动会同时应用到 fail2ban 的 `ignoreip` 与 nft 情报例外，**新增条目会解封它覆盖的行为封禁（含 CIDR 内的地址）**；若该 IP 仍在情报名单中，需要白名单条目才能放行。首页分别显示防火墙状态、情报名单条目数与行为封禁数，不会把整份情报集合打印到终端。
 
-更新会在校验前用 `caddy fmt` 规范化主 Caddyfile 和 `/etc/caddy/sites/*.caddy`，并删除 Caddy 明确判定为冗余的精确指令 `header_up X-Forwarded-Host {host}` 或 `header_up X-Forwarded-Host {http.request.host}`；其他反代配置和请求头均保留。
+更新会在校验前用 `caddy fmt` 规范化主 Caddyfile 和 `/etc/caddy/sites/*.caddy`（仅 Caddy 模式），并删除 Caddy 明确判定为冗余的精确指令 `header_up X-Forwarded-Host {host}` 或 `header_up X-Forwarded-Host {http.request.host}`；其他反代配置和请求头均保留。
 
 安装或更新会自动启用 AbuseGuard 防火墙与原生白名单/情报策略，并设置开机恢复，无需另行确认。从旧版本升级时，旧 `caddy-intel`/`sshd-intel` jail 中已有的封禁会重新写入 `caddy-rate-local`，按升级时刻重新计算 90 天（现有 fail2ban API 能读取每个封禁的剩余时长，但正常恢复接口只在恢复时按整 jail 的 bantime 重新计时，无法为每个 IP 恢复原有到期时间），白名单内的地址跳过；旧 jail 会被移除，不再作为仍在运行的别名保留，也不会因此产生新的上报。更新时会把六个旧 jail 设为 idle：检测和 `ignorecommand` 暂停，但已有封禁继续在内核生效；装好新引擎与 jail 后再重启 fail2ban。仅在 idle 不可用时才回退为停止 fail2ban（此时行为封禁会短暂失效，重启后由数据库恢复）。替换引擎前失败会恢复原 jail 配置并继续检测；替换后的任何失败也会恢复旧引擎与旧 jail 配置、重启旧检测并明确告警，不会把检测留在暂停状态；已有内核封禁继续生效。若安装失败，重新运行安装器会继续迁移已保存的旧封禁。fail2ban 的原生 `ignoreip` 按 jail 分别保留，sshd 的豁免不会扩散到 Web jail；修改或删除原生豁免后，下次应用即生效。首次建立配置时开放检测到的所有 SSH 端口、443/tcp 和 443/udp，其余入站端口默认丢弃；80/tcp 不默认开放，需要 HTTP 访问或跳转时可在面板手动放行。已有配置则保留用户开放和关闭的端口，并补齐当前 SSH 端口。保留已建立连接、回环、ICMP（含 IPv6 邻居发现）及 DHCP，出站流量不受限制。面板拒绝关闭当前 SSH 会话端口和唯一的 SSH 端口；关闭其他端口只阻止新连接。
 
@@ -127,7 +152,7 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 三个 Web jail 与 `sshd` 的封禁时长均为 90 天，使用相同的全端口、全协议封禁动作；`sshd` 沿用系统原有的日志来源、后端和检测阈值，未自定义时采用 fail2ban 的默认值。白名单 IP（`/etc/caddy-abuseguard/whitelist`）永不被 AbuseGuard 封禁或上报；手动封禁也检查白名单，只接受单个 IPv4/IPv6 地址；白名单仍支持 CIDR 网段。各 jail 独立记录封禁，某个 jail 解封不会撤销其他 jail 仍有效的封禁；面板解封会遍历所有 jail。情报拦截不经过 jail，命中名单的源 IP 由独立的内核集合直接丢弃（见「威胁情报」）。「敏感路径」= `/.env`、`/.git`、`/phpmyadmin`、`/vendor/phpunit`、`/cgi-bin`（及其子路径）。
 
-首次生成的 Caddy 配置只启用 HTTP/1.1 和 HTTP/2，不监听 HTTP/3，UDP/443 可供其他服务使用。全入口封禁只针对被封禁的源 IP，不占用任何端口。
+首次生成的 Caddy 配置只启用 HTTP/1.1 和 HTTP/2；Nginx 站点只监听 443 并启用 HTTP/1.1 与 HTTP/2。两者都不监听 HTTP/3，UDP/443 可供其他服务使用。全入口封禁只针对被封禁的源 IP，不占用任何端口。
 
 ## 威胁情报
 
@@ -151,6 +176,8 @@ sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个�
 
 ## 接入你的站点
 
+### Caddy 模式
+
 每个受保护站点使用独立文件 `/etc/caddy/sites/<域名>.caddy`，并在站点块里加入 `import abuseguard`：
 
 ```caddyfile
@@ -167,15 +194,22 @@ example.com {
 
 示例里的 Cloudflare token 只用于 DNS-01 证书签发。
 
+### Nginx 模式
+
+推荐用面板「站点与证书」添加：它会为域名签发 `abuseguard-<域名>` 证书，写 `/etc/nginx/sites-available/abuseguard-<域名>.conf` 并软链到 `sites-enabled`；随后对包含现有站点与候选文件的完整加载配置执行 `nginx -T` 校验，通过后才 reload，并确认新 worker 真正接管（监听地址/端口被占用时不会再误报成功），失败会移除新站点并恢复原有启用状态（证书材料保留），不会留下半启用站点。受保护站点关闭了响应缓冲并设置了 1 小时上游读取超时：SSE/流式响应首块不会被缓冲，空闲 WebSocket 也不会像 Nginx 默认那样在 60 秒被切断。受保护站点文件由项目生成，包含共享的日志/标签指令；如需手工调整，改完执行 `sudo nginx -t && sudo systemctl reload nginx`。
+
+续期由系统 certbot 定时器负责：`/etc/letsencrypt/renewal/abuseguard-<域名>.conf` 保存 DNS-01 认证器与凭据引用，`/etc/caddy-abuseguard/cloudflare.ini` 保存 root-only token，`/usr/local/libexec/abuseguard-nginx-deploy` 是部署钩子。只有证书成功部署后才执行 `nginx -t`、reload 并确认新 worker 接管；重载未生效会报告失败，续期失败不会中断现有 HTTPS。
+
+两种模式都只反代 `域名 + IP:端口`，不接受 scheme、HTTPS 上游或通配符域名。
+
 ## 文件位置
 
+两种后端共用：
+
 ```
-/usr/local/bin/caddy                          Caddy（内置 caddy-dns/cloudflare）
 /usr/local/bin/ag                             控制面板
 /usr/local/libexec/caddy-abuseguard           Go 引擎（policy-apply 为根权限子命令）
-/etc/caddy/Caddyfile                          全局配置 + AbuseGuard 导入
-/etc/caddy/abuseguard.caddy                   (abuseguard) 片段
-/etc/caddy/sites/<域名>.caddy                 每个受保护站点一个文件
+/etc/caddy-abuseguard/web-server              已选后端（严格为 caddy 或 nginx，root 所有）
 /etc/caddy-abuseguard/config.json             引擎配置
 /etc/caddy-abuseguard/whitelist               永不封禁名单
 /etc/caddy-abuseguard/firewall.nft            端口防火墙配置 + 开机恢复
@@ -186,7 +220,35 @@ example.com {
 /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local  启用 SSH 防护和上报
 /etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local 由白名单生成的原生 ignoreip
 /var/lib/caddy-abuseguard/                     情报名单 + 上报队列/状态
+```
+
+Caddy 模式：
+
+```
+/usr/local/bin/caddy                          Caddy（内置 caddy-dns/cloudflare）
+/etc/caddy/Caddyfile                          全局配置 + AbuseGuard 导入
+/etc/caddy/abuseguard.caddy                   (abuseguard) 片段
+/etc/caddy/sites/<域名>.caddy                 每个受保护站点一个文件
+/etc/caddy/.env                               CF_API_TOKEN（0640）
 /var/log/caddy/abuseguard-access.json         隐私精简的访问日志
+```
+
+Nginx 模式：
+
+```
+/etc/nginx/conf.d/abuseguard.conf             HTTP 级共享配置（日志、标签、信任来源）
+/etc/nginx/conf.d/zz-abuseguard-selftest.conf 仅回环的自检站点
+/etc/nginx/snippets/abuseguard-cloudflare.conf 仅官方 CF 网段的 real_ip 信任配置
+/etc/nginx/sites-available/abuseguard-<域名>.conf   每个受保护站点一个文件
+/etc/nginx/sites-enabled/abuseguard-<域名>.conf     指向 sites-available 的软链
+/usr/local/libexec/abuseguard-nginx.sh        根所有的 Nginx 运行时助手（只 source）
+/usr/local/libexec/abuseguard-nginx-deploy    证书部署钩子（nginx -t 后 reload）
+/etc/logrotate.d/abuseguard-nginx             访问日志轮转与重开
+/etc/caddy-abuseguard/package-ownership       安装前的 Nginx/Certbot 软件包归属（root 所有）
+/etc/caddy-abuseguard/cloudflare.ini          DNS-01 凭据（root:root 0600）
+/etc/letsencrypt/live/abuseguard-<域名>/      证书（每域一个 lineage）
+/etc/letsencrypt/renewal/abuseguard-<域名>.conf  certbot 续期配置
+/var/log/nginx/abuseguard-access.json         隐私精简的访问日志
 ```
 
 ## 更新 / 卸载
@@ -194,34 +256,38 @@ example.com {
 ```bash
 ag                               # 面板：[6] 系统维护 → [2] 更新 / [3] 卸载
 sudo ./uninstall.sh              # 交互选择：保守 / 彻底
-sudo ./uninstall.sh --conservative   # 保守：删 AbuseGuard，保留 Caddy 和你的反代
+sudo ./uninstall.sh --conservative   # 保守：删 AbuseGuard，保留反代和你的站点
 sudo ./uninstall.sh --purge          # 彻底：按安装清单删 AbuseGuard 装的一切
 sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何改动
 ```
 
 面板修改过的 SSH 端口不会随卸载回滚（配置保留在 `/etc/ssh/sshd_config.d/99-abuseguard-port.conf`），避免恢复默认端口导致失联；如需改回，重装后在「SSH 与登录」中设置即可。
 
-卸载**对称于安装**：安装时会记录一份清单（哪些是 AbuseGuard 新建的、哪些你原本就有）。
+卸载**对称于安装**：安装时会记录一份清单（哪些是 AbuseGuard 新建的、哪些你原本就有）。后端选择同样不可变，卸载不会把安装切换到另一个后端。
 
-- **保守卸载**：只删 AbuseGuard 组件，并从 Caddyfile 摘掉 AbuseGuard 的引入（`import abuseguard`、snippet、自检站点），**保留你原有的 Caddy、账户和反代配置**。
-- **彻底卸载**：再按清单删 AbuseGuard 安装的 Caddy/账户/配置 —— 但**装之前你已有的一律不动**（原本就有 Caddy 就不会删 Caddy）。清单丢失时自动降级为最保守处理。
-- `/etc/caddy/sites` 中由 AbuseGuard 管理的站点，卸载时可选「保留反代、只去防护」或「一起删」；以后重新安装时，保留的站点会自动恢复 `import abuseguard` 防护。原有 Caddyfile 在安装时已备份为 `Caddyfile.pre-abuseguard`。
+- **保守卸载**：只删 AbuseGuard 组件。Caddy 模式从 Caddyfile 摘掉 `import abuseguard`、snippet 和自检站点；Nginx 模式在保留站点时（默认）保留受管站点、`conf.d/abuseguard.conf`、证书、`cloudflare.ini`、续期配置与部署钩子，只移除自检和核心组件；选择删除站点时才移除受管站点、项目 HTTP 配置/信任片段/logrotate、对应证书 lineage 和凭据，不碰其他 Nginx 配置。两种模式都**保留反向代理本身、账户和你的反代配置**。
+- Nginx 模式下，保守卸载会保留证书、`/etc/caddy-abuseguard/cloudflare.ini`、续期所需的 Nginx 片段、certbot 续期配置与部署钩子，因此移除核心后 HTTPS 与自动续期继续工作。
+- **彻底卸载**：再按清单删 AbuseGuard 安装的 Caddy/Nginx 包、账户和配置 —— 但**装之前你已有的一律不动**（原本就有 Caddy 或 Nginx 就不会删对应包）。Nginx 模式只删除项目创建且不再被引用的站点、证书 lineage、凭据和配置；若选择保留站点，Nginx/Certbot 软件包、证书、凭据与续期配置都会保留。绝不执行 `rm -rf /etc/nginx`、`rm -rf /etc/letsencrypt`、全局 `apt autoremove` 或关闭其他服务的 certbot 定时器。清单丢失时自动降级为最保守处理。
+- 受管站点卸载时可选「保留反代、只去防护」或「一起删」；保留下来的 Nginx 站点若仍需续期文件，即使彻底卸载也会保留这些文件。以后重新安装时，保留且可识别的站点会恢复防护，不会被静默换成另一个后端。
 
 卸载同时删除本项目的端口表、独立情报表、根所有开机快照和生成的白名单 jail 配置，不会改动其他 nftables 表或其他 fail2ban jail。
 
 ## 安全须知
 
-- Caddy 本身不提供任何鉴权。凡是你对外暴露的站点，除非你自己加了鉴权，否则都是公开的。
-- 安装器的自检站点只绑定 `127.0.0.1:8080`。
-- 密钥（`*.key`、`.env`）权限为 0640 且已被 git 忽略；切勿提交。
-- 下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络慢 / 大陆镜像」的完整性校验说明）。
+- 反向代理本身不提供任何鉴权。凡是你对外暴露的站点，除非你自己加了鉴权，否则都是公开的。
+- 安装器的自检站点只绑定回环地址（Caddy 为 `127.0.0.1:8080`；Nginx 同样不生成公网 80 端口站点），不会暴露公网 HTTP。
+- 密钥（`*.key`、`.env`）权限为 0640；Nginx 的 `/etc/caddy-abuseguard/cloudflare.ini` 为 root:root 0600。两者都已被 git 忽略，切勿提交。
+- Caddy 模式下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络慢 / 大陆镜像」的完整性校验说明）；Nginx 模式使用发行版 `nginx`/`certbot` 包，安装清单只记录哪些包由本项目首次安装，避免卸载时误删系统原有软件。
 - 威胁情报只以根所有的快照和内核集合生效：根权限子命令在进程内逐行校验白名单和已存储名单，绝不把下载到的原始文本当作 nft 规则执行；`/var/lib/caddy-abuseguard` 对 `abuseguard` 用户可写，因此不作为可执行策略来源。
-- Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务和根权限策略应用单元同样加固。
+- Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务和根权限策略应用单元同样加固。Nginx 使用发行版自带的 `nginx.service`（不替换单元）。
+- Nginx 只信任官方 Cloudflare IPv4/IPv6 网段发来的 `CF-Connecting-IP`；来自其他来源的同名头会被忽略。受保护站点日志不含 URI、Host、请求头、正文或查询串，也不额外写默认 combined 访问日志。
+- `/etc/caddy-abuseguard/web-server` 为 root 所有、只读取不执行；写入前严格校验 `caddy`/`nginx` 枚举，损坏或含糊的记录不会被当作安装另一个后端的许可。
 
 ## 构建 / 发布
 
 - `engine/` 是单个 Go module，仅用标准库，`go 1.21`。
-- 打 `vX.Y.Z` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，它构建 `caddy-abuseguard-linux-{amd64,arm64}` 并附加到 release。`install.sh` 默认下载这些产物。
+- CI 在 Ubuntu 上运行 Go 测试、shell/面板测试、真实 Caddy 日志契约、真实 Nginx → JSON → fail2ban-regex 契约（HTTP/1.1 与 HTTP/2、可信与伪造的 Cloudflare 头、隐私字段与日志轮转）以及隔离的 Nginx 配置回滚/证书部署集成测试；真实 nftables 和 systemd 沙箱门禁保持独立。
+- 打 `vX.Y.Z` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，它构建 `caddy-abuseguard-linux-{amd64,arm64}` 并附加到 release。`install.sh` 默认下载这些产物；Nginx 模式不发布也不下载这些资产，改用发行版软件包。
 - 版本化的引擎产物发布后保持不变；每周/手动刷新只更新跟随上游的 Caddy，并重新生成覆盖全部现有产物的校验和与构建元数据。
 
 架构与「失败即安全」规则详见 [docs/design.md](docs/design.md)。

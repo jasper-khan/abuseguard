@@ -6,7 +6,11 @@ CONF_DIR=/etc/caddy-abuseguard
 CONFIG="$CONF_DIR/config.json"
 WHITELIST="$CONF_DIR/whitelist"
 KEYFILE="$CONF_DIR/abuseipdb-report.key"
+# 后端在首次安装时固定，root 只读标记记录；面板只读，不提供切换。
+WEB_SERVER_FILE="$CONF_DIR/web-server"
 ENGINE=/usr/local/libexec/caddy-abuseguard
+NGINX_RUNTIME=/usr/local/libexec/abuseguard-nginx.sh
+NGINX_RUNTIME_LOADED=0
 CADDY=/usr/local/bin/caddy
 CADDY_ENV=/etc/caddy/.env
 CADDYFILE=/etc/caddy/Caddyfile
@@ -69,6 +73,39 @@ caddy_reload_or_restart() {
 caddy_restart_active() {
 	systemctl restart caddy >/dev/null 2>&1 || return 1
 	[ "$(systemctl is-active caddy 2>/dev/null)" = active ]
+}
+
+# 已记录的反向后端：caddy 或 nginx。旧安装没有标记，按 Caddy 处理；标记损坏
+# 时返回失败，调用方必须停止操作而不是静默回退到另一个后端。
+proxy_mode() {
+	local mode
+	[ -e "$WEB_SERVER_FILE" ] || { printf 'caddy'; return 0; }
+	[ -f "$WEB_SERVER_FILE" ] || return 1
+	mode="$(cat -- "$WEB_SERVER_FILE" 2>/dev/null)" || return 1
+	case "$mode" in
+		caddy|nginx) printf '%s' "$mode" ;;
+		*) return 1 ;;
+	esac
+}
+
+# Nginx 运行时辅助脚本只在 nginx 模式按需加载；Caddy 安装完全不触碰它。
+nginx_runtime_load() {
+	local f
+	[ "${NGINX_RUNTIME_LOADED:-0}" = 1 ] && return 0
+	[ -r "$NGINX_RUNTIME" ] || {
+		echo "  Nginx 辅助脚本缺失：$NGINX_RUNTIME" >&2
+		return 1
+	}
+	# shellcheck disable=SC1090
+	. "$NGINX_RUNTIME" || return 1
+	for f in nginx_sites_lines nginx_add_site nginx_delete_site nginx_save_token \
+		nginx_token_is_set nginx_certificate_status; do
+		command -v "$f" >/dev/null 2>&1 || {
+			echo "  Nginx 辅助脚本不完整：缺少 $f" >&2
+			return 1
+		}
+	done
+	NGINX_RUNTIME_LOADED=1
 }
 
 # 辅助文字跟随终端默认前景色，避免固定亮灰色在浅色主题下难以辨认。
@@ -215,9 +252,17 @@ intel_table_present() {
 }
 
 header() {
-	local caddy f2b intel banned rep age version ssh_ports sites applied applied_age
+	local mode proxy_svc proxy_label proxy_state f2b intel banned rep age version ssh_ports sites applied applied_age
 	local firewall_ok=0 issue_text='' protect_value report_value intel_note applied_note
-	caddy="$(svc_state caddy)"; f2b="$(svc_state fail2ban)"
+	if mode="$(proxy_mode)"; then
+		if [ "$mode" = nginx ]; then proxy_svc=nginx; proxy_label=Nginx
+		else proxy_svc=caddy; proxy_label=Caddy
+		fi
+		proxy_state="$(svc_state "$proxy_svc")"
+	else
+		mode=''; proxy_svc=''; proxy_label='后端'; proxy_state=unknown
+	fi
+	f2b="$(svc_state fail2ban)"
 	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
 	banned="$(count_banned)"; rep="$(reporting_state)"
 	ssh_ports="$(ssh_current_ports)"
@@ -226,10 +271,14 @@ header() {
 	ssh_ports="${ssh_ports% }"
 	version="$("$ENGINE" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
 	[ -n "$version" ] || version="?"
-	sites="$(sites_lines | wc -l | tr -d ' ')"
+	sites="$(sites_lines 2>/dev/null | wc -l | tr -d ' ')"
 	if firewall_running; then firewall_ok=1; fi
 
-	if [ "$caddy" != active ]; then issue_text='Caddy 未运行'; fi
+	# 缺少标记的旧安装按 Caddy 处理；标记损坏时明确报错，绝不假装正常。
+	if [ -z "$mode" ]; then issue_text='后端选择记录异常'
+	elif [ "$proxy_state" != active ]; then issue_text="$proxy_label 未运行"
+	elif [ "$mode" = nginx ] && ! nginx_runtime_load >/dev/null 2>&1; then issue_text='Nginx 辅助脚本缺失'
+	fi
 	if [ "$f2b" != active ]; then
 		[ -z "$issue_text" ] || issue_text+=' · '
 		issue_text+='Fail2Ban 未运行'
@@ -243,7 +292,7 @@ header() {
 		issue_text+='情报策略未应用'
 	fi
 	if [ -z "$issue_text" ]; then
-		protect_value="${C_G}正常${C_0}（Caddy / Fail2Ban / 防火墙）"
+		protect_value="${C_G}正常${C_0}（${proxy_label} / Fail2Ban / 防火墙）"
 	else
 		protect_value="${C_R}异常${C_0}（${issue_text}）"
 	fi
@@ -282,15 +331,34 @@ header() {
 }
 
 act_status() {
-	local st n desc next d u
+	local st n desc next d u mode proxy_svc proxy_label cert_lines
+	local -a units
+	if mode="$(proxy_mode)"; then
+		if [ "$mode" = nginx ]; then proxy_svc=nginx; proxy_label=Nginx
+		else proxy_svc=caddy; proxy_label=Caddy
+		fi
+	else
+		mode=''; proxy_svc=''; proxy_label='后端'
+	fi
 	panel_start "运行概览"
 	panel_row " ${C_D}服务${C_0}"
-	for s in caddy fail2ban; do
-		if [ "$(svc_state "$s")" = active ]; then st="${C_G}运行中${C_0}"; else st="${C_R}未运行${C_0}"; fi
-		panel_row " $(panel_pad "$s" 24)$st"
-	done
-	for u in caddy-abuseguard-report.timer caddy-abuseguard-sync.timer; do
-		case "$u" in *report*) desc="上报队列冲刷" ;; *sync*) desc="威胁情报同步" ;; esac
+	if [ -n "$proxy_svc" ]; then
+		for s in "$proxy_svc" fail2ban; do
+			if [ "$(svc_state "$s")" = active ]; then st="${C_G}运行中${C_0}"; else st="${C_R}未运行${C_0}"; fi
+			panel_row " $(panel_pad "$s" 24)$st"
+		done
+	else
+		panel_row " $(panel_pad "$proxy_label" 24)${C_R}选择记录异常${C_0}"
+		panel_row " $(panel_pad fail2ban 24)$( [ "$(svc_state fail2ban)" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}未运行${C_0}")"
+	fi
+	units=(caddy-abuseguard-report.timer caddy-abuseguard-sync.timer)
+	[ "$mode" != nginx ] || units+=(certbot.timer)
+	for u in "${units[@]}"; do
+		case "$u" in
+			*report*) desc="上报队列冲刷" ;;
+			*sync*) desc="威胁情报同步" ;;
+			certbot.timer) desc="证书自动续期" ;;
+		esac
 		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
 			next="$(systemctl show "$u" -p NextElapseUSecRealtime --value 2>/dev/null)"
 			case "$next" in ""|0|n/a) next="" ;; esac
@@ -303,12 +371,29 @@ act_status() {
 	done
 	panel_sep
 	panel_row " ${C_D}站点${C_0}"
-	if [ -n "$(sites_lines)" ]; then
+	if [ -n "$(sites_lines 2>/dev/null)" ]; then
 		while IFS=$'\t' read -r d u; do
 			[ -n "$d" ] && panel_row " $(panel_pad "$d" 24)${C_D}→${C_0} $u"
-		done < <(sites_lines)
+		done < <(sites_lines 2>/dev/null)
 	else
 		panel_row " 暂无站点，可从首页「站点与证书」添加。"
+	fi
+	# 证书状态只读本机文件，不在首页刷新时运行；没有证书时也如实说明。
+	if [ "$mode" = nginx ]; then
+		panel_sep
+		panel_row " ${C_D}证书${C_0}"
+		if nginx_runtime_load >/dev/null 2>&1; then
+			cert_lines="$(nginx_certificate_status 2>/dev/null)"
+			if [ -n "$cert_lines" ]; then
+				while IFS= read -r d; do
+					[ -n "$d" ] && panel_row " $d"
+				done <<< "$cert_lines"
+			else
+				panel_row " ${C_D}暂无托管证书${C_0}"
+			fi
+		else
+			panel_row " ${C_R}Nginx 辅助脚本不可用，无法读取证书状态${C_0}"
+		fi
 	fi
 	panel_sep
 	panel_row " ${C_D}封禁${C_0}"
@@ -1406,17 +1491,32 @@ act_ssh() {
 }
 
 # ---- 站点 / 反向代理管理 ----
-# CF token 是否已设置（决定站点用 Cloudflare DNS 还是 Caddy 默认 HTTPS）
-cf_is_set() { grep -qE '^CF_API_TOKEN=.+' "$CADDY_ENV" 2>/dev/null; }
+# CF token 是否已设置（nginx 查 root 凭据文件；Caddy 决定用 DNS-01 还是自动 HTTPS）
+cf_is_set() {
+	local mode
+	mode="$(proxy_mode)" || return 1
+	if [ "$mode" = nginx ]; then
+		nginx_runtime_load >/dev/null 2>&1 || return 1
+		nginx_token_is_set
+		return
+	fi
+	grep -qE '^CF_API_TOKEN=.+' "$CADDY_ENV" 2>/dev/null
+}
 # 域名校验（example.com、a.b.co）
 domain_valid() { printf '%s' "$1" | grep -qiE '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$'; }
 # 端口校验（1-65535）
 port_valid() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 # host:port 校验
 hostport_valid() { local h="${1%:*}" p="${1##*:}"; [ "$1" != "$h" ] && [ -n "$h" ] && port_valid "$p"; }
-# 列出受保护站点：每行「域名<TAB>上游」
+# 列出受保护站点：每行「域名<TAB>上游」；nginx 由运行时脚本读取托管站点
 sites_lines() {
-	local f base up
+	local f base up mode
+	mode="$(proxy_mode)" || return 1
+	if [ "$mode" = nginx ]; then
+		nginx_runtime_load >/dev/null 2>&1 || return 1
+		nginx_sites_lines
+		return
+	fi
 	for f in "$SITES_DIR"/*.caddy; do
 		[ -e "$f" ] || continue
 		base="$(basename "$f" .caddy)"; [ "$base" = "_placeholder" ] && continue
@@ -1426,10 +1526,21 @@ sites_lines() {
 }
 
 act_sites() {
-	local choice dom t hp up tls f backup num target out d u
+	local choice dom t hp up tls f backup num target out d u mode
 	local -a doms
 	while true; do
 		panel_start "站点与证书"
+		if ! mode="$(proxy_mode)"; then
+			panel_row " ${C_R}后端选择记录异常：$WEB_SERVER_FILE${C_0}"
+			panel_row " 请重新运行安装器修复；站点操作已停止，不会修改任何配置。"
+			pause
+			return 1
+		fi
+		if [ "$mode" = nginx ] && ! nginx_runtime_load; then
+			panel_row " ${C_R}Nginx 辅助脚本不可用，站点操作已停止。${C_0}"
+			pause
+			return 1
+		fi
 		doms=()
 		while IFS=$'\t' read -r d u; do
 			[ -n "$d" ] || continue
@@ -1439,6 +1550,9 @@ act_sites() {
 		[ "${#doms[@]}" -eq 0 ] && panel_row " （暂无站点，选择 [1] 添加并启用防护）"
 		if cf_is_set; then
 			panel_row " 证书方式：Cloudflare DNS-01（已配置 API Token）"
+		elif [ "$mode" = nginx ]; then
+			# nginx 没有 Caddy 的自动 HTTPS 回退：缺少 token 时添加站点会明确失败。
+			panel_row " 证书方式：Cloudflare DNS-01（${C_Y}未配置 API Token；添加站点会失败，请先用第 3 项保存${C_0}）"
 		else
 			panel_row " 证书方式：Caddy 自动 HTTPS（需 443/tcp 可直达）"
 		fi
@@ -1454,7 +1568,13 @@ act_sites() {
 				read -r -p "  域名（如 example.com）: " dom
 				dom="$(printf '%s' "$dom" | tr -d '[:space:]')"
 				domain_valid "$dom" || { echo "  域名格式无效"; sleep 1; continue; }
-				[ -e "$SITES_DIR/$dom.caddy" ] && { echo "  该域名已存在"; sleep 1; continue; }
+				if [ "$mode" = nginx ]; then
+					for d in "${doms[@]}"; do
+						[ "$d" = "$dom" ] && { echo "  该域名已存在"; sleep 1; continue 2; }
+					done
+				else
+					[ -e "$SITES_DIR/$dom.caddy" ] && { echo "  该域名已存在"; sleep 1; continue; }
+				fi
 				echo "  上游类型："
 				echo "  [1] 本地 IP:端口（如 127.0.0.1:3000）"
 				echo "  [2] 公网 IP:端口（如 203.0.113.10:8080）"
@@ -1468,6 +1588,17 @@ act_sites() {
 					   up="$hp" ;;
 					*) continue ;;
 				esac
+				if [ "$mode" = nginx ]; then
+					# 站点文件、整份配置校验、reload 与回滚都由运行时脚本负责。
+					if out="$(nginx_add_site "$dom" "$up" 2>&1)"; then
+						[ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/    /'
+						echo "  已添加 $dom → $up（nginx 已应用配置）"
+					else
+						echo "  ${C_Y}添加失败，未启用该站点。诊断：${C_0}"
+						printf '%s\n' "$out" | sed 's/^/    /'
+					fi
+					sleep 2; continue
+				fi
 				if cf_is_set; then
 					tls=$'\ttls {\n\t\tdns cloudflare {env.CF_API_TOKEN}\n\t}\n'
 				else
@@ -1505,6 +1636,17 @@ act_sites() {
 				case "$num" in ''|*[!0-9]*) continue ;; esac
 				if [ "$num" -lt 1 ] || [ "$num" -gt "${#doms[@]}" ]; then echo "  编号超出范围"; sleep 1; continue; fi
 				target="${doms[$((num-1))]}"
+				if [ "$mode" = nginx ]; then
+					# 运行时脚本负责整份配置校验、reload、回滚，并说明证书材料保留情况。
+					if out="$(nginx_delete_site "$target" 2>&1)"; then
+						[ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/    /'
+						echo "  已删除 $target（nginx 已应用配置）"
+					else
+						echo "  ${C_Y}删除失败，原站点配置保持不变。诊断：${C_0}"
+						printf '%s\n' "$out" | sed 's/^/    /'
+					fi
+					sleep 2; continue
+				fi
 				f="$SITES_DIR/$target.caddy"
 				backup="$(mktemp "$SITES_DIR/.site-backup.XXXXXX")" || { echo "  无法备份站点配置，未删除。"; sleep 1; continue; }
 				if ! mv -- "$f" "$backup"; then
@@ -1550,41 +1692,63 @@ act_key() {
 
 act_cftoken() {
 	read -r -p "Cloudflare API token（留空=保持当前）: " t
-	if [ -n "$t" ]; then
-		local backup had_env=0 restore_rc=0 restart_attempted=0
-		backup="$(mktemp)" || { echo "无法备份旧 token，未修改。" >&2; pause; return 1; }
-		if [ -f "$CADDY_ENV" ]; then
-			cp -p -- "$CADDY_ENV" "$backup" || { rm -f -- "$backup"; echo "无法备份旧 token，未修改。" >&2; pause; return 1; }
-			had_env=1
-		fi
-		if printf 'CF_API_TOKEN=%s\n' "$t" > "$CADDY_ENV" \
-			&& chown root:caddy "$CADDY_ENV" \
-			&& chmod 0640 "$CADDY_ENV" \
-			&& validate_caddyfile "$CADDYFILE" >/dev/null 2>&1 \
-			&& { restart_attempted=1; caddy_restart_active; }; then
-			rm -f -- "$backup"
-			echo "已保存 token，caddy 已重启并生效。"
-			pause
-			return
-		fi
-		if [ "$had_env" -eq 1 ]; then
-			cp -p -- "$backup" "$CADDY_ENV" || restore_rc=$?
-		else
-			rm -f -- "$CADDY_ENV" || restore_rc=$?
-		fi
-		if [ "$restore_rc" -eq 0 ]; then
-			rm -f -- "$backup"
-			echo "token 保存失败，已恢复旧 .env。" >&2
-			if [ "$restart_attempted" = 1 ]; then
-				caddy_restart_active && echo "Caddy 已恢复运行。" || echo "Caddy 服务未恢复，请检查服务日志。" >&2
-			fi
-		else
-			echo "token 保存失败，旧 .env 恢复失败；备份保留于 $backup。" >&2
-		fi
+	if [ -z "$t" ]; then
+		pause
+		return 0
+	fi
+	local mode backup had_env=0 restore_rc=0 restart_attempted=0
+	if ! mode="$(proxy_mode)"; then
+		echo "后端选择记录异常，未保存 token。" >&2
 		pause
 		return 1
 	fi
+	if [ "$mode" = nginx ]; then
+		if ! nginx_runtime_load; then
+			pause
+			return 1
+		fi
+		# 保存只是写入 root 凭据；权限与 DNS-01 授权由签发/续期验证，不重启 Nginx。
+		if nginx_save_token "$t"; then
+			echo "已保存 token（root:root 0600）。权限与 DNS-01 授权将在签发/续期时验证，Nginx 无需重启。"
+		else
+			echo "token 保存失败，原 token 保持不变。" >&2
+			pause
+			return 1
+		fi
+		pause
+		return 0
+	fi
+	backup="$(mktemp)" || { echo "无法备份旧 token，未修改。" >&2; pause; return 1; }
+	if [ -f "$CADDY_ENV" ]; then
+		cp -p -- "$CADDY_ENV" "$backup" || { rm -f -- "$backup"; echo "无法备份旧 token，未修改。" >&2; pause; return 1; }
+		had_env=1
+	fi
+	if printf 'CF_API_TOKEN=%s\n' "$t" > "$CADDY_ENV" \
+		&& chown root:caddy "$CADDY_ENV" \
+		&& chmod 0640 "$CADDY_ENV" \
+		&& validate_caddyfile "$CADDYFILE" >/dev/null 2>&1 \
+		&& { restart_attempted=1; caddy_restart_active; }; then
+		rm -f -- "$backup"
+		echo "已保存 token，caddy 已重启并生效。"
+		pause
+		return
+	fi
+	if [ "$had_env" -eq 1 ]; then
+		cp -p -- "$backup" "$CADDY_ENV" || restore_rc=$?
+	else
+		rm -f -- "$CADDY_ENV" || restore_rc=$?
+	fi
+	if [ "$restore_rc" -eq 0 ]; then
+		rm -f -- "$backup"
+		echo "token 保存失败，已恢复旧 .env。" >&2
+		if [ "$restart_attempted" = 1 ]; then
+			caddy_restart_active && echo "Caddy 已恢复运行。" || echo "Caddy 服务未恢复，请检查服务日志。" >&2
+		fi
+	else
+		echo "token 保存失败，旧 .env 恢复失败；备份保留于 $backup。" >&2
+	fi
 	pause
+	return 1
 }
 
 act_toggle() {
@@ -1600,7 +1764,16 @@ act_toggle() {
 }
 
 act_logs() {
-	echo "-- caddy（最近 20 条）--";    journalctl -u caddy -n 20 --no-pager 2>/dev/null
+	local mode
+	mode="$(proxy_mode)" || mode=''
+	case "$mode" in
+		nginx)
+			echo "-- nginx（最近 20 条）--";  journalctl -u nginx -n 20 --no-pager 2>/dev/null
+			echo "-- certbot（最近 20 条）--"; journalctl -u certbot -n 20 --no-pager 2>/dev/null ;;
+		caddy)
+			echo "-- caddy（最近 20 条）--"; journalctl -u caddy -n 20 --no-pager 2>/dev/null ;;
+		*) echo "后端选择记录异常，未读取反向代理日志。" ;;
+	esac
 	echo "-- fail2ban（最近 20 条）--"; journalctl -u fail2ban -n 20 --no-pager 2>/dev/null
 	pause
 }

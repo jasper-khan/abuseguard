@@ -10,6 +10,8 @@ FIFO="$TMP/input"
 cleanup() {
 	rm -f -- "$FIFO"
 	rm -f -- "$PANEL_SOURCE"
+	rm -f -- "$TMP/web-server"
+	rm -f -- "$TMP/nginx-runtime.sh"
 	rmdir -- "$TMP"
 }
 trap cleanup EXIT
@@ -59,9 +61,11 @@ selected="$(
 # Exercise the public navigation paths with all actions replaced by doubles.
 # In particular, visiting a category or returning must never run an action.
 navigation="$(
-	timeout 5 bash --noprofile --norc -s -- "$PANEL_SOURCE" <<'NAVIGATION'
+	timeout 5 bash --noprofile --norc -s -- "$PANEL_SOURCE" "$TMP" <<'NAVIGATION'
 set -euo pipefail
 source "$1"
+WEB_SERVER_FILE="$2/web-server"
+NGINX_RUNTIME="$2/nginx-runtime.sh"
 header() { :; }
 panel_start() { :; }
 panel_title() { :; }
@@ -149,7 +153,8 @@ nft() {
 		*) return 0 ;;
 	esac
 }
-render() { printf '0\n' | act_firewall; }
+# Here-string avoids a producer SIGPIPE when act_firewall returns before reading.
+render() { act_firewall <<< '0'; }
 render
 printf '%s\n' '=== absent ==='
 MODE=absent; render
@@ -169,9 +174,11 @@ comment_out="${firewall_status#*=== comment ===}"
 printf '%s\n' "$comment_out" | grep -F '情报拦截' | grep -F '未应用（sudo ag --policy-apply）' >/dev/null
 
 # Preserve long Chinese text and align paired actions without box borders.
-bash --noprofile --norc -s -- "$PANEL_SOURCE" <<'LAYOUT'
+bash --noprofile --norc -s -- "$PANEL_SOURCE" "$TMP" <<'LAYOUT'
 set -euo pipefail
 source "$1"
+WEB_SERVER_FILE="$2/web-server"
+NGINX_RUNTIME="$2/nginx-runtime.sh"
 sample='中文对齐与长文本换行测试：TCP443,63052,33121；UDP443,58209；完整保留内容。'
 rows="$(panel_row "${C_G}${sample}${C_0}" | sed $'s/\033\\[[0-9;]*m//g')"
 while IFS= read -r row; do
@@ -243,5 +250,70 @@ for h in 服务 站点 封禁; do
 done
 [ "$(printf '%s\n' "$status" | grep -c '===' || true)" -eq 2 ]
 LAYOUT
+
+# An nginx installation must report the nginx service, the real Certbot renewal
+# timer and local certificate state, and must never advertise Caddy auto-HTTPS.
+nginx_view="$(
+	bash --noprofile --norc -s -- "$PANEL_SOURCE" "$TMP" <<'NGINX'
+set -euo pipefail
+source "$1"
+WEB_SERVER_FILE="$2/web-server"
+NGINX_RUNTIME="$2/nginx-runtime.sh"
+NGINX_RUNTIME_LOADED=0
+printf 'nginx\n' > "$WEB_SERVER_FILE"
+cat > "$NGINX_RUNTIME" <<'RUNTIME'
+nginx_sites_lines() { printf 'shop.example.com\t127.0.0.1:3000\n'; }
+nginx_token_is_set() { return 1; }
+nginx_certificate_status() { echo 'shop.example.com 证书有效至 2027-01-30（剩 76 天）'; }
+nginx_add_site() { return 0; }
+nginx_delete_site() { return 0; }
+nginx_save_token() { return 0; }
+RUNTIME
+panel_start() { :; }
+panel_sep() { :; }
+panel_option() { :; }
+panel_footer() { :; }
+panel_pause() { :; }
+pause() { :; }
+panel_row() { printf '%s\n' "$1" | sed $'s/\033\\[[0-9;]*m//g'; }
+ENGINE=:
+svc_state() { echo active; }
+systemctl() { return 1; }
+journalctl() { printf '%s\n' "$*"; }
+count_banned() { echo 0; }
+reporting_state() { echo off; }
+fail2ban-client() {
+	case "$1" in
+		status) printf 'Status for the jail: %s\nCurrently banned: 0\n' "$2" ;;
+		*) return 1 ;;
+	esac
+}
+ssh_current_ports() { echo 22; }
+firewall_running() { return 0; }
+intel_table_present() { return 0; }
+header
+printf '%s\n' '=== status ==='
+printf '0\n' | act_status
+printf '%s\n' '=== sites ==='
+printf '0\n' | act_sites
+printf '%s\n' '=== logs ==='
+act_logs
+NGINX
+)"
+header_view="${nginx_view%%=== status ===*}"
+printf '%s\n' "$header_view" | grep -F '正常（Nginx / Fail2Ban / 防火墙）' >/dev/null
+if printf '%s\n' "$header_view" | grep -F 'Caddy' >/dev/null; then exit 1; fi
+status_view="${nginx_view#*=== status ===}"; status_view="${status_view%%=== sites ===*}"
+printf '%s\n' "$status_view" | grep -E '^ +nginx +运行中$' >/dev/null
+if printf '%s\n' "$status_view" | grep -E '^ +caddy +' >/dev/null; then exit 1; fi
+printf '%s\n' "$status_view" | grep -E '^ +证书自动续期 ' >/dev/null
+printf '%s\n' "$status_view" | grep -F 'shop.example.com 证书有效至 2027-01-30（剩 76 天）' >/dev/null
+sites_view="${nginx_view#*=== sites ===}"; sites_view="${sites_view%%=== logs ===*}"
+printf '%s\n' "$sites_view" | grep -F '未配置 API Token' >/dev/null
+if printf '%s\n' "$sites_view" | grep -F 'Caddy 自动 HTTPS' >/dev/null; then exit 1; fi
+logs_view="${nginx_view#*=== logs ===}"
+printf '%s\n' "$logs_view" | grep -F -- '-u nginx' >/dev/null
+printf '%s\n' "$logs_view" | grep -F -- '-u certbot' >/dev/null
+if printf '%s\n' "$logs_view" | grep -F -- '-u caddy' >/dev/null; then exit 1; fi
 
 echo "panel refresh, navigation and layout tests passed"

@@ -22,6 +22,11 @@ SITES_TEST="$TMP/sites"
 SITE_EXPECTED="$TMP/site.expected"
 CONF_TEST="$TMP/conf"
 WHITELIST_EXPECTED="$TMP/whitelist-expected"
+NGINX_RUNTIME_TEST="$TMP/nginx-runtime.sh"
+NGINX_TOKEN_CAPTURE="$TMP/nginx-token"
+NGINX_ADD_CAPTURE="$TMP/nginx-add"
+NGINX_DELETE_CAPTURE="$TMP/nginx-delete"
+NGINX_SITES_FIXTURE="$TMP/nginx-sites"
 INVALID_CANDIDATE=""
 VALID_CANDIDATE=""
 
@@ -49,6 +54,12 @@ cleanup() {
 	rmdir -- "$SITES_TEST" 2>/dev/null || true
 	rm -f -- "$WHITELIST_EXPECTED"
 	rm -f -- "$CONF_TEST/whitelist"
+	rm -f -- "$CONF_TEST/web-server"
+	rm -f -- "$NGINX_RUNTIME_TEST"
+	rm -f -- "$NGINX_TOKEN_CAPTURE"
+	rm -f -- "$NGINX_ADD_CAPTURE"
+	rm -f -- "$NGINX_DELETE_CAPTURE"
+	rm -f -- "$NGINX_SITES_FIXTURE"
 	rmdir -- "$CONF_TEST" 2>/dev/null || true
 	rmdir -- "$TMP/bootstrap" 2>/dev/null || true
 	rmdir -- "$TMP"
@@ -185,6 +196,19 @@ install_release_binary test-url "$OLD_BIN" test-name test-label 0.3.33 \
 find "$TMP" -maxdepth 1 -name '.*.tmp.*' -print -quit | grep -q . \
 	&& fail "installer left a staged binary behind"
 
+# The Caddy release download must not reuse the engine's staging slot: the
+# engine is staged first, committed only after fail2ban is paused.
+STAGED_BIN="$TMP/engine.staged"
+printf 'staged engine\n' > "$STAGED_BIN"
+write_sum "$GOOD_BIN"
+DOWNLOAD_SOURCE="$GOOD_BIN"
+install_release_binary test-url "$OLD_BIN" test-name test-label \
+	|| fail "release install next to a staged engine failed"
+[ "$STAGED_BIN" = "$TMP/engine.staged" ] && [ -f "$STAGED_BIN" ] \
+	|| fail "release binary install clobbered the staged engine"
+rm -f -- "$STAGED_BIN"
+STAGED_BIN=""
+
 # Build the real engine so panel validation is tested against its parser.
 (cd "$ROOT/engine" && go build -o "$ENGINE_BUILD" .)
 
@@ -253,7 +277,8 @@ cmp "$WHITELIST_EXPECTED" "$WHITELIST" || fail "valid candidate was not atomical
 
 # Panel token and site changes must expose systemctl failures and roll back files.
 for name in validate_caddyfile caddy_reload_or_restart caddy_restart_active \
-	domain_valid port_valid hostport_valid cf_is_set sites_lines act_sites act_cftoken; do
+	domain_valid port_valid hostport_valid cf_is_set sites_lines proxy_mode \
+	nginx_runtime_load act_sites act_cftoken; do
 	extract_function "$name" "$ROOT/abuseguard.sh" >> "$FUNCTIONS"
 done
 # shellcheck disable=SC1090
@@ -266,6 +291,35 @@ CADDYFILE="$CADDY_CONFIG"
 SITES_DIR="$SITES_TEST"
 export CADDY_VALIDATE_RC=0
 export TOKEN_CAPTURE
+
+# Minimal source-only double of the installed nginx runtime script. The panel's
+# obligation is routing plus real outcome propagation; the helper itself is
+# covered by its own regression script.
+cat > "$NGINX_RUNTIME_TEST" <<'RUNTIME'
+nginx_token_is_set() { return "${TOKEN_SET_RC:-1}"; }
+nginx_save_token() {
+	printf '%s' "$1" > "$NGINX_TOKEN_CAPTURE"
+	return "${TOKEN_SAVE_RC:-0}"
+}
+nginx_sites_lines() { cat "$NGINX_SITES_FIXTURE"; }
+nginx_add_site() {
+	printf '%s\t%s\n' "$1" "$2" > "$NGINX_ADD_CAPTURE"
+	[ -z "${ADD_ERROR:-}" ] || printf '%s\n' "$ADD_ERROR"
+	return "${ADD_RC:-0}"
+}
+nginx_delete_site() {
+	printf '%s\n' "$1" > "$NGINX_DELETE_CAPTURE"
+	[ -z "${DELETE_ERROR:-}" ] || printf '%s\n' "$DELETE_ERROR"
+	return "${DELETE_RC:-0}"
+}
+nginx_certificate_status() { return 0; }
+nginx_validate() { return 0; }
+nginx_reload() { return 0; }
+RUNTIME
+WEB_SERVER_FILE="$CONF_TEST/web-server"
+NGINX_RUNTIME="$NGINX_RUNTIME_TEST"
+NGINX_RUNTIME_LOADED=0
+rm -f -- "$WEB_SERVER_FILE"
 
 SYSTEMCTL_RELOAD_RC=0
 SYSTEMCTL_RESTART_RC=0
@@ -302,6 +356,8 @@ sleep() { :; }
 pause() { :; }
 C_B=""
 C_0=""
+C_Y=""
+C_R=""
 
 reset_caddy_env() {
 	printf 'CF_API_TOKEN=old-token\nKEEP=yes\n' > "$CADDY_ENV_TEST"
@@ -393,5 +449,89 @@ case "$site_output" in *"已删除 existing.example.com"*) fail "failed site del
 case "$site_output" in *"已恢复原站点配置"*) ;; *) fail "failed site delete did not report rollback" ;; esac
 [ "$(grep -c '^restart caddy$' "$SYSTEMCTL_LOG")" -eq 2 ] || fail "site delete rollback did not restart the old service"
 case "$site_output" in *"Caddy 已恢复运行"*) ;; *) fail "site delete rollback did not recover the service" ;; esac
+
+# Nginx installations route every site/token action through the installed
+# runtime helper; a corrupt marker must stop instead of falling back to Caddy.
+printf 'nginx\n' > "$WEB_SERVER_FILE"
+printf 'shop.example.com\t127.0.0.1:3000\n' > "$NGINX_SITES_FIXTURE"
+[ "$(proxy_mode)" = nginx ] || fail "nginx marker was not honoured"
+[ "$(sites_lines)" = $'shop.example.com\t127.0.0.1:3000' ] || fail "nginx site list was not used"
+TOKEN_SET_RC=0
+cf_is_set || fail "nginx token presence was not read from the runtime helper"
+TOKEN_SET_RC=1
+if cf_is_set; then fail "missing nginx token was reported as configured"; fi
+
+reset_caddy_env
+cp -- "$CADDY_ENV_TEST" "$CADDY_ENV_EXPECTED"
+: > "$NGINX_TOKEN_CAPTURE"
+: > "$SYSTEMCTL_LOG"
+TOKEN_SAVE_RC=0
+token_output="$(act_cftoken <<< 'cf-test-token' 2>&1)" || fail "nginx token save failed"
+[ "$(<"$NGINX_TOKEN_CAPTURE")" = cf-test-token ] || fail "nginx token was not handed to the runtime helper"
+cmp -s "$CADDY_ENV_EXPECTED" "$CADDY_ENV_TEST" || fail "nginx token save touched the Caddy .env"
+grep -q '^restart caddy$\|^reload caddy$' "$SYSTEMCTL_LOG" && fail "nginx token save restarted Caddy"
+case "$token_output" in
+	*"已保存 token"*"无需重启"*) ;;
+	*) fail "nginx token save did not report the stored credential truthfully" ;;
+esac
+
+TOKEN_SAVE_RC=1
+if token_output="$(act_cftoken <<< 'bad-token' 2>&1)"; then
+	fail "nginx token save failure was accepted"
+fi
+case "$token_output" in *"已保存 token"*) fail "nginx token save failure displayed success" ;; esac
+
+: > "$NGINX_ADD_CAPTURE"
+ADD_RC=0; ADD_ERROR=''
+site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)" \
+	|| fail "nginx site add failed"
+[ "$(<"$NGINX_ADD_CAPTURE")" = $'example.com\t127.0.0.1:8080' ] \
+	|| fail "nginx site add did not hand domain and upstream to the runtime helper"
+case "$site_output" in
+	*"已添加 example.com → 127.0.0.1:8080（nginx 已应用配置）"*) ;;
+	*) fail "nginx site add did not report the applied config" ;;
+esac
+[ ! -e "$SITES_TEST/example.com.caddy" ] || fail "nginx site add wrote a Caddy site file"
+
+ADD_RC=1; ADD_ERROR='证书签发失败：缺少 Cloudflare 凭据'
+site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)"
+case "$site_output" in *"添加失败"*) ;; *) fail "nginx site add failure was not reported" ;; esac
+case "$site_output" in *"证书签发失败"*) ;; *) fail "nginx site add diagnostic was hidden" ;; esac
+case "$site_output" in *"已添加 example.com"*) fail "failed nginx site add displayed success" ;; esac
+
+: > "$NGINX_DELETE_CAPTURE"
+DELETE_RC=0; DELETE_ERROR='证书材料保留在 /etc/letsencrypt'
+site_output="$(printf '2\n1\n0\n' | act_sites 2>&1)" || fail "nginx site delete failed"
+[ "$(<"$NGINX_DELETE_CAPTURE")" = shop.example.com ] \
+	|| fail "nginx site delete did not hand the managed domain to the runtime helper"
+case "$site_output" in
+	*"已删除 shop.example.com（nginx 已应用配置）"*) ;;
+	*) fail "nginx site delete did not report the applied config" ;;
+esac
+case "$site_output" in *"证书材料保留"*) ;; *) fail "nginx site delete did not surface the retention note" ;; esac
+
+DELETE_RC=1; DELETE_ERROR='候选配置校验失败，已回滚'
+site_output="$(printf '2\n1\n0\n' | act_sites 2>&1)"
+case "$site_output" in *"删除失败"*) ;; *) fail "nginx site delete failure was not reported" ;; esac
+case "$site_output" in *"已删除 shop.example.com"*) fail "failed nginx site delete displayed success" ;; esac
+
+# Corrupt state must stop instead of silently falling back to Caddy.
+printf 'apache\n' > "$WEB_SERVER_FILE"
+if proxy_mode >/dev/null; then fail "corrupt backend record was accepted"; fi
+if sites_lines; then fail "corrupt backend record listed sites"; fi
+if cf_is_set; then fail "corrupt backend record reported token state"; fi
+: > "$NGINX_TOKEN_CAPTURE"
+if token_output="$(act_cftoken <<< 'corrupt-token' 2>&1)"; then
+	fail "corrupt backend record saved a token"
+fi
+[ ! -s "$NGINX_TOKEN_CAPTURE" ] || fail "corrupt backend record reached the nginx helper"
+: > "$NGINX_ADD_CAPTURE"
+if act_sites </dev/null >/dev/null 2>&1; then
+	fail "corrupt backend record opened the site page"
+fi
+[ ! -s "$NGINX_ADD_CAPTURE" ] || fail "corrupt backend record reached the nginx helper"
+
+rm -f -- "$WEB_SERVER_FILE"
+[ "$(proxy_mode)" = caddy ] || fail "legacy installs without a backend record must stay on Caddy"
 
 echo "review fix tests: pass"
