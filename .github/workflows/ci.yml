@@ -156,4 +156,4 @@ jobs:
       - name: Verify Nginx helper rollback and certificate fixtures
         # Real nginx -t / nginx -T against an isolated prefix; no live service,
         # no /etc changes, no real certificate issuance.
-        run: bash ./scripts/test-proxy-integration.sh
+        run: sudo env REAL_NGINX=/usr/sbin/nginx bash ./scripts/test-proxy-integration.sh
