@@ -66,6 +66,7 @@ set -euo pipefail
 source "$1"
 WEB_SERVER_FILE="$2/web-server"
 NGINX_RUNTIME="$2/nginx-runtime.sh"
+printf 'caddy\n' > "$WEB_SERVER_FILE"
 header() { :; }
 panel_start() { :; }
 panel_title() { :; }
