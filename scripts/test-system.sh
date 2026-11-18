@@ -52,7 +52,6 @@ systemctl is-enabled --quiet caddy-abuseguard-policy.service || fail 'policy boo
 policy_exec="$(systemctl show -p ExecStart caddy-abuseguard-policy.service)"
 grep -q 'policy-apply' <<<"$policy_exec" \
 	|| fail 'policy boot restore does not call the engine policy-apply subcommand'
-[ ! -e /usr/local/libexec/caddy-abuseguard-policy ] || fail 'legacy policy helper was not removed'
 for jail in caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd; do
 	fail2ban-client status "$jail" >/dev/null || fail "jail not enabled: $jail"
 done
@@ -196,8 +195,8 @@ if ip netns exec "$NS" curl -fsS --interface "$BAD" --max-time 2 "$WEB_URL/" >/d
 fail2ban-client unban "$BAD" >/dev/null
 echo 'PASS: SSH authentication failures trigger the global ban'
 
-# The disposable test feed is tiny; lower the configured bounds so intel-export
-# accepts it (production keeps the 90k-120k bounds).
+# The disposable test feed is tiny; lower the configured bounds so the intel
+# validators accept it (production keeps the 90k-120k bounds).
 jq '.intel.min_entries = 1 | .intel.max_entries = 1000' /etc/caddy-abuseguard/config.json > "$WORK/config.json" \
 	|| fail 'could not lower intel bounds'
 install -m 0640 -o root -g abuseguard "$WORK/config.json" /etc/caddy-abuseguard/config.json

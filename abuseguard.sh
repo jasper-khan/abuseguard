@@ -27,7 +27,6 @@ SSHD_MAIN=/etc/ssh/sshd_config
 SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
 SSHD_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-port.conf"
 SSHD_AUTH_DROPIN="$SSHD_DROPIN_DIR/00-abuseguard-auth.conf"
-SSHD_AUTH_DROPIN_OLD="$SSHD_DROPIN_DIR/99-abuseguard-auth.conf"
 SSH_ROOT_HOME=/root/.ssh
 SSH_AUTH_KEYS="$SSH_ROOT_HOME/authorized_keys"
 SSH_REPORT_JAIL=/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
@@ -72,11 +71,10 @@ caddy_restart_active() {
 	[ "$(systemctl is-active caddy 2>/dev/null)" = active ]
 }
 
-# 已记录的反向后端：caddy 或 nginx。旧安装没有标记，按 Caddy 处理；标记损坏
-# 时返回失败，调用方必须停止操作而不是静默回退到另一个后端。
+# 已记录的反向后端：caddy 或 nginx。记录缺失或损坏时返回失败，调用方必须停止
+# 操作而不是静默回退到另一个后端。
 proxy_mode() {
 	local mode
-	[ -e "$WEB_SERVER_FILE" ] || { printf 'caddy'; return 0; }
 	[ -f "$WEB_SERVER_FILE" ] || return 1
 	mode="$(cat -- "$WEB_SERVER_FILE" 2>/dev/null)" || return 1
 	case "$mode" in
@@ -1259,11 +1257,6 @@ act_ssh_auth() {
 	if systemctl is-active --quiet ssh.socket 2>/dev/null; then
 		echo "系统使用 ssh.socket 激活 SSH，面板不修改其配置；请先恢复 ssh.service 再试。"
 		return 1
-	fi
-	# 旧版本把面板 drop-in 放在 99-，升级后迁到 00-（排序第一，压过外部指令）。
-	if [ -f "$SSHD_AUTH_DROPIN_OLD" ]; then
-		if [ -f "$SSHD_AUTH_DROPIN" ]; then rm -f -- "$SSHD_AUTH_DROPIN_OLD"
-		else mv -f -- "$SSHD_AUTH_DROPIN_OLD" "$SSHD_AUTH_DROPIN"; fi
 	fi
 	cur="$(ssh_auth_state "$key")"
 	[ "$cur" != unknown ] || { echo "无法读取当前 SSH 认证状态，已取消。"; return 1; }

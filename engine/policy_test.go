@@ -80,8 +80,6 @@ func TestRenderFail2banPolicy(t *testing.T) {
 	for _, want := range []string{
 		"\n[sshd]\nignoreip = 192.0.2.8\n",
 		"\n[caddy-rate-local]\nignoreip = 192.0.2.1\n           2001:db8::/64\n",
-		"[caddy-intel]\nenabled = false\n",
-		"[sshd-intel]\nenabled = false\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated ignoreip missing %q:\n%s", want, out)

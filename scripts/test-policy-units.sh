@@ -325,8 +325,6 @@ for jail in caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd; do
 	grep -qF '203.0.113.7' <<<"$jail_out" \
 		|| fail "private fail2ban did not reload the new ignoreip for $jail"
 done
-grep -q 'enabled = false' "$POLICY_F2B" \
-	|| fail "generated fail2ban policy does not retire the old intel jails"
 [ "$(sha256sum "$ENGINE")" = "$binary_sum" ] \
 	|| fail "sync/apply modified the engine executable"
 executables="$(find "$STATE" -maxdepth 1 -type f -perm /111)"

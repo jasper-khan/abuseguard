@@ -51,12 +51,8 @@ REPORTS_DIR="$STATE_DIR/reports"
 LOG_DIR=/var/log/caddy
 LIBEXEC_DIR=/usr/local/libexec
 ENGINE_BIN="$LIBEXEC_DIR/caddy-abuseguard"
-# Legacy Shell applier left by releases before the Go policy-apply migration;
-# removed only after the new engine+unit pair is proven usable.
-POLICY_BIN="$LIBEXEC_DIR/caddy-abuseguard-policy"
 POLICY_UNIT_DIR=/etc/systemd/system
 PANEL_BIN=/usr/local/bin/ag
-LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
 CADDY_SERVICE=/etc/systemd/system/caddy.service
 CADDY_ETC=/etc/caddy
@@ -167,19 +163,8 @@ read_recorded_mode() {
 	RECORDED_MODE="$mode"
 }
 
-# Marker missing: old releases only ever installed Caddy. Anything that looks
-# like an Nginx AbuseGuard install without a marker is ambiguous, not Caddy.
-legacy_manifest_mode() {
-	local manifest="$STATE_DIR/install-manifest" mode
-	[ -f "$manifest" ] || return 1
-	mode="$(sed -n 's/^web_server=//p' "$manifest" | head -n 1)"
-	case "$mode" in
-		"")  printf 'caddy' ;;
-		caddy) printf 'caddy' ;;
-		*) return 2 ;;
-	esac
-}
-
+# Marker missing: 0.6+ installs always carry a mode record, so its absence on
+# an existing install is a pre-0.6 machine or broken state — abort, never guess.
 has_nginx_abuse_artifacts() {
 	local f
 	if [ -e "$NGINX_HTTP_CONF" ] || [ -e "$NGINX_RUNTIME_PATH" ] || [ -e "$NGINX_DEPLOY_HOOK" ] \
@@ -221,7 +206,6 @@ choose_fresh_proxy() {
 
 # Must run before apt or any host mutation.
 resolve_proxy_mode() {
-	local legacy
 	if read_recorded_mode; then
 		PROXY_MODE="$RECORDED_MODE"
 		PROXY_MODE_ORIGIN=recorded
@@ -232,19 +216,7 @@ resolve_proxy_mode() {
 	fi
 
 	if [ "$UPDATE_MODE" = 1 ]; then
-		if has_nginx_abuse_artifacts; then
-			die "检测到现有 AbuseGuard Nginx 文件，但缺少模式记录 $MODE_FILE；状态不明确，拒绝继续。请手动核对后重试。安装未改动系统。"
-		fi
-		if ! legacy="$(legacy_manifest_mode)"; then
-			die "安装清单记录的代理模式与 $MODE_FILE 不一致；拒绝猜测。请手动核对后重试。安装未改动系统。"
-		fi
-		PROXY_MODE="$legacy"
-		PROXY_MODE_ORIGIN=legacy
-		if [ -n "$REQUESTED_PROXY" ] && [ "$REQUESTED_PROXY" != "$legacy" ]; then
-			die "旧版 AbuseGuard 安装使用 $legacy，不能用 --proxy=$REQUESTED_PROXY 切换。安装未改动系统。"
-		fi
-		log "未找到代理模式记录；按旧版 AbuseGuard+$legacy 安装继续"
-		return 0
+		die "检测到既有安装缺少后端记录 $MODE_FILE（0.6 之前的安装或状态异常）。请先升级到 0.6.2 再升级本版本，或核对后卸载重装。安装未改动系统。"
 	fi
 
 	choose_fresh_proxy
@@ -468,24 +440,10 @@ verify_fail2ban_jails() {
 	die "fail2ban 已启动，但以下防护未运行：$missing。请检查 fail2ban 日志；安装未完成。"
 }
 
-# Legacy intel jails are retired. Capture their bans before the new jail files
-# replace them, so the installer can re-ban each source after the new policy is
-# live instead of silently dropping operator/feed bans.
-legacy_intel_bans() {
-	local jail status ips
-	for jail in caddy-intel sshd-intel; do
-		status="$(fail2ban-client status "$jail" 2>/dev/null)" || continue
-		ips="$(printf '%s\n' "$status" | sed -n 's/.*Banned IP list:[[:space:]]*//p')"
-		[ -z "$ips" ] || printf '%s\n' "$ips" | tr ' ' '\n'
-	done | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | awk '!seen[$0]++'
-}
-
 # --- fail2ban upgrade safety -------------------------------------------------
-# The retired intel jails run the engine as ignorecommand. Replacing the engine
-# while those jails are live would make them invoke the new CLI (which no longer
-# has their subcommands) and ban every uncached visitor for 90 days. "idle" stops
-# log detection/ignorecommand but keeps each jail's existing nft bans enforced;
-# a full stop is only the fallback when idle is unavailable.
+# "idle" stops log detection while each jail's existing nft bans stay enforced,
+# so a half-replaced config never acts on live traffic; a full stop is only
+# the fallback when idle is unavailable.
 FAIL2BAN_PAUSED=0
 FAIL2BAN_STOPPED=0
 ENGINE_SWAPPED=0
@@ -495,7 +453,7 @@ INSTALL_COMPLETE=0
 STAGED_BIN=""
 STAGED_RELEASE_BIN=""
 F2B_ROLLBACK_DIR=""
-PAUSE_JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
+PAUSE_JAILS="caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd"
 PAUSED_JAILS_DONE=""
 # Root-only test hook (scripts/test-native-policy.sh); production uses /etc.
 F2B_ETC="${F2B_ETC:-/etc/fail2ban}"
@@ -568,7 +526,7 @@ pause_fail2ban_for_upgrade() {
 	if [ "$failed" = 1 ]; then
 		log "idle 暂停失败，回退为停止 fail2ban（封禁规则短暂下掉，重启时由数据库恢复）"
 		systemctl stop fail2ban \
-			|| die "无法暂停或停止 fail2ban；为避免旧 jail 调用新引擎，安装已中止。"
+			|| die "无法暂停或停止 fail2ban，安装已中止。"
 		FAIL2BAN_STOPPED=1
 	else
 		FAIL2BAN_PAUSED=1
@@ -635,8 +593,8 @@ on_install_exit() {
 			done < "$UNIT_ROLLBACK_DIR/manifest"
 			systemctl daemon-reload >/dev/null 2>&1 || warn "警告：systemd 未能重新加载恢复后的策略单元。"
 		fi
-		# Restore the old config only after its engine is back: old jails run the
-		# engine as ignorecommand, which the new CLI no longer supports.
+		# Restore the old config only after its engine is back, keeping the
+		# engine and its fail2ban config a compatible pair.
 		restore_f2b_assets
 		if systemctl restart fail2ban >/dev/null 2>&1; then
 			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，检测已恢复；修复问题后请重新运行安装器。"
@@ -656,39 +614,6 @@ on_install_exit() {
 	fi
 	[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
 	[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
-}
-
-# Re-apply captured legacy bans to the retained non-reporting jail after the new
-# fail2ban config is running. The pending file keeps them for a retry when an
-# install fails before the migration completes.
-migrate_legacy_bans() {
-	local ip allow_rc failed=0
-	[ -n "$LEGACY_BANS" ] || return 0
-	log "正在把旧情报 jail 的封禁迁移到 caddy-rate-local（重新计时 90 天，不上报）"
-	while IFS= read -r ip; do
-		[ -n "$ip" ] || continue
-		"$ENGINE_BIN" allowlist-validate --entry "$ip" >/dev/null 2>&1 \
-			|| { warn "跳过无效的旧封禁：$ip"; continue; }
-		allow_rc=0
-		"$ENGINE_BIN" allowlist-check --ip "$ip" >/dev/null 2>&1 || allow_rc=$?
-		case "$allow_rc" in
-			0) log "白名单已覆盖旧封禁 $ip，跳过"; continue ;;
-			1) ;;
-			*) warn "无法检查白名单，跳过旧封禁 $ip"; failed=1; continue ;;
-		esac
-		if fail2ban-client set caddy-rate-local banip "$ip" >/dev/null 2>&1; then
-			log "已迁移封禁：$ip"
-		else
-			warn "迁移封禁失败：$ip"
-			failed=1
-		fi
-	done <<< "$LEGACY_BANS"
-	if [ "$failed" = 0 ]; then
-		rm -f -- "$CONF_DIR/legacy-intel-bans.pending"
-	else
-		warn "部分旧封禁未能迁移；保留 $CONF_DIR/legacy-intel-bans.pending 供下次安装重试。"
-		return 1
-	fi
 }
 
 validate_caddyfile() {
@@ -748,7 +673,7 @@ parse_install_args "$@"
 # any other host change. An in-progress install keeps its marker, so a retry
 # cannot switch backends.
 UPDATE_MODE=0
-if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ] || [ -x "$LEGACY_PANEL_BIN" ]; then UPDATE_MODE=1; fi
+if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ]; then UPDATE_MODE=1; fi
 if [ -n "${ABUSEGUARD_PROXY_CHOICE:-}" ]; then
 	[ -n "$REQUESTED_PROXY" ] || set_requested_proxy "$ABUSEGUARD_PROXY_CHOICE"
 	unset ABUSEGUARD_PROXY_CHOICE
@@ -947,37 +872,14 @@ EOF
 	log "已记录安装清单（供卸载时对称回滚）"
 fi
 
-# --- capture legacy fail2ban state before the engine swap ---------------------
-# The retired jails' bans must be read while the old config is live; per-jail
-# native ignoreip is preserved by the applier on every apply. Old jails are
-# made idle (not stopped) around the swap so existing bans stay enforced. The
-# pending file makes the ban migration retryable after a failed install.
-LEGACY_BANS=""
-if [ -f "$CONF_DIR/legacy-intel-bans.pending" ]; then
-	LEGACY_BANS="$(cat "$CONF_DIR/legacy-intel-bans.pending")"
-fi
-if fail2ban-client ping >/dev/null 2>&1; then
-	LEGACY_BANS="$(printf '%s\n%s\n' "$LEGACY_BANS" "$(legacy_intel_bans || true)" \
-		| sed '/^$/d' | awk '!seen[$0]++')"
-else
-	[ "$UPDATE_MODE" = 0 ] \
-		|| warn "fail2ban 未运行：无法读取旧情报 jail 的封禁；已记录的封禁会在成功安装后迁移。"
-fi
-if [ -n "$LEGACY_BANS" ]; then
-	printf '%s\n' "$LEGACY_BANS" > "$CONF_DIR/legacy-intel-bans.pending" \
-		|| die "无法保存旧封禁清单。"
-	chown root:root "$CONF_DIR/legacy-intel-bans.pending"
-	chmod 0640 "$CONF_DIR/legacy-intel-bans.pending"
-fi
 trap on_install_exit EXIT
 trap 'exit 130' INT TERM
 # Snapshot every fail2ban file replaced below: a failure before the engine swap
 # restores this set, then resumes the old detection instead of leaving it off.
 backup_f2b_assets
-# Install the new jail/filter/action files before the engine swap. They contain
-# no ignorecommand, so a reboot or a failed install cannot make the old intel
-# jails execute the new engine. The running fail2ban keeps its old in-memory
-# config until the final restart; this only changes the on-disk config.
+# Install the new jail/filter/action files before the engine swap. The running
+# fail2ban keeps its old in-memory config until the final restart; this only
+# changes the on-disk config.
 log "正在安装 fail2ban 的 filter / action / jail"
 install -m 0644 "$SRC_DIR"/assets/fail2ban/filter.d/*.conf "$F2B_ETC/filter.d/"
 install -m 0644 "$SRC_DIR"/assets/fail2ban/action.d/*.conf "$F2B_ETC/action.d/"
@@ -1547,8 +1449,6 @@ else
 	setup_nginx_proxy
 fi
 
-# Legacy bans and ignoreip were captured before the engine swap (see above).
-
 
 # --- systemd timers + panel --------------------------------------------------
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/systemd/system/
@@ -1556,12 +1456,6 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.timer"   /etc/s
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-firewall.service" /etc/systemd/system/
 install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
-# Older releases installed the panel as `abuseguard`. Remove that stale copy
-# so `ag` is the only shortcut, but only when the file really is our panel.
-if [ -f "$LEGACY_PANEL_BIN" ] && head -n 2 "$LEGACY_PANEL_BIN" | grep -q 'AbuseGuard 控制面板'; then
-	rm -f -- "$LEGACY_PANEL_BIN"
-	log "已移除旧快捷命令 abuseguard（请改用 ag）"
-fi
 
 # --- optional interactive setup ----------------------------------------------
 # Ask (y/N, default No) before prompting for each secret, so a plain Enter
@@ -1678,7 +1572,6 @@ systemctl enable fail2ban >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
 systemctl restart fail2ban || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
 verify_fail2ban_jails running
-migrate_legacy_bans || die "旧封禁迁移失败，安装未完成。"
 # Re-run against the live daemon: writes/validates ignoreip, reloads if it
 # changed, and clears bans that a newly allowlisted source still carries.
 "$ENGINE_BIN" policy-apply || die "fail2ban 就绪后应用策略失败，安装未完成。"
@@ -1691,12 +1584,6 @@ ENGINE_BACKUP=""
 [ -z "$UNIT_ROLLBACK_DIR" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 UNIT_ROLLBACK_DIR=""
 [ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
-# Only now is the new unit live; drop the legacy helper an older release left
-# behind. Keeping it during the swap preserves a bootable old engine+unit pair
-# until a failure rollback is no longer possible.
-if [ -e "$POLICY_BIN" ]; then
-	rm -f -- "$POLICY_BIN" || warn "警告：无法移除旧策略助手 $POLICY_BIN。"
-fi
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -86,25 +85,6 @@ func loadDedupe(c *Config) (*dedupeStore, error) {
 	}
 	if err := validateDedupe(d); err != nil {
 		return nil, err
-	}
-	// Versions 0.3.16–0.3.18 stored IPs directly. Normalize those entries
-	// when loading so both normal state and recovered checkpoints keep their
-	// dedupe window, including when both formats contain the same IP.
-	for ip, ts := range d.Entries {
-		if _, err := netip.ParseAddr(strings.TrimSpace(ip)); err != nil {
-			continue
-		}
-		key := dedupeKey(ip)
-		if previous, ok := d.Entries[key]; ok {
-			oldTime, _ := time.Parse(time.RFC3339, previous)
-			newTime, _ := time.Parse(time.RFC3339, ts)
-			if !newTime.After(oldTime) {
-				delete(d.Entries, ip)
-				continue
-			}
-		}
-		d.Entries[key] = ts
-		delete(d.Entries, ip)
 	}
 	return d, nil
 }

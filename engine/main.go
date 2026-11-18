@@ -29,10 +29,6 @@ func main() {
 		runAllowlistValidate(args)
 	case "allowlist-check":
 		runAllowlistCheck(args)
-	case "allowlist-export":
-		runAllowlistExport(args)
-	case "intel-export":
-		runIntelExport(args)
 	case "policy-apply":
 		runPolicyApply(args)
 	case "version", "-v", "--version":
@@ -44,7 +40,7 @@ func main() {
 }
 
 func usage() {
-	logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | allowlist-export [--file <path>] | intel-export | policy-apply (root, Linux) | version")
+	logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | policy-apply (root, Linux) | version")
 }
 
 func mustConfig() *Config {
@@ -90,52 +86,6 @@ func runAllowlistValidate(args []string) {
 	}
 	if err != nil {
 		logf("allowlist-validate: %v", err)
-		os.Exit(1)
-	}
-}
-
-// runAllowlistExport emits the whitelist as canonical IP/CIDR lines for the
-// root-native policy applier. --file previews a candidate whitelist
-// transactionally; otherwise the configured whitelist is used. Validation
-// covers the whole file before anything is written, so failures produce no
-// partial stdout.
-func runAllowlistExport(args []string) {
-	fs := flag.NewFlagSet("allowlist-export", flag.ExitOnError)
-	path := fs.String("file", "", "allowlist file (default: configured whitelist)")
-	fs.Parse(args)
-	if fs.NArg() != 0 {
-		logf("allowlist-export: unexpected arguments")
-		os.Exit(2)
-	}
-	if *path == "" {
-		*path = mustConfig().AllowlistFile
-	}
-	data, err := formatAllowlist(*path)
-	if err != nil {
-		logf("allowlist-export: %v", err)
-		os.Exit(1)
-	}
-	if _, err := os.Stdout.Write(data); err != nil {
-		os.Exit(1)
-	}
-}
-
-// runIntelExport emits validated canonical IPv4 lines for the root-native intel
-// set. A missing intel.txt succeeds with empty output so root can bootstrap
-// before the first sync; any existing invalid file fails with no output.
-func runIntelExport(args []string) {
-	fs := flag.NewFlagSet("intel-export", flag.ExitOnError)
-	fs.Parse(args)
-	if fs.NArg() != 0 {
-		logf("intel-export: unexpected arguments")
-		os.Exit(2)
-	}
-	data, err := formatIntel(mustConfig())
-	if err != nil {
-		logf("intel-export: %v", err)
-		os.Exit(1)
-	}
-	if _, err := os.Stdout.Write(data); err != nil {
 		os.Exit(1)
 	}
 }

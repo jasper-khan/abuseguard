@@ -21,11 +21,8 @@ CONF_DIR="${ABUSEGUARD_CONF_DIR:-/etc/caddy-abuseguard}"
 STATE_DIR=/var/lib/caddy-abuseguard
 LOG_DIR=/var/log/caddy
 ENGINE_BIN=/usr/local/libexec/caddy-abuseguard
-# Legacy Shell applier from releases before the Go policy-apply migration.
-POLICY_BIN=/usr/local/libexec/caddy-abuseguard-policy
 POLICY_F2B=/etc/fail2ban/jail.d/zzz-caddy-abuseguard-policy.local
 PANEL_BIN=/usr/local/bin/ag
-LEGACY_PANEL_BIN=/usr/local/bin/abuseguard
 CADDY_BIN=/usr/local/bin/caddy
 CADDY_ETC=/etc/caddy
 CADDYFILE=/etc/caddy/Caddyfile
@@ -516,14 +513,8 @@ remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h1.conf
 remove_file /etc/fail2ban/filter.d/caddy-abuseguard-probe-h2.conf
 remove_file /etc/fail2ban/action.d/caddy-abuseguard-queue.conf
 remove_file /etc/fail2ban/action.d/caddy-abuseguard-drop.conf
-remove_file "$POLICY_BIN"
 remove_file "$ENGINE_BIN"
 remove_file "$PANEL_BIN"
-# Older releases installed the panel as `abuseguard`; clean up that leftover
-# too, but only when the file really is our panel.
-if [ -f "$LEGACY_PANEL_BIN" ] && head -n 2 "$LEGACY_PANEL_BIN" | grep -q 'AbuseGuard 控制面板'; then
-	remove_file "$LEGACY_PANEL_BIN"
-fi
 
 # --- 2) backend-specific site cleanup ---------------------------------------
 if [ "$PROXY_MODE" = caddy ]; then

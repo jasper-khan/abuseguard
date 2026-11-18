@@ -42,7 +42,6 @@ fixture_paths() {
 	CADDYFILE="$TMP/caddy/Caddyfile"
 	SNIPPET="$TMP/caddy/abuseguard.caddy"
 	PANEL_BIN="$TMP/bin/ag"
-	LEGACY_PANEL_BIN="$TMP/bin/abuseguard"
 	UPDATE_MODE=0
 	REQUESTED_PROXY=""
 	FROM_SOURCE=0
@@ -197,14 +196,13 @@ if [ "$(id -u)" = 0 ]; then
 	) >/dev/null 2>&1 && fail "group-writable mode record must abort"
 fi
 
-# --- legacy AbuseGuard+Caddy inference --------------------------------------
+# --- upgrade without a mode record -------------------------------------------
 (
 	reset_fixture
 	printf 'caddy_bin_preexisting=0\ncaddy_service_preexisting=0\n' > "$STATE_DIR/install-manifest"
 	UPDATE_MODE=1
 	resolve_proxy_mode
-	[ "$PROXY_MODE" = caddy ] || exit 1
-) || fail "legacy install without a mode record should infer caddy"
+) >/dev/null 2>&1 && fail "manifest without a mode record must abort"
 
 (
 	reset_fixture

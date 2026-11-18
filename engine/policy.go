@@ -450,9 +450,6 @@ func renderFail2banPolicy(whitelistPath string, byJail map[string][]string) []by
 			}
 		}
 	}
-	// Retired intel jails must not survive as live aliases, even if a copy of
-	// the old definitions was left in jail.local by the operator.
-	b.WriteString("\n[caddy-intel]\nenabled = false\n\n[sshd-intel]\nenabled = false\n")
 	return []byte(b.String())
 }
 

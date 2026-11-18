@@ -524,6 +524,6 @@ fi
 [ ! -s "$NGINX_ADD_CAPTURE" ] || fail "corrupt backend record reached the nginx helper"
 
 rm -f -- "$WEB_SERVER_FILE"
-[ "$(proxy_mode)" = caddy ] || fail "legacy installs without a backend record must stay on Caddy"
+if proxy_mode >/dev/null 2>&1; then fail "missing backend record was accepted"; fi
 
 echo "review fix tests: pass"

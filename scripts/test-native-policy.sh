@@ -533,13 +533,11 @@ apply >/dev/null || fail "CIDR-covered whitelist apply failed"
 wait_unban "$CIDR_NEIGHBOR" || fail "CIDR-covered whitelisted address kept its ban"
 echo 'PASS: a whitelisted CIDR clears a banned address inside it'
 
-# --- legacy ban migration against the real daemon ---------------------------
 # Extract the installer's own cutover helpers and drive them with a real
-# fail2ban daemon: old intel-jail bans must replay into caddy-rate-local after
-# the new config is live, while whitelisted entries are skipped.
+# fail2ban daemon.
 INSTALL_FUNCS="$TMP/install-funcs.sh"
 : > "$INSTALL_FUNCS"
-for fn in legacy_intel_bans migrate_legacy_bans pause_fail2ban_for_upgrade \
+for fn in pause_fail2ban_for_upgrade \
 	resume_fail2ban_after_failure backup_f2b_assets restore_f2b_assets \
 	commit_staged_binary commit_engine restore_engine_backup on_install_exit; do
 	awk -v signature="$fn() {" '
@@ -556,7 +554,6 @@ UNIT_ROLLBACK_DIR=""
 POLICY_UNIT_DIR="$TMP/units"
 INSTALL_COMPLETE=0
 CONF_DIR="$CONF"
-LEGACY_BANS=""
 STAGED_BIN=""
 STAGED_RELEASE_BIN=""
 F2B_ROLLBACK_DIR=""
@@ -566,7 +563,7 @@ SRC_DIR="$ROOT"
 FAIL2BAN_PAUSED=0
 FAIL2BAN_STOPPED=0
 ENGINE_SWAPPED=0
-PAUSE_JAILS="caddy-intel caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd sshd-intel"
+PAUSE_JAILS="caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd"
 PAUSED_JAILS_DONE=""
 log() { printf '[test] %s\n' "$*"; }
 warn() { printf '[test warn] %s\n' "$*" >&2; }
@@ -582,37 +579,9 @@ systemctl() {
 }
 export ABUSEGUARD_CONFIG="$CONF/config.json"
 
-# Recreate the pre-upgrade world: old intel jails live, no generated file.
-stop_f2b
-rm -f -- "$F2B/jail.d/zzz-caddy-abuseguard-policy.local"
-cat > "$F2B/jail.d/old-intel.local" <<EOF
-[caddy-intel]
-enabled = true
-filter = agtest
-logpath = $F2B/access.log
-action = agtest
-
-[sshd-intel]
-enabled = true
-filter = agtest
-logpath = $F2B/access.log
-action = agtest
-EOF
-start_f2b
-f2bc set caddy-intel banip "$MIGRATE_IP" >/dev/null || fail "could not seed an old intel ban"
-f2bc set sshd-intel banip "$ALLOW_IP" >/dev/null || fail "could not seed a whitelisted old ban"
-LEGACY_BANS="$(legacy_intel_bans)"
-grep -qxF "$MIGRATE_IP" <<<"$LEGACY_BANS" || fail "old intel ban was not captured"
-grep -qxF "$ALLOW_IP" <<<"$LEGACY_BANS" || fail "whitelisted old ban was not captured"
-printf '%s\n' "$LEGACY_BANS" > "$CONF/legacy-intel-bans.pending"
-stop_f2b
-rm -f -- "$F2B/jail.d/old-intel.local"
-start_f2b
-migrate_legacy_bans
-has_ban "$MIGRATE_IP" || fail "legacy ban was not replayed into caddy-rate-local"
-if has_ban "$ALLOW_IP"; then fail "whitelisted legacy ban was replayed"; fi
-[ ! -f "$CONF/legacy-intel-bans.pending" ] || fail "pending ban file was not cleared"
-echo 'PASS: legacy intel bans replay per contract and whitelisted entries are skipped'
+# Seed the standing ban the idle/rollback sections below rely on.
+f2bc set caddy-rate-local banip "$MIGRATE_IP" >/dev/null \
+	|| fail "could not seed a standing ban"
 
 # --- idle pause preserves bans and stops detection --------------------------
 # Existing ban stays in the jail while idle; new matching lines must not ban.

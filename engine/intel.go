@@ -204,9 +204,9 @@ func cmdSyncIntel(c *Config) int {
 		if ip == nil || ip.To4() == nil {
 			continue
 		}
-		// Store only the canonical dotted-quad form: intel-export rejects
-		// anything else, so a non-canonical source spelling must never block
-		// later native policy updates.
+		// Store only the canonical dotted-quad form: the intel validators
+		// reject anything else, so a non-canonical source spelling must never
+		// block later native policy updates.
 		out.WriteString(ip.String())
 		out.WriteByte('\n')
 		count++

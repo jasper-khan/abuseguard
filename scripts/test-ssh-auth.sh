@@ -8,7 +8,7 @@ cleanup() {
 	rm -f -- "$TMP/panel.sh" "$TMP/sshd_config" "$TMP/calls"
 	rm -f -- "$TMP/test-key" "$TMP/test-key.pub" "$TMP/second-key" "$TMP/second-key.pub"
 	rm -f -- "$TMP/auth/00-abuseguard-auth.conf" "$TMP/auth/00-abuseguard-auth.conf.tmp"
-	rm -f -- "$TMP/auth/99-abuseguard-auth.conf" "$TMP/auth/00-aaa-hardening.conf" "$TMP/auth/50-cloud-init.conf"
+	rm -f -- "$TMP/auth/00-aaa-hardening.conf" "$TMP/auth/50-cloud-init.conf"
 	rm -f -- "$TMP/root/.ssh/authorized_keys" "$TMP/root/.ssh/authorized_keys.tmp"
 	rmdir -- "$TMP/auth" "$TMP/root/.ssh" "$TMP/root" 2>/dev/null || true
 	rmdir -- "$TMP" 2>/dev/null || true
@@ -21,7 +21,6 @@ source "$TMP/panel.sh"
 SSHD_MAIN="$TMP/sshd_config"
 SSHD_DROPIN_DIR="$TMP/auth"
 SSHD_AUTH_DROPIN="$SSHD_DROPIN_DIR/00-abuseguard-auth.conf"
-SSHD_AUTH_DROPIN_OLD="$SSHD_DROPIN_DIR/99-abuseguard-auth.conf"
 SSHD_DROPIN="$SSHD_DROPIN_DIR/99-abuseguard-port.conf"
 SSH_ROOT_HOME="$TMP/root/.ssh"
 SSH_AUTH_KEYS="$SSH_ROOT_HOME/authorized_keys"
@@ -121,7 +120,7 @@ pause() { :; }
 
 reset_all() {
 	printf 'Include %s/*.conf\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
-	rm -f -- "$SSHD_AUTH_DROPIN" "$SSHD_AUTH_DROPIN.tmp" "$SSHD_AUTH_DROPIN_OLD"
+	rm -f -- "$SSHD_AUTH_DROPIN" "$SSHD_AUTH_DROPIN.tmp"
 	rm -f -- "$SSHD_DROPIN_DIR/00-aaa-hardening.conf" "$SSHD_DROPIN_DIR/50-cloud-init.conf"
 	rm -f -- "$SSH_AUTH_KEYS" "$SSH_AUTH_KEYS.tmp"
 	SOCKET_ACTIVE=0; RELOAD_FAIL=0; SSHD_T_FAIL=0; CHPASSWD_FAIL=0
@@ -300,15 +299,6 @@ printf 'PasswordAuthentication no\n' > "$SSHD_DROPIN_DIR/50-cloud-init.conf"
 if printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication 密码登录; then :; else fail 'password off rejected despite dominated 50- dropin'; fi
 [ "$(ssh_auth_state passwordauthentication)" = off ] || fail 'state should follow our 00- over 50- dropin'
 rm -f -- "$SSHD_DROPIN_DIR/50-cloud-init.conf"
-
-# 旧版 99- 文件自动迁移到 00-：内容保留，旧名消失。
-rm -f -- "$SSHD_AUTH_DROPIN"
-printf 'PasswordAuthentication no\nPubkeyAuthentication yes\n' > "$SSHD_AUTH_DROPIN_OLD"
-if act_ssh_auth passwordauthentication PasswordAuthentication 密码登录 </dev/null; then :; else fail 'password on with migration failed'; fi
-[ ! -e "$SSHD_AUTH_DROPIN_OLD" ] || fail 'old 99- dropin not migrated away'
-[ -f "$SSHD_AUTH_DROPIN" ] || fail 'migrated 00- dropin missing'
-grep -qx 'PasswordAuthentication yes' "$SSHD_AUTH_DROPIN" || fail 'migrated dropin lost password line'
-grep -qx 'PubkeyAuthentication yes' "$SSHD_AUTH_DROPIN" || fail 'migrated dropin lost pubkey line'
 rm -f -- "$SSHD_AUTH_DROPIN" "$TMP/sshd_config.keep"
 printf 'Include %s/*.conf\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
 
