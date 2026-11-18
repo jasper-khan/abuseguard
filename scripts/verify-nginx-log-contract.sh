@@ -453,7 +453,16 @@ before_lines="$(wc -l < "$LOG")"
 logrotate -f -s "$TMP/logrotate.state" "$NGINX_LOGROTATE" || fail 'logrotate entry failed'
 [ -f "$LOG.1" ] || fail 'logrotate did not rotate the access log'
 [ "$(wc -l < "$LOG.1")" -eq "$before_lines" ] || fail 'rotated log lost lines'
-req "$TRUSTED_SRC" "$TRUSTED_DST" / --http1.1 -H 'CF-Connecting-IP: 203.0.113.77' >/dev/null
+# A graceful reload lets old workers finish in-flight requests against the
+# renamed file; retry until the turnover serves one into the reopened log.
+reopen_tries=0
+while :; do
+	req "$TRUSTED_SRC" "$TRUSTED_DST" / --http1.1 -H 'CF-Connecting-IP: 203.0.113.77' >/dev/null
+	[ -s "$LOG" ] && break
+	reopen_tries=$((reopen_tries + 1))
+	[ "$reopen_tries" -ge 10 ] && break
+	sleep 1
+done
 [ -s "$LOG" ] || fail 'Nginx did not reopen the access log after rotation'
 grep -q '"client_ip":"203.0.113.77"' "$LOG" || fail 'post-rotation request was not logged'
 ok 'logrotate entry rotated the real log and Nginx reopened it'
