@@ -179,6 +179,7 @@ set -euo pipefail
 source "$1"
 WEB_SERVER_FILE="$2/web-server"
 NGINX_RUNTIME="$2/nginx-runtime.sh"
+printf 'caddy\n' > "$WEB_SERVER_FILE"
 sample='中文对齐与长文本换行测试：TCP443,63052,33121；UDP443,58209；完整保留内容。'
 rows="$(panel_row "${C_G}${sample}${C_0}" | sed $'s/\033\\[[0-9;]*m//g')"
 while IFS= read -r row; do
