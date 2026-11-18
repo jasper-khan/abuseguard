@@ -34,27 +34,24 @@ SSH_REPORT_JAIL=/etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local
 REPO_FILE="$CONF_DIR/repo"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-$( [ -f "$REPO_FILE" ] && cat "$REPO_FILE" || echo jasper-khan/abuseguard )}"
 
-# GitHub download resiliency for the update/uninstall fetches (see install.sh).
-#   ABUSEGUARD_MIRROR unset -> direct first, then auto proxy-chain fallback
-#   ABUSEGUARD_MIRROR=cn    -> straight to the proxy chain
-#   ABUSEGUARD_MIRROR=<p>/  -> force that one prefix
-# The update/uninstall URLs carry ?v=<epoch> so a mirror cannot serve a
-# stale cached script (GitHub ignores the query; mirrors key on full URL).
-ABUSEGUARD_MIRROR="${ABUSEGUARD_MIRROR:-}"
-AG_GH_MIRRORS="https://gh-proxy.com/ https://gh.ddlc.top/ https://ghproxy.net/ https://ghfast.top/"
+# 更新/卸载只从 GitHub 直连获取：先解析最新已发布 release 的 tag，再从该
+# tag 拉取脚本，保证脚本与其安装的一切来自同一个已发布版本。不内置任何
+# 第三方镜像；网络受限时可设置标准的 https_proxy/HTTPS_PROXY（curl 原生支持）。
 AG_CURL="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
-gh_fetch() {  # URL OUTFILE — direct then mirror chain, quietly
-	local url="$1" out="$2" pfx
-	case "$ABUSEGUARD_MIRROR" in
-		""|0|off|no)
-			$AG_CURL -o "$out" "$url" 2>/dev/null && return 0
-			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" 2>/dev/null && return 0; done
-			return 1 ;;
-		cn|1|yes|on)
-			for pfx in $AG_GH_MIRRORS; do $AG_CURL -o "$out" "$pfx$url" 2>/dev/null && return 0; done
-			return 1 ;;
-		*) $AG_CURL -o "$out" "$ABUSEGUARD_MIRROR$url" 2>/dev/null ;;
+
+# 解析最新 release 的 tag（跟随 https://github.com/<repo>/releases/latest 的
+# 重定向）。解析失败或目标 tag 不合法时返回非零，调用方如实报错，不做任何回退。
+latest_release_tag() {
+	local url tag
+	url="$(curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null -w '%{url_effective}' \
+		"https://github.com/$ABUSEGUARD_REPO/releases/latest")" || return 1
+	case "$url" in
+		*"https://github.com/$ABUSEGUARD_REPO/releases/tag/"*) ;;
+		*) return 1 ;;
 	esac
+	tag="${url##*/}"
+	[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	printf '%s' "$tag"
 }
 
 validate_caddyfile() {
@@ -1779,31 +1776,42 @@ act_logs() {
 }
 
 act_update() {
-	echo "正在从 $ABUSEGUARD_REPO 重新运行安装器..."
-	local f=/tmp/abuseguard-install.sh
-	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/install.sh?v=$(date +%s)" "$f"; then
-		if ABUSEGUARD_REPO="$ABUSEGUARD_REPO" ABUSEGUARD_RELEASE_TAG= \
-			ABUSEGUARD_MIRROR="$ABUSEGUARD_MIRROR" ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
-			rm -f "$f"
-			echo "更新完成，正在重新加载控制面板..."
-			exec /usr/local/bin/ag
-		else
-			rm -f "$f"
-			echo "更新失败。"
-		fi
+	local tag f=/tmp/abuseguard-install.sh
+	if ! tag="$(latest_release_tag)"; then
+		echo "无法解析最新 release（需要能直连 github.com）。"
+		pause
+		return 1
+	fi
+	echo "正在从 $ABUSEGUARD_REPO $tag 重新运行安装器..."
+	if ! $AG_CURL -o "$f" "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/$tag/install.sh"; then
+		echo "无法获取 $tag 的 install.sh（GitHub 直连失败）。"
+		pause
+		return 1
+	fi
+	if ABUSEGUARD_REPO="$ABUSEGUARD_REPO" ABUSEGUARD_RELEASE_TAG="$tag" \
+		ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
+		rm -f "$f"
+		echo "更新完成，正在重新加载控制面板..."
+		exec /usr/local/bin/ag
 	else
-		echo "无法获取 install.sh（直连与镜像均失败）。"
+		rm -f "$f"
+		echo "更新失败。"
 	fi
 	pause
 }
 
 act_uninstall() {
-	local f=/tmp/abuseguard-uninstall.sh
-	if gh_fetch "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/main/uninstall.sh?v=$(date +%s)" "$f"; then
+	local tag f=/tmp/abuseguard-uninstall.sh
+	if ! tag="$(latest_release_tag)"; then
+		echo "无法解析最新 release（需要能直连 github.com）；请从本地克隆运行。"
+		pause
+		return 1
+	fi
+	if $AG_CURL -o "$f" "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/$tag/uninstall.sh"; then
 		bash "$f"
 		rm -f "$f"
 	else
-		echo "无法获取 uninstall.sh；请从本地克隆运行。"
+		echo "无法获取 $tag 的 uninstall.sh（GitHub 直连失败）；请从本地克隆运行。"
 	fi
 	pause
 }

@@ -89,20 +89,13 @@ Nginx 后端使用发行版 `nginx` 服务、`certbot` 与 `certbot-dns-cloudfla
 - 公网只监听 443/tcp（HTTP/1.1 与 HTTP/2），不启用 HTTP/3/QUIC。由安装器新装 Nginx 时会抑制软件包自启并只删除本次新建的发行版默认站点；已有的 Nginx 站点保持不动。AbuseGuard 自己不生成 `listen 80`，自检站点只绑定回环地址。
 - 证书在 Cloudflare 灰云（DNS-only）和橙云（代理）下都可用；橙云时 Cloudflare 的 SSL/TLS 模式需为 Full (strict)。经 CDN 代理的源站 IP 限制问题见「环境要求」。
 
-### 网络慢 / 大陆镜像
+### 网络与下载
 
-安装器的 GitHub 下载（仓库 tarball、引擎、以及带 cloudflare 模块的 Caddy）会**先尝试直连**，仅当直连卡住时，才自动依次经过一串公共 GitHub 代理，直到某个成功为止 —— 因此那条朴素的一行命令在海外（直连）和大陆（自动代理）都能用，无需任何参数。
+所有 GitHub 下载（仓库 tarball、预编译引擎与 Caddy、校验文件、`ag` 面板的更新/卸载脚本）都**只走 GitHub 直连**，项目不内置任何第三方镜像或代理链。更新与卸载会先解析最新已发布 release 的 tag，再从该 tag 拉取脚本与产物——脚本和它安装的一切始终来自同一个已发布版本。若你的网络无法直连 GitHub，请在运行前设置标准的 `https_proxy`/`HTTPS_PROXY` 环境变量（curl 原生支持；此时该代理即你自己选择的信任锚），或在可直连的机器上克隆仓库后用 `--from-source` 安装。
 
-若你的网络已知被墙，想跳过直连尝试，可设置 `ABUSEGUARD_MIRROR=cn` —— 它会直接走代理链，并把威胁情报名单指向 Fastly 的 jsDelivr CDN：
+引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建）。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，Caddy 模式安装器会自动检测并保留、跳过下载。Nginx 模式只从 release 下载 Go 引擎，Nginx/Certbot 使用发行版软件包。
 
-```bash
-sudo ABUSEGUARD_MIRROR=cn ./install.sh          # 直接走代理链
-sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # 强制使用某个代理
-```
-
-引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建），因此都享受上面的直连→镜像回退，大陆无需额外配置。Nginx 模式只从 release 下载 Go 引擎，Nginx/Certbot 使用发行版软件包，同样受镜像设置影响不大。`ag` 面板的更新/卸载会沿用安装时设定的 `ABUSEGUARD_MIRROR`。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，Caddy 模式安装器会自动检测并保留、跳过下载。
-
-**完整性校验（强制）**：下载的 engine 与 Caddy **必须**通过 release 里 `SHA256SUMS.txt` 的校验。校验文件体积极小，因此会尽力拿到：先直连 GitHub（被限速也能拿到），失败再走整条镜像链，并带重试。**校验不符、或校验文件就是拿不到，都会中止安装**（不会“跳过校验继续装”）；如遇网络问题，请重试或用 `--from-source` 本地编译。诚实说明边界：若你用 `ABUSEGUARD_MIRROR=<prefix>/` 强制单一镜像，校验文件也会走该镜像，此时只能防"被动缓存型"镜像、防不住对该线路的主动篡改。
+**完整性校验（强制）**：下载的 engine 与 Caddy **必须**通过 release 里 `SHA256SUMS.txt` 的校验。校验文件体积极小，会带重试直连获取。**校验不符、或校验文件就是拿不到，都会中止安装**（不会“跳过校验继续装”）；如遇网络问题，请重试或用 `--from-source` 本地编译。
 
 **Cloudflare IP 段兜底**：生成 Caddyfile 的 `trusted_proxies` 或 Nginx 的信任来源配置时会拉取 Cloudflare 的官方 IPv4/IPv6 网段；若网络受限拉取失败，会退回内置快照（`assets/caddy/cloudflare-ips.fallback`），避免信任范围只剩回环或过窄——那会让所有访客都被当成 Cloudflare 边缘 IP（或反之信任伪造头），导致误封或整站不可用。
 
@@ -277,7 +270,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 - 反向代理本身不提供任何鉴权。凡是你对外暴露的站点，除非你自己加了鉴权，否则都是公开的。
 - 安装器的自检站点只绑定回环地址（Caddy 为 `127.0.0.1:8080`；Nginx 同样不生成公网 80 端口站点），不会暴露公网 HTTP。
 - 密钥（`*.key`、`.env`）权限为 0640；Nginx 的 `/etc/caddy-abuseguard/cloudflare.ini` 为 root:root 0600。两者都已被 git 忽略，切勿提交。
-- Caddy 模式下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络慢 / 大陆镜像」的完整性校验说明）；Nginx 模式使用发行版 `nginx`/`certbot` 包，安装清单只记录哪些包由本项目首次安装，避免卸载时误删系统原有软件。
+- Caddy 模式下载的二进制会用 `SHA256SUMS.txt` 校验（见「网络与下载」的完整性校验说明）；Nginx 模式使用发行版 `nginx`/`certbot` 包，安装清单只记录哪些包由本项目首次安装，避免卸载时误删系统原有软件。
 - 威胁情报只以根所有的快照和内核集合生效：根权限子命令在进程内逐行校验白名单和已存储名单，绝不把下载到的原始文本当作 nft 规则执行；`/var/lib/caddy-abuseguard` 对 `abuseguard` 用户可写，因此不作为可执行策略来源。
 - Caddy 以加固的 systemd 单元运行（`NoNewPrivileges`、`ProtectSystem=strict`、能力集限定、系统调用过滤等）；两个引擎定时任务和根权限策略应用单元同样加固。Nginx 使用发行版自带的 `nginx.service`（不替换单元）。
 - Nginx 只信任官方 Cloudflare IPv4/IPv6 网段发来的 `CF-Connecting-IP`；来自其他来源的同名头会被忽略。受保护站点日志不含 URI、Host、请求头、正文或查询串，也不额外写默认 combined 访问日志。

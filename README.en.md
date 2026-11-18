@@ -89,41 +89,32 @@ Nginx mode uses the distro `nginx` service, `certbot`, and `certbot-dns-cloudfla
 - Public listeners are 443/tcp with HTTP/1.1 and HTTP/2 only; HTTP/3/QUIC is not enabled. When the installer installs Nginx it suppresses package autostart and removes only the distro default site it just created; pre-existing Nginx sites are left untouched. AbuseGuard itself generates no `listen 80`, and the self-test binds loopback only.
 - Certificates work in Cloudflare grey-cloud (DNS-only) and orange-cloud mode; orange-cloud requires SSL/TLS mode Full (strict). The CDN limitation for origin source-IP blocking is described under Requirements.
 
-### Slow network / China mirror
+### Network and downloads
 
-The installer's GitHub downloads (repo tarball, engine, and in Caddy mode the
-cloudflare-enabled Caddy) try a **direct download first** and, only if it stalls, automatically
-fall back through a chain of public GitHub proxies until one delivers — so the
-plain one-liner works overseas (direct) and from mainland China (auto-proxy)
-with no flags.
-
-To skip the direct attempt entirely on a known-blocked network, set
-`ABUSEGUARD_MIRROR=cn` — it goes straight to the proxy chain and also points
-the threat-intel list at Fastly's jsDelivr CDN:
-
-```bash
-sudo ABUSEGUARD_MIRROR=cn ./install.sh          # straight to proxy chain
-sudo ABUSEGUARD_MIRROR=https://your.proxy/ ./install.sh   # force one proxy
-```
+All GitHub downloads (repo tarball, prebuilt engine and Caddy, the checksum
+file, and the `ag` panel's update/uninstall scripts) go **straight to
+GitHub**; the project ships no third-party mirror or proxy chain. Update and
+uninstall resolve the latest published release tag first and pull the script
+from that tag, so the script and everything it installs always belong to one
+published release. If your network cannot reach GitHub directly, set the
+standard `https_proxy`/`HTTPS_PROXY` environment variables before running
+(curl honours them natively; that proxy is then your own chosen trust
+anchor), or clone the repo on a machine that can reach GitHub and install
+with `--from-source`.
 
 Both the engine and the cloudflare-enabled Caddy are downloaded from this
-repo's GitHub release (Caddy is built by CI with `xcaddy`), so both get the
-direct→mirror fallback above and need no extra setup in mainland China. The
-`ag` panel's update/uninstall reuse whatever `ABUSEGUARD_MIRROR` was
-set at install time. If a Caddy with the `caddy-dns/cloudflare` module already
-exists, the installer detects and keeps it, skipping the download.
+repo's GitHub release (Caddy is built by CI with `xcaddy`). If a Caddy with
+the `caddy-dns/cloudflare` module already exists, the installer detects and
+keeps it, skipping the download. Nginx mode only downloads the Go engine
+from the release; Nginx and Certbot come from distro packages.
 
 **Integrity check (mandatory)**: the downloaded engine and Caddy MUST match the
-release's `SHA256SUMS.txt`. That file is tiny, so it is fetched as robustly as
-possible: direct GitHub first (works even when throttled), then the whole mirror
-chain, with retries. **A mismatch, or an unobtainable sums file, aborts the
+release's `SHA256SUMS.txt`. That file is tiny and is fetched direct from
+GitHub, with retries. **A mismatch, or an unobtainable sums file, aborts the
 install**; verification never degrades to "skip it and continue". On a network
 failure, retry or build locally with `--from-source`. The sums are fetched
 lazily, only when a binary is actually downloaded, so `--from-source` and
-`ABUSEGUARD_ENGINE_BIN` installs never fetch them. An honest caveat: if you
-force a single mirror for everything (`ABUSEGUARD_MIRROR=<prefix>/`), the sums
-travel that same path, so this guards against a passive/caching mirror, not an
-active tamperer on that one path.
+`ABUSEGUARD_ENGINE_BIN` installs never fetch them.
 
 **Cloudflare range fallback**: when generating the Caddyfile's `trusted_proxies`
 or Nginx's trusted-source include, the installer fetches Cloudflare's official
@@ -313,7 +304,7 @@ Uninstall also removes this project's port table, independent intel table, root-
 - The reverse proxy adds no authentication. Anything you expose is public unless you add auth yourself.
 - The installer's self-test binds loopback only (Caddy `127.0.0.1:8080`; Nginx also generates no public port 80 site).
 - Secrets (`*.key`, `.env`) are mode 0640; the Nginx `/etc/caddy-abuseguard/cloudflare.ini` is root:root 0600. All are git-ignored; never commit them.
-- Caddy-mode downloaded binaries are verified against `SHA256SUMS.txt` (see the integrity check under "Slow network / China mirror"). Nginx mode uses distro `nginx`/`certbot` packages, and the install manifest records which packages AbuseGuard installed so uninstall never removes pre-existing software.
+- Caddy-mode downloaded binaries are verified against `SHA256SUMS.txt` (see the integrity check under "Network and downloads"). Nginx mode uses distro `nginx`/`certbot` packages, and the install manifest records which packages AbuseGuard installed so uninstall never removes pre-existing software.
 - Threat intel takes effect only through a root-owned snapshot and kernel set: the root-only applier validates the whitelist and stored feed in-process line by line and never executes downloaded text as nft rules. `/var/lib/caddy-abuseguard` is writable by the unprivileged `abuseguard` user, so it is never used as executable policy input.
 - Caddy runs under a hardened systemd unit (`NoNewPrivileges`, `ProtectSystem=strict`, restricted capability set, syscall filtering); the two engine timers and the root policy applier are hardened too. Nginx uses the distro-provided `nginx.service` (no replacement unit).
 - Nginx trusts `CF-Connecting-IP` only from official Cloudflare IPv4/IPv6 ranges; the same header from any other source is ignored. The protected access log has no URI, Host, headers, body, or query, and managed sites do not also write the default combined log.

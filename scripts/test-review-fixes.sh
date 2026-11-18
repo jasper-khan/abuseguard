@@ -103,28 +103,20 @@ write_sum() {
 
 # Resolve latest once, then use the same tag even if latest moves meanwhile.
 ABUSEGUARD_REPO=jasper-khan/abuseguard
-ABUSEGUARD_MIRROR=""
-AG_GH_MIRRORS=https://mirror.example/
 curl() { printf '%s' "$LATEST_URL"; return "${CURL_RESULT:-0}"; }
 LATEST_URL="https://github.com/$ABUSEGUARD_REPO/releases/tag/v0.3.33"
 RELEASE_TAG="$(latest_release_tag)" || fail "latest release was not resolved"
 [ "$RELEASE_TAG" = v0.3.33 ] || fail "wrong release tag"
-TARGET_VERSION=0.3.33
 LATEST_URL="https://github.com/$ABUSEGUARD_REPO/releases/tag/v0.3.34"
-[ "$(release_asset test-name)" = "https://github.com/$ABUSEGUARD_REPO/releases/download/v0.3.33/test-name?v=0.3.33" ] \
+[ "$(release_asset test-name)" = "https://github.com/$ABUSEGUARD_REPO/releases/download/v0.3.33/test-name" ] \
 	|| fail "asset download followed a moving latest release"
 LATEST_URL="https://github.com/$ABUSEGUARD_REPO/releases"
 if latest_release_tag; then fail "missing release tag was accepted"; fi
 CURL_RESULT=1
 if latest_release_tag; then fail "failed latest lookup was accepted"; fi
-curl() {
-	case "${!#}" in
-		"https://mirror.example/https://github.com/$ABUSEGUARD_REPO/releases/latest")
-			printf 'https://mirror.example/https://github.com/%s/releases/tag/v0.3.33' "$ABUSEGUARD_REPO" ;;
-		*) return 1 ;;
-	esac
-}
-[ "$(latest_release_tag)" = v0.3.33 ] || fail "latest lookup did not fall back to the mirror"
+CURL_RESULT=0
+LATEST_URL="https://github.com/$ABUSEGUARD_REPO/releases/tag/not-a-tag"
+if latest_release_tag; then fail "malformed release tag was accepted"; fi
 unset -f curl
 
 # Exercise the actual bootstrap with a local checkout present. It must still
@@ -138,7 +130,7 @@ mkdir "$TMP/bootstrap"
 	mktemp() { printf '%s\n' "$TMP/bootstrap"; }
 	cleanup_temp_tree() { :; }
 	gh_fetch() {
-		case "$1" in "https://github.com/$ABUSEGUARD_REPO/archive/refs/tags/v0.3.33.tar.gz?v="*) return 0 ;; esac
+		case "$1" in "https://github.com/$ABUSEGUARD_REPO/archive/refs/tags/v0.3.33.tar.gz") return 0 ;; esac
 		fail "bootstrap did not select the release archive"
 	}
 	tar() { :; }

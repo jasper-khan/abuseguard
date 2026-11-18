@@ -20,50 +20,27 @@ set -euo pipefail
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-jasper-khan/abuseguard}"
 
-# GitHub download resiliency (matters mainly in mainland China, where direct
-# github.com downloads are throttled or blocked). Default behaviour: try a
-# direct download first (instant for overseas users), and only if it stalls
-# fall back through a chain of public GitHub proxies until one delivers.
-#   ABUSEGUARD_MIRROR unset      direct first, then auto proxy-chain fallback
-#   ABUSEGUARD_MIRROR=cn         skip direct, go straight to the proxy chain
-#                                (also switches the intel list to fastly.jsdelivr)
-#   ABUSEGUARD_MIRROR=<prefix>/  force this one proxy prefix, no chain
-ABUSEGUARD_MIRROR="${ABUSEGUARD_MIRROR:-}"
-# Proxies that re-serve github.com URLs, fastest-first (benchmarked from CN).
-AG_GH_MIRRORS="https://gh-proxy.com/ https://gh.ddlc.top/ https://ghproxy.net/ https://ghfast.top/"
+# All downloads come straight from GitHub; there is no built-in mirror or
+# proxy chain. A user behind a blocked network sets the standard
+# https_proxy/HTTPS_PROXY environment variables (curl honours them natively),
+# and that proxy is then its own trust anchor.
 # curl opts: give up on a dead host fast, abort if the transfer stalls under
-# 100 KB/s for 10s (catches throttling), hard-cap at 120s. No -S: curl stays
-# quiet on failure so a slow/aborted direct attempt doesn't print scary errors.
+# 100 KB/s for 10s (catches a stalled link), hard-cap at 120s for small files.
 AG_CURL="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10 --max-time 120"
 # For large binaries (engine ~6MB, Caddy ~40MB): same stall detection, but NO
-# total-time cap — a healthy mirror at a moderate ~300KB/s must not be killed
-# mid-download (40MB > 120s), which would churn the whole chain or fail outright.
+# total-time cap — a healthy but slow link (~300KB/s) must not be killed
+# mid-download, which would fail the install outright.
 AG_CURL_BIG="curl -fsL --connect-timeout 10 --speed-limit 102400 --speed-time 10"
 # For the tiny SHA256SUMS.txt: no stall detection (a few hundred bytes never
 # sustains 100KB/s anyway), a short hard cap, and retries. Verification is
 # mandatory, so this fetch is made as robust as possible instead of optional.
 AG_CURL_SUMS="curl -fsL --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 1"
 
-# gh_fetch URL OUTFILE -- download a github.com URL to OUTFILE. Tries a direct
-# download first, then a chain of mirrors, quietly (curl errors -> /dev/null),
-# so the fallback is automatic and the user only sees the "downloading…" line.
+# gh_fetch URL OUTFILE [CURL_CMD] -- download a URL to OUTFILE, direct only.
+# The failure is returned to the caller, which aborts with a clear error.
 gh_fetch() {
-	local url="$1" out="$2" curl_cmd="${3:-$AG_CURL}" pfx
-	case "$ABUSEGUARD_MIRROR" in
-		""|0|off|no)
-			$curl_cmd -o "$out" "$url" 2>/dev/null && return 0
-			for pfx in $AG_GH_MIRRORS; do
-				$curl_cmd -o "$out" "$pfx$url" 2>/dev/null && return 0
-			done
-			return 1 ;;
-		cn|1|yes|on)
-			for pfx in $AG_GH_MIRRORS; do
-				$curl_cmd -o "$out" "$pfx$url" 2>/dev/null && return 0
-			done
-			return 1 ;;
-		*)
-			$curl_cmd -o "$out" "$ABUSEGUARD_MIRROR$url" 2>/dev/null ;;
-	esac
+	local curl_cmd="${3:-$AG_CURL}"
+	$curl_cmd -o "$2" "$1"
 }
 
 # Test hook: scripts/test-proxy-selection.sh sources this file with a private
@@ -445,23 +422,13 @@ EOF
 # Resolve once before changing the host; bootstrap and assets share this tag.
 # The redirect avoids requiring jq before dependencies have been installed.
 latest_release_tag() {
-	local url tag pfx
-	local -a prefixes
-	case "$ABUSEGUARD_MIRROR" in
-		""|0|off|no) prefixes=("" $AG_GH_MIRRORS) ;;
-		cn|1|yes|on) prefixes=($AG_GH_MIRRORS) ;;
-		*) prefixes=("$ABUSEGUARD_MIRROR") ;;
-	esac
-	for pfx in "${prefixes[@]}"; do
-		url="$(curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null -w '%{url_effective}' \
-			"${pfx}https://github.com/$ABUSEGUARD_REPO/releases/latest")" || continue
-		case "$url" in *"https://github.com/$ABUSEGUARD_REPO/releases/tag/"*) ;; *) continue ;; esac
-		tag="${url##*/}"
-		[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
-		printf '%s' "$tag"
-		return 0
-	done
-	return 1
+	local url tag
+	url="$(curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null -w '%{url_effective}' \
+		"https://github.com/$ABUSEGUARD_REPO/releases/latest")" || return 1
+	case "$url" in *"https://github.com/$ABUSEGUARD_REPO/releases/tag/"*) ;; *) return 1 ;; esac
+	tag="${url##*/}"
+	[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	printf '%s' "$tag"
 }
 
 # detect_ssh_port -- print the TCP port sshd actually listens on. Prefer the
@@ -809,7 +776,7 @@ if [ "$fetch_release" = 1 ] || [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/as
 	AG_TMP="$(mktemp -d)"
 	trap 'cleanup_temp_tree "$AG_TMP" || true' EXIT
 	log "正在获取仓库 $ABUSEGUARD_REPO@$AG_REF ..."
-	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/$archive_ref.tar.gz?v=$(date +%s)" "$AG_TMP/repo.tar.gz" \
+	gh_fetch "https://github.com/$ABUSEGUARD_REPO/archive/refs/$archive_ref.tar.gz" "$AG_TMP/repo.tar.gz" \
 		|| die "自举下载失败（可设置 ABUSEGUARD_REPO / ABUSEGUARD_REF，或克隆仓库后运行 ./install.sh）。"
 	tar -xzf "$AG_TMP/repo.tar.gz" -C "$AG_TMP" --strip-components=1 \
 		|| die "自举解压失败。"
@@ -1044,27 +1011,19 @@ else
 	warn "未能探测 SSH 端口，SSH 上报端口保持默认 22（可在 /etc/fail2ban/jail.d/zz-caddy-abuseguard-report.local 手动修改）"
 fi
 
-# release_asset NAME -- URL of an asset from the selected release. The query is a
-# cache buster: GitHub ignores it, but download mirrors key their cache on the
-# full URL, so they stop serving a stale copy cached under the previous
-# release (a checksum mismatch that aborted installs).
+# release_asset NAME -- URL of an asset from the selected release.
 release_asset() {
 	local route=latest/download
 	[ -z "${RELEASE_TAG:-}" ] || route="download/$RELEASE_TAG"
-	printf 'https://github.com/%s/releases/%s/%s?v=%s' \
-		"$ABUSEGUARD_REPO" "$route" "$1" "${TARGET_VERSION:-dev}"
+	printf 'https://github.com/%s/releases/%s/%s' "$ABUSEGUARD_REPO" "$route" "$1"
 }
 
 # --- integrity: verify downloaded binaries against the release SHA256SUMS -----
-# engine + Caddy come through third-party GitHub proxies, so every downloaded
-# binary MUST match the release checksums. Verification is MANDATORY, not
-# best-effort: if the checksums cannot be obtained we abort, rather than quietly
-# installing something unverified. That is practical because the sums file is
-# tiny, so it is fetched over every available route with retries: direct GitHub
-# first (fine even on a throttled link), then the whole mirror chain.
-# Honest limit: if you force ONE mirror for everything (ABUSEGUARD_MIRROR=<prefix>/),
-# the sums travel that same path, so this guards against a passive/caching
-# mirror, not an active tamperer on that single forced path.
+# Every downloaded binary MUST match the release checksums. Verification is
+# MANDATORY, not best-effort: if the checksums cannot be obtained we abort,
+# rather than quietly installing something unverified. That is practical
+# because the sums file is tiny and is fetched direct from GitHub, with
+# retries.
 SUMS_FILE=""
 # sums_require -- fetch SHA256SUMS.txt once, on first actual need (so a
 # --from-source / preset-binary install never fetches it at all). Aborts the
@@ -1074,13 +1033,13 @@ sums_require() {
 	local url; url="$(release_asset SHA256SUMS.txt)"
 	local f; f="$(mktemp)"
 	log "正在获取 SHA256SUMS（校验二进制用）..."
-	if { $AG_CURL_SUMS -o "$f" "$url" 2>/dev/null || gh_fetch "$url" "$f" "$AG_CURL_SUMS"; } && [ -s "$f" ]; then
+	if $AG_CURL_SUMS -o "$f" "$url" && [ -s "$f" ]; then
 		SUMS_FILE="$f"
 		trap 'rm -f "${SUMS_FILE:-}"; on_install_exit' EXIT
 		return 0
 	fi
 	rm -f "$f"
-	die "无法获取 SHA256SUMS.txt（直连与镜像均已重试）。为避免安装未经校验的二进制，安装已中止；请检查网络后重试，或用 --from-source 本地编译引擎。"
+	die "无法获取 SHA256SUMS.txt。为避免安装未经校验的二进制，安装已中止；请检查网络后重试，或用 --from-source 本地编译引擎。"
 }
 verify_sha256() {  # FILE BASENAME -- return failure unless the release checksum matches
 	local file="$1" fn="$2" want got
@@ -1103,7 +1062,7 @@ stage_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
 		|| { warn "$label：无法创建临时下载文件。"; return 1; }
 	if ! gh_fetch "$url" "$tmp" "$AG_CURL_BIG"; then
 		rm -f -- "$tmp"
-		warn "$label 下载失败（直连与镜像都失败）。"
+		warn "$label 下载失败。"
 		return 1
 	fi
 	if ! verify_sha256 "$tmp" "$fn"; then
@@ -1194,15 +1153,6 @@ log "引擎：$("$STAGED_BIN" version)"
 # --- config, whitelist, key (only if absent) ---------------------------------
 if [ ! -f "$CONF_DIR/config.json" ]; then
 	install -m 0640 -o root -g abuseguard "$SRC_DIR/assets/config/config.json.template" "$CONF_DIR/config.json"
-	# In mirror mode, point the big intel blocklist at fastly.jsdelivr (the
-	# commit_url stays on api.github.com, which is small and not proxied).
-	if [ -n "$ABUSEGUARD_MIRROR" ] && command -v jq >/dev/null 2>&1; then
-		tmp="$(mktemp)"
-		jq '.intel.source_url = "https://fastly.jsdelivr.net/gh/borestad/blocklist-abuseipdb@{commit}/abuseipdb-s100-14d.ipv4"' \
-			"$CONF_DIR/config.json" > "$tmp" && install -m 0640 -o root -g abuseguard "$tmp" "$CONF_DIR/config.json"
-		rm -f "$tmp"
-		log "镜像模式：情报源已切换到 fastly.jsdelivr"
-	fi
 	log "已写入 $CONF_DIR/config.json"
 else
 	log "保留已有的 $CONF_DIR/config.json"
@@ -1222,9 +1172,8 @@ printf '%s\n' "$ABUSEGUARD_REPO" > "$CONF_DIR/repo"; chmod 0644 "$CONF_DIR/repo"
 # --- backend setup -----------------------------------------------------------
 if [ "$PROXY_MODE" = caddy ]; then
 # --- Caddy binary with the cloudflare DNS module -----------------------------
-# Downloaded from our own GitHub release (built by CI with xcaddy), so it gets
-# the same direct-then-mirror fallback as the engine. caddyserver.com's custom
-# build is not mirror-able (not github.com) and is throttled hard from CN.
+# Downloaded from our own GitHub release (built by CI with xcaddy), like the
+# engine. caddyserver.com's custom build is not used.
 need_caddy=1
 if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | awk '$0=="dns.providers.cloudflare" { found=1 } END { exit !found }'; then
 	need_caddy=0
