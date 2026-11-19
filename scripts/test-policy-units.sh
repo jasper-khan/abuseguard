@@ -126,8 +126,7 @@ cat > "$CONF/config.json" <<EOF
     "commit_url": "",
     "token_file": "",
     "min_entries": 3,
-    "max_entries": 10,
-    "max_age": "48h"
+    "max_entries": 10
   },
   "abuseipdb": {"enabled": false, "report_url": "", "report_key_file": "", "daily_report_cap": 0, "dedupe_window": ""}
 }

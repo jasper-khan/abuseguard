@@ -21,7 +21,6 @@ type Config struct {
 		TokenFile  string `json:"token_file"`
 		MinEntries int    `json:"min_entries"`
 		MaxEntries int    `json:"max_entries"`
-		MaxAge     string `json:"max_age"` // advisory; reserved
 	} `json:"intel"`
 	AbuseIPDB struct {
 		Enabled        bool   `json:"enabled"`

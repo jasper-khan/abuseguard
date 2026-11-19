@@ -483,13 +483,23 @@ func nftTableExists() bool {
 
 func restorePolicySnapshot(path string) {
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logf("policy: boot restore: reading snapshot %s failed: %v", path, err)
+		}
+		return
+	}
+	if len(data) == 0 {
+		logf("policy: boot restore: snapshot %s is empty; kernel table left absent", path)
 		return
 	}
 	if err := nftCheckFile(path); err != nil {
+		logf("policy: boot restore: snapshot %s failed validation: %v", path, err)
 		return
 	}
-	_ = nftApplyFile(path)
+	if err := nftApplyFile(path); err != nil {
+		logf("policy: boot restore: applying snapshot %s failed: %v", path, err)
+	}
 }
 
 // captureLivePolicy dumps the live table so rollback restores what is actually
