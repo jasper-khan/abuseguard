@@ -4,6 +4,7 @@
 *.exe
 caddy-abuseguard
 caddy-abuseguard-linux-*
+/engine-rs/target/
 
 # Local secrets / state (never commit)
 *.key
