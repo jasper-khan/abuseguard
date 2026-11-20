@@ -38,8 +38,7 @@ pub fn report_lock_path(c: &Config) -> String {
 }
 
 // is_reportable_ip mirrors netip.ParseAddr + IsGlobalUnicast + !IsPrivate.
-// canonical: v4-mapped input is unmapped first (netip semantics for the
-// checks; see allow.rs note), link-local is NOT excluded (Go parity).
+// IPv4-mapped input is unmapped first; the unicast check excludes link-local.
 pub fn is_reportable_ip(s: &str) -> bool {
     let ip = match canon_ip(s.trim()) {
         Some(ip) => ip,
@@ -49,14 +48,18 @@ pub fn is_reportable_ip(s: &str) -> bool {
         match ip {
             IpAddr::V4(v4) => {
                 let o = u32::from(*v4);
-                // !unspecified !loopback !multicast !broadcast
-                !(o == 0 || (o >> 24) == 127 || (o >> 28) == 0xE || o == 0xFFFF_FFFF)
+                !(o == 0
+                    || (o >> 24) == 127
+                    || (o >> 28) == 0xE
+                    || o == 0xFFFF_FFFF
+                    || v4.is_link_local())
             }
             IpAddr::V6(v6) => {
                 let seg = u128::from(*v6);
                 !(seg == 0
                     || seg == 1 // ::1 loopback
-                    || (seg >> 120) == 0xFF) // ff00::/8 multicast
+                    || (seg >> 120) == 0xFF // ff00::/8 multicast
+                    || (seg >> 118) == 0x3FA) // fe80::/10 link-local
             }
         }
     }
@@ -237,6 +240,21 @@ mod tests {
             transport: "HTTP/1.1".to_string(),
             ..ReportItem::default()
         }
+    }
+
+    #[test]
+    fn loopback_and_link_local_are_not_reportable() {
+        for ip in [
+            "::1",
+            "169.254.1.2",
+            "fe80::1",
+            "febf::1",
+            "::ffff:169.254.1.2",
+        ] {
+            assert!(!is_reportable_ip(ip), "{ip} is not global unicast");
+        }
+        assert!(is_reportable_ip("::ffff:192.0.2.1"));
+        assert!(is_reportable_ip("2001:db8::1"));
     }
 
     // TestConcurrentEnqueueSurvivesReportFlush: enqueue during a blocked report

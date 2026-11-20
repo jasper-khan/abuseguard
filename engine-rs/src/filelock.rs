@@ -1,6 +1,7 @@
 // filelock.rs — advisory file locks.
 // Linux: flock(2), exactly like the Go engine. Non-Linux (dev/test only):
 // in-process per-path mutex, like Go's filelock_other.go.
+#[cfg(not(target_os = "linux"))]
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub struct FileLock {
@@ -86,9 +87,9 @@ pub fn acquire_policy_lock(path: &str, timeout: std::time::Duration) -> Result<F
         .map_err(|e| format!("无法创建策略锁 {}：{}", path, e))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusiveNonblocking) {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => return Ok(FileLock { file }),
-            Err(rustix::io::Errno::AGAIN) | Err(rustix::io::Errno::WOULDBLOCK) => {}
+            Err(rustix::io::Errno::WOULDBLOCK) => {}
             Err(e) => return Err(format!("无法锁定策略锁 {}：{}", path, e)),
         }
         if std::time::Instant::now() > deadline {

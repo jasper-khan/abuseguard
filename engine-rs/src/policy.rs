@@ -114,22 +114,10 @@ pub fn run_policy_apply(args: &[String]) {
         logf("policy-apply: 仅支持 Linux。");
         std::process::exit(1);
     }
-    #[cfg(unix)]
-    {
-        // Geteuid equivalent without libc: /proc reports uid only on Linux.
-        if std::fs::read_to_string("/proc/self/status")
-            .map(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("Uid:"))
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .map(|uid| uid != 0)
-            })
-            .unwrap_or(false)
-        {
-            logf("policy-apply: 需要 root 权限");
-            std::process::exit(1);
-        }
+    #[cfg(target_os = "linux")]
+    if !rustix::process::geteuid().is_root() {
+        logf("policy-apply: 需要 root 权限");
+        std::process::exit(1);
     }
     if look_path("nft").is_none() {
         logf("policy-apply: 未找到 nft");

@@ -1,6 +1,6 @@
 name: ci
 
-# Runs on every push/PR. Six gates:
+# Runs on every push/PR. Seven gates:
 #   1. the Go engine tests must pass and it must compile/vet clean, and the
 #      shell panel/installer tests must pass with their scripted command doubles;
 #   2. the Caddy-log <-> fail2ban-filter contract must hold, checked against
@@ -21,7 +21,9 @@ name: ci
 #      sandbox/capability directives (unprivileged feed sync, root post-apply,
 #      protected paths, last-good boot restore) inside a private netns, because
 #      synthetic hardening can block nft/load/user drops even when the helpers
-#      pass when invoked directly.
+#      pass when invoked directly;
+#   7. the opt-in Rust engine passes locked Linux unit and isolated policy
+#      tests without changing the Go install or release path.
 on:
   push:
     branches: ['**']
@@ -66,6 +68,47 @@ jobs:
           path: /tmp/engine-amd64
           if-no-files-found: error
           retention-days: 1
+
+  rust-engine:
+    runs-on: ubuntu-24.04
+    env:
+      RUST_TOOLCHAIN: '1.100.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+      - name: Test and build the locked Rust engine
+        working-directory: engine-rs
+        run: |
+          cargo "+$RUST_TOOLCHAIN" test --locked
+          cargo "+$RUST_TOOLCHAIN" build --locked --release
+          test -x target/release/caddy-abuseguard
+          target/release/caddy-abuseguard version
+      - name: Verify the Rust native and sandboxed policy contracts
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          set -eu
+          # The policy fixtures use sudo, private network namespaces, and a
+          # private fail2ban instance. Never install the Rust binary as the
+          # default engine, even on this ephemeral runner.
+          # PrivateTmp and ProtectHome hide /tmp, /var/tmp and /home from
+          # the installed units. Use the same base directory as their fixtures.
+          fixture_bin_dir="$(sudo mktemp -d /var/lib/ag-rust-ci.XXXXXX)"
+          trap 'sudo rm -rf -- "$fixture_bin_dir"' EXIT
+          sudo chmod 0755 "$fixture_bin_dir"
+          rust_engine="$fixture_bin_dir/caddy-abuseguard"
+          sudo install -m 0755 "$GITHUB_WORKSPACE/engine-rs/target/release/caddy-abuseguard" "$rust_engine"
+          sudo test -x "$rust_engine"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables fail2ban iproute2 iputils-ping python3
+          id -u abuseguard >/dev/null 2>&1 || sudo useradd --system --no-create-home abuseguard
+          # The real service directives require these paths to exist; the
+          # test's drop-ins redirect all policy writes to fixture paths.
+          sudo install -d /etc/caddy-abuseguard /var/lib/caddy-abuseguard /run/fail2ban
+          sudo env ABUSEGUARD_ENGINE_BIN="$rust_engine" bash ./scripts/test-native-policy.sh --kernel
+          sudo env ABUSEGUARD_CI_SERVICE_TEST=1 ABUSEGUARD_TEST_ENGINE="$rust_engine" bash ./scripts/test-policy-units.sh
 
   shell:
     runs-on: ubuntu-latest

@@ -1,8 +1,6 @@
 // allow.rs — allowlist parsing, canonical export, membership check.
-// Parity note: net.ParseIP collapses IPv4-mapped IPv6 (::ffff:a.b.c.d) to the
-// 4-byte form for Equal/Contains/printing; we do the same via to_ipv4(). The
-// deprecated IPv4-compatible form (::a.b.c.d) also collapses here (Go keeps it
-// 16-byte) — an untested, never-used-in-practice divergence.
+// Like Go, fold IPv4-mapped IPv6 into IPv4 for comparison and display, but
+// preserve native IPv6 addresses, including loopback and unspecified.
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -49,7 +47,7 @@ impl std::fmt::Display for Cidr {
 pub fn canon_ip(s: &str) -> Option<IpAddr> {
     match s.parse::<IpAddr>() {
         Err(_) => None,
-        Ok(IpAddr::V6(v6)) => v6.to_ipv4().map(IpAddr::V4).or(Some(IpAddr::V6(v6))),
+        Ok(IpAddr::V6(v6)) => Some(v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4)),
         Ok(v4 @ IpAddr::V4(_)) => Some(v4),
     }
 }
@@ -70,26 +68,24 @@ pub fn parse_cidr(value: &str) -> Result<Cidr, String> {
         let v6: Ipv6Addr = addr_s
             .parse()
             .map_err(|_| format!("invalid CIDR {:?}", value))?;
-        if let Some(v4) = v6.to_ipv4() {
-            // v4-in-v6 network: normalizes the way net.IPNet.String does, e.g.
-            // ::ffff:203.0.113.77/120 -> 203.0.113.0/24.
-            if prefix < 96 || prefix > 128 {
-                return Err(format!("invalid CIDR {:?}", value));
-            }
-            Ok(Cidr {
-                ip: IpAddr::V4(masked_v4(v4, (prefix - 96) as u32)),
-                prefix: (prefix - 96) as u8,
-            })
-        } else {
-            if prefix > 128 {
-                return Err(format!("invalid CIDR {:?}", value));
-            }
-            let masked = mask_v6(v6, prefix as u16);
-            Ok(Cidr {
-                ip: IpAddr::V6(masked),
-                prefix: prefix as u8,
-            })
+        if prefix > 128 {
+            return Err(format!("invalid CIDR {:?}", value));
         }
+        let masked = mask_v6(v6, prefix as u16);
+        // net.IPNet.String uses the masked network. Only prefixes covering
+        // the entire mapped prefix can be represented as an IPv4 CIDR.
+        if prefix >= 96 {
+            if let Some(v4) = masked.to_ipv4_mapped() {
+                return Ok(Cidr {
+                    ip: IpAddr::V4(v4),
+                    prefix: (prefix - 96) as u8,
+                });
+            }
+        }
+        Ok(Cidr {
+            ip: IpAddr::V6(masked),
+            prefix: prefix as u8,
+        })
     } else {
         let v4: Ipv4Addr = addr_s
             .parse()
@@ -320,6 +316,28 @@ mod tests {
         }
         // and a miss outside every net
         assert!(!original.contains("2001:db9::1"));
+    }
+
+    #[test]
+    fn format_allowlist_preserves_native_ipv6() {
+        let dir = crate::testutil::TempDir::new("allow-native-ipv6");
+        let path = dir.join("whitelist");
+        let p = path.to_str().unwrap();
+        // These are the shipped default whitelist entries.
+        write(&path, "127.0.0.0/8\n::1\n");
+        assert_eq!(format_allowlist(p).unwrap(), b"::1\n127.0.0.0/8\n");
+        assert_eq!(allowlist_check_code(p, "::1"), 0);
+        assert_eq!(allowlist_check_code(p, "0.0.0.1"), 1);
+        assert_eq!(canon_ip("::"), Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+
+        write(&path, "::1/128\n::/0\n::ffff:192.0.2.1/95\n");
+        assert_eq!(
+            format_allowlist(p).unwrap(),
+            b"::1/128\n::/0\n::fffe:0:0/95\n"
+        );
+        let allow = load_allowlist(p).unwrap();
+        assert!(allow.contains("2001:db8::1"));
+        assert!(!allow.contains("192.0.2.1"));
     }
 
     #[test]

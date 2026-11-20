@@ -4,6 +4,8 @@ use crate::config::{read_key_file, Config};
 use crate::http::http_get;
 use crate::util::{logf, save_json, write_file_atomic};
 use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Read};
+use std::net::Ipv4Addr;
 use time::OffsetDateTime;
 
 #[derive(serde::Serialize, Debug, Clone)]
@@ -27,48 +29,55 @@ pub fn intel_meta_path(c: &Config) -> String {
 // out-of-bounds stored data can never reach the kernel as a partial set. Only
 // a missing file is treated as an empty list (root bootstraps before sync).
 pub fn format_intel(c: &Config) -> Result<Vec<u8>, String> {
-    let data = match std::fs::read(intel_txt_path(c)) {
-        Ok(d) => d,
+    const MAX_LINE_BYTES: u64 = 1024 * 1024;
+    // The HTTP source is limited to 32 MiB; permit extra room for local files.
+    const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+    let file = match std::fs::File::open(intel_txt_path(c)) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.to_string()),
     };
-    // Go's scanner iterates content lines; a trailing final newline is not an
-    // extra (empty) line, but a blank line mid-file is a validation failure.
-    let text = String::from_utf8_lossy(&data);
-    let mut pieces: Vec<&str> = text.split('\n').collect();
-    if let Some(last) = pieces.last() {
-        if last.is_empty() {
-            pieces.pop();
-        }
-    }
-    let mut out = String::new();
+    let mut reader = BufReader::new(file);
+    let mut line_buf = Vec::new();
+    let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut entries = 0i64;
-    for line in pieces {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let ok = matches!(canon_ip(line), Some(std::net::IpAddr::V4(_)))
-            && matches!(
-                line.parse::<std::net::IpAddr>(),
-                Ok(std::net::IpAddr::V4(_))
-            )
-            && line.parse::<std::net::Ipv4Addr>().map(|a| a.to_string()) == Ok(line.to_string());
-        if !ok {
-            return Err(format!("invalid intel entry {:?}", line));
+    let mut bytes = 0u64;
+    loop {
+        line_buf.clear();
+        let n = reader
+            .by_ref()
+            .take(MAX_LINE_BYTES + 1)
+            .read_until(b'\n', &mut line_buf)
+            .map_err(crate::util::io_err)? as u64;
+        if n == 0 {
+            break;
         }
+        if n > MAX_LINE_BYTES {
+            return Err("intel entry exceeds maximum line length".to_string());
+        }
+        bytes += n;
+        if bytes > MAX_FILE_BYTES {
+            return Err("intel list exceeds maximum file size".to_string());
+        }
+        let line = line_buf.strip_suffix(b"\n").unwrap_or(&line_buf);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let line = std::str::from_utf8(line).map_err(crate::util::io_err)?;
+        let ip = line
+            .parse::<Ipv4Addr>()
+            .map_err(|_| format!("invalid intel entry {:?}", line))?;
         entries += 1;
-        // Enforce the bound during the scan: a locally writable file must not
-        // force unbounded allocation before the whole-file rejection at EOF.
         if c.intel.max_entries > 0 && entries > c.intel.max_entries {
             return Err(format!(
                 "intel list has {} entries (> max {})",
                 entries, c.intel.max_entries
             ));
         }
-        if !seen.insert(line.to_string()) {
-            continue;
+        if seen.insert(ip) {
+            out.extend_from_slice(line.as_bytes());
+            out.push(b'\n');
         }
-        out.push_str(line);
-        out.push('\n');
     }
     if entries == 0 {
         return Err("intel list is empty".to_string());
@@ -79,7 +88,7 @@ pub fn format_intel(c: &Config) -> Result<Vec<u8>, String> {
             entries, c.intel.min_entries
         ));
     }
-    Ok(out.into_bytes())
+    Ok(out)
 }
 
 fn resolve_commit(c: &Config, token: &str) -> Result<String, String> {
@@ -231,6 +240,16 @@ mod tests {
         c.intel.max_entries = 10;
         let got = format_intel(&c).unwrap();
         assert_eq!(got, b"192.0.2.1\n198.51.100.2\n");
+    }
+
+    #[test]
+    fn format_intel_preserves_crlf_and_unterminated_last_line() {
+        let dir = TempDir::new("intel-line-endings");
+        write_intel(&dir, "192.0.2.1\r\n198.51.100.2");
+        assert_eq!(
+            format_intel(&cfg_with_state(&dir)).unwrap(),
+            b"192.0.2.1\n198.51.100.2\n"
+        );
     }
 
     #[test]

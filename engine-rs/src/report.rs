@@ -70,12 +70,21 @@ pub const REPORT_CHECKPOINT_VERSION: i64 = 1;
 pub struct ReportCheckpoint {
     #[serde(default)]
     pub version: i64,
-    #[serde(default)]
+    // Go writes a nil slice as null after the last item in a batch is sent.
+    #[serde(default, deserialize_with = "deserialize_remaining")]
     pub remaining: Vec<String>,
     #[serde(default)]
     pub dedupe: DedupeStore,
     #[serde(default)]
     pub daily: DailyUsage,
+}
+
+fn deserialize_remaining<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 pub fn dedupe_path(c: &Config) -> String {
@@ -1013,6 +1022,61 @@ mod tests {
         assert!(!path_exists(&checkpoint_path(&c)));
         let daily = load_daily(&c, now_utc()).unwrap();
         assert_eq!(daily.attempts, 2);
+    }
+
+    #[test]
+    fn reporter_recovers_go_checkpoint_after_last_confirmed_report() {
+        let env = new_env();
+        let now = OffsetDateTime::parse("2026-11-14T10:00:00Z", &Rfc3339).unwrap();
+        let clock = || now;
+        let first_ip = "192.0.2.10";
+        let second_ip = "192.0.2.11";
+        assert_eq!(cmd_enqueue(&env.c, valid_probe(first_ip), &clock), 0);
+        assert!(crate::queue::rotate_queue(&env.c).unwrap().is_some());
+        assert_eq!(cmd_enqueue(&env.c, valid_probe(second_ip), &clock), 0);
+
+        // Match Go's reportCheckpoint encoding when its remaining slice is nil:
+        // the POST succeeded and the checkpoint was written, but it has not
+        // yet been applied to the old processing queue.
+        let checkpoint = serde_json::json!({
+            "version": 1,
+            "remaining": null,
+            "dedupe": { "entries": { (dedupe_key(first_ip)): "2026-11-14T10:00:00Z" } },
+            "daily": { "day": "2026-11-14", "attempts": 1 }
+        });
+        save_json(&checkpoint_path(&env.c), &checkpoint, 0o640).unwrap();
+
+        let server = start_server(|_| HttpResp::ok());
+        let mut c = env.c.clone();
+        c.abuseipdb.report_url = server.url.clone();
+        assert_eq!(cmd_report_send_auto(&c, &clock), 0);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].form("ip"), second_ip);
+        assert!(!path_exists(&checkpoint_path(&c)));
+        assert!(!path_exists(&processing_queue_path(&c)));
+        assert_eq!(load_daily(&c, now).unwrap().attempts, 2);
+        assert!(load_dedupe(&c)
+            .unwrap()
+            .entries
+            .unwrap()
+            .contains_key(&dedupe_key(first_ip)));
+    }
+
+    #[test]
+    fn checkpoint_remaining_defaults_without_loosening_array_validation() {
+        for checkpoint in [r#"{}"#, r#"{"remaining":null}"#, r#"{"remaining":[]}"#] {
+            let checkpoint: ReportCheckpoint = serde_json::from_str(checkpoint).unwrap();
+            assert!(checkpoint.remaining.is_empty());
+            // Go's json.Unmarshal also accepts the empty array Rust emits.
+            let serialized = serde_json::to_value(&checkpoint).unwrap();
+            assert_eq!(serialized["remaining"], serde_json::json!([]));
+        }
+        let checkpoint: ReportCheckpoint = serde_json::from_str(r#"{"remaining":["line"]}"#).unwrap();
+        assert_eq!(checkpoint.remaining, ["line"]);
+        for checkpoint in [r#"{"remaining":"line"}"#, r#"{"remaining":[42]}"#] {
+            assert!(serde_json::from_str::<ReportCheckpoint>(checkpoint).is_err());
+        }
     }
 
     fn format_utc_day(t: OffsetDateTime) -> String {
