@@ -2,7 +2,7 @@
 
 [English](README.en.md) | **简体中文**
 
-AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 或 Nginx 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Go 引擎驱动。
+AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 或 Nginx 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Rust 引擎驱动。
 
 一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）或发行版 Nginx（首次安装二选一，之后不可切换）、nftables 入站防火墙、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `ag` 控制面板。
 
@@ -24,7 +24,7 @@ AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) �
 - 安装时启用三个 Web 行为 jail 和 `sshd`，共用同一份白名单。任一 jail 封禁某个 IP 后，nftables 会拦截该源 IP 到本机所有端口、所有协议的流量，包括 SSH。
 - 威胁情报不再经过 fail2ban：同步后由根权限应用把整份名单装进独立的内核集合，名单内的源 IP 在建立连接前即被丢弃；集合独立于端口防火墙表，修改端口不会重建它。
 - 白名单只有一份：面板改动会同时更新 fail2ban 的 `ignoreip` 和 nft 情报例外。手工编辑文件后需要显式应用，见「威胁情报」。
-- 一个 Go 引擎（仅用标准库、单个静态二进制）负责校验名单、冲刷上报队列并加载内核策略。只有根权限子命令 `policy-apply` 会写 nftables/fail2ban；同步、上报、入队等普通命令始终以非特权用户运行。
+- 一个 Rust 引擎（依赖集小且锁定、单个静态二进制）负责校验名单、冲刷上报队列并加载内核策略。只有根权限子命令 `policy-apply` 会写 nftables/fail2ban；同步、上报、入队等普通命令始终以非特权用户运行。
 
 ## 环境要求
 
@@ -45,7 +45,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jasper-khan/abuseguard/main/
 git clone https://github.com/jasper-khan/abuseguard
 cd abuseguard
 sudo ./install.sh                 # 从最新 release 下载预编译引擎
-sudo ./install.sh --from-source   # 或在本地用 Go 编译引擎（需要 go）
+sudo ./install.sh --from-source   # 或在本地用 Rust 编译引擎（需要 cargo）
 sudo ./install.sh --proxy=nginx   # 首次安装选择 Nginx（可与 --from-source 任意顺序组合）
 ```
 
@@ -75,7 +75,7 @@ ag
 - 不提供在 Caddy 与 Nginx 之间切换或迁移的功能。要更换后端只能卸载后重装。
 - 安装拒绝与另一种反向代理共存：目标机器上只要检测到另一后端的二进制/软件包/服务（即使未运行），安装会在改动主机前中止；请先手动移除该后端。
 
-两种后端共用同一 Go 引擎、fail2ban jail/filter/action 标识、nftables 白名单与情报、上报队列和 `ag` 面板；区别只在反向代理、TLS 签发与访问日志来源。
+两种后端共用同一 Rust 引擎、fail2ban jail/filter/action 标识、nftables 白名单与情报、上报队列和 `ag` 面板；区别只在反向代理、TLS 签发与访问日志来源。
 
 Caddy 后端保留原有行为：加固的 `/usr/local/bin/caddy`（内置 `caddy-dns/cloudflare`）、`/etc/caddy` 布局、DNS-01 与 `import abuseguard`。
 
@@ -93,7 +93,7 @@ Nginx 后端使用发行版 `nginx` 服务、`certbot` 与 `certbot-dns-cloudfla
 
 所有 GitHub 下载（仓库 tarball、预编译引擎与 Caddy、校验文件、`ag` 面板的更新/卸载脚本）都**只走 GitHub 直连**，项目不内置任何第三方镜像或代理链。更新与卸载会先解析最新已发布 release 的 tag，再从该 tag 拉取脚本与产物——脚本和它安装的一切始终来自同一个已发布版本。若你的网络无法直连 GitHub，请在运行前设置标准的 `https_proxy`/`HTTPS_PROXY` 环境变量（curl 原生支持；此时该代理即你自己选择的信任锚），或在可直连的机器上克隆仓库后用 `--from-source` 安装。
 
-引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建）。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，Caddy 模式安装器会自动检测并保留、跳过下载。Nginx 模式只从 release 下载 Go 引擎，Nginx/Certbot 使用发行版软件包。
+引擎和带 cloudflare 模块的 Caddy 都从本仓库的 GitHub release 下载（Caddy 由 CI 用 `xcaddy` 构建）。若系统已存在带 `caddy-dns/cloudflare` 模块的 Caddy，Caddy 模式安装器会自动检测并保留、跳过下载。Nginx 模式只从 release 下载 Rust 引擎，Nginx/Certbot 使用发行版软件包。
 
 **完整性校验（强制）**：下载的 engine 与 Caddy **必须**通过 release 里 `SHA256SUMS.txt` 的校验。校验文件体积极小，会带重试直连获取。**校验不符、或校验文件就是拿不到，都会中止安装**（不会“跳过校验继续装”）；如遇网络问题，请重试或用 `--from-source` 本地编译。
 
@@ -201,7 +201,7 @@ example.com {
 
 ```
 /usr/local/bin/ag                             控制面板
-/usr/local/libexec/caddy-abuseguard           Go 引擎（policy-apply 为根权限子命令）
+/usr/local/libexec/caddy-abuseguard           Rust 引擎（policy-apply 为根权限子命令）
 /etc/caddy-abuseguard/web-server              已选后端（严格为 caddy 或 nginx，root 所有）
 /etc/caddy-abuseguard/config.json             引擎配置
 /etc/caddy-abuseguard/whitelist               永不封禁名单
@@ -278,8 +278,8 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 
 ## 构建 / 发布
 
-- `engine/` 是单个 Go module，仅用标准库，`go 1.21`。
-- CI 在 Ubuntu 上运行 Go 测试、shell/面板测试、真实 Caddy 日志契约、真实 Nginx → JSON → fail2ban-regex 契约（HTTP/1.1 与 HTTP/2、可信与伪造的 Cloudflare 头、隐私字段与日志轮转）以及隔离的 Nginx 配置回滚/证书部署集成测试；真实 nftables 和 systemd 沙箱门禁保持独立。
+- `engine-rs/` 是单个 Cargo crate，依赖集小且锁定；`engine-rs/Cargo.toml` 的 `version` 与顶层 `VERSION` 文件保持同步。
+- CI 在 Ubuntu 上运行锁定的 Rust 引擎测试、shell/面板测试、真实 Caddy 日志契约、真实 Nginx → JSON → fail2ban-regex 契约（HTTP/1.1 与 HTTP/2、可信与伪造的 Cloudflare 头、隐私字段与日志轮转）以及隔离的 Nginx 配置回滚/证书部署集成测试；真实 nftables 和 systemd 沙箱门禁保持独立。
 - 打 `vX.Y.Z` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，它构建 `caddy-abuseguard-linux-{amd64,arm64}` 并附加到 release。`install.sh` 默认下载这些产物；Nginx 模式不发布也不下载这些资产，改用发行版软件包。
 - 版本化的引擎产物发布后保持不变；每周/手动刷新只更新跟随上游的 Caddy，并重新生成覆盖全部现有产物的校验和与构建元数据。
 

@@ -1,4 +1,6 @@
 [package]
+# keep in sync with the top-level VERSION file; install.sh --from-source and
+# release.yml both assert the binary's reported version against it.
 name = "abuseguard"
 version = "0.7.1"
 edition = "2021"

@@ -1,8 +1,9 @@
 name: ci
 
-# Runs on every push/PR. Seven gates:
-#   1. the Go engine tests must pass and it must compile/vet clean, and the
-#      shell panel/installer tests must pass with their scripted command doubles;
+# Runs on every push/PR. Six gates:
+#   1. the Rust engine unit tests must pass (locked, pinned toolchain) and it
+#      must cross-compile to the release targets, and the shell
+#      panel/installer tests must pass with their scripted command doubles;
 #   2. the Caddy-log <-> fail2ban-filter contract must hold, checked against
 #      upstream-latest Caddy. Because release.yml deliberately tracks Caddy
 #      latest, this is what turns "upstream silently changed the log schema and
@@ -21,9 +22,7 @@ name: ci
 #      sandbox/capability directives (unprivileged feed sync, root post-apply,
 #      protected paths, last-good boot restore) inside a private netns, because
 #      synthetic hardening can block nft/load/user drops even when the helpers
-#      pass when invoked directly;
-#   7. the opt-in Rust engine passes locked Linux unit and isolated policy
-#      tests without changing the Go install or release path.
+#      pass when invoked directly.
 on:
   push:
     branches: ['**']
@@ -35,80 +34,78 @@ permissions:
 
 jobs:
   engine:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-      - name: Test + build + vet engine
-        working-directory: engine
-        run: |
-          set -eu
-          unformatted="$(gofmt -l .)"
-          [ -z "$unformatted" ] || { echo "gofmt required:"; echo "$unformatted"; exit 1; }
-          go test ./...
-          go build ./...
-          go vet ./...
-      - name: Verify review fixes
-        run: |
-          bash ./scripts/test-review-fixes.sh
-          bash ./scripts/test-ban-policy.sh
-      - name: Cross-compile the release targets
-        working-directory: engine
-        run: |
-          set -eu
-          for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "/tmp/engine-$arch" .
-          done
-      - name: Upload amd64 test binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: caddy-abuseguard-linux-amd64-${{ github.sha }}
-          path: /tmp/engine-amd64
-          if-no-files-found: error
-          retention-days: 1
-
-  rust-engine:
     runs-on: ubuntu-24.04
     env:
       RUST_TOOLCHAIN: '1.100.0'
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-      - name: Test and build the locked Rust engine
+        run: |
+          set -eu
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup "+$RUST_TOOLCHAIN" target add aarch64-unknown-linux-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+      - name: Test the locked Rust engine
         working-directory: engine-rs
         run: |
+          set -eu
           cargo "+$RUST_TOOLCHAIN" test --locked
           cargo "+$RUST_TOOLCHAIN" build --locked --release
           test -x target/release/caddy-abuseguard
           target/release/caddy-abuseguard version
-      - name: Verify the Rust native and sandboxed policy contracts
-        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      - name: Verify review fixes
+        run: |
+          bash ./scripts/test-review-fixes.sh
+          bash ./scripts/test-ban-policy.sh
+      - name: Cross-compile the release targets
+        working-directory: engine-rs
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           set -eu
-          # The policy fixtures use sudo, private network namespaces, and a
-          # private fail2ban instance. Never install the Rust binary as the
-          # default engine, even on this ephemeral runner.
-          # PrivateTmp and ProtectHome hide /tmp, /var/tmp and /home from
-          # the installed units. Use the same base directory as their fixtures.
-          fixture_bin_dir="$(sudo mktemp -d /var/lib/ag-rust-ci.XXXXXX)"
-          trap 'sudo rm -rf -- "$fixture_bin_dir"' EXIT
-          sudo chmod 0755 "$fixture_bin_dir"
-          rust_engine="$fixture_bin_dir/caddy-abuseguard"
-          sudo install -m 0755 "$GITHUB_WORKSPACE/engine-rs/target/release/caddy-abuseguard" "$rust_engine"
-          sudo test -x "$rust_engine"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nftables fail2ban iproute2 iputils-ping python3
-          id -u abuseguard >/dev/null 2>&1 || sudo useradd --system --no-create-home abuseguard
-          # The real service directives require these paths to exist; the
-          # test's drop-ins redirect all policy writes to fixture paths.
+          cargo "+$RUST_TOOLCHAIN" build --locked --release --target aarch64-unknown-linux-gnu
+      - name: Upload amd64 test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: caddy-abuseguard-linux-amd64-${{ github.sha }}
+          path: engine-rs/target/release/caddy-abuseguard
+          if-no-files-found: error
+          retention-days: 1
+
+  native-policy:
+    runs-on: ubuntu-latest
+    env:
+      RUST_TOOLCHAIN: '1.100.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the engine for policy-apply
+        working-directory: engine-rs
+        run: |
+          set -eu
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          cargo "+$RUST_TOOLCHAIN" build --locked --release
+          cp target/release/caddy-abuseguard /tmp/caddy-abuseguard
+      - name: Install nftables, fail2ban and network test tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables fail2ban iproute2 iputils-ping python3
+      - name: Verify service units and sandboxing definitions
+        run: |
+          sudo install -d -m 0755 /usr/local/libexec
+          sudo install -m 0755 /tmp/caddy-abuseguard /usr/local/libexec/caddy-abuseguard
+          sudo useradd --system --no-create-home abuseguard 2>/dev/null || true
           sudo install -d /etc/caddy-abuseguard /var/lib/caddy-abuseguard /run/fail2ban
-          sudo env ABUSEGUARD_ENGINE_BIN="$rust_engine" bash ./scripts/test-native-policy.sh --kernel
-          sudo env ABUSEGUARD_CI_SERVICE_TEST=1 ABUSEGUARD_TEST_ENGINE="$rust_engine" bash ./scripts/test-policy-units.sh
+          # caddy.service is excluded: this job installs neither /usr/local/bin/caddy nor the caddy user.
+          systemd-analyze verify \
+            assets/systemd/caddy-abuseguard-firewall.service \
+            assets/systemd/caddy-abuseguard-policy.service \
+            assets/systemd/caddy-abuseguard-report.service \
+            assets/systemd/caddy-abuseguard-report.timer \
+            assets/systemd/caddy-abuseguard-sync.service \
+            assets/systemd/caddy-abuseguard-sync.timer
+      - name: Verify native allowlist + intel enforcement
+        run: sudo env ABUSEGUARD_ENGINE_BIN=/tmp/caddy-abuseguard bash ./scripts/test-native-policy.sh --kernel
+      - name: Verify the installed sandboxed sync and boot policy services
+        run: sudo env ABUSEGUARD_CI_SERVICE_TEST=1 bash ./scripts/test-policy-units.sh
 
   shell:
     runs-on: ubuntu-latest
@@ -131,37 +128,6 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq nftables
           sudo bash ./scripts/test-firewall.sh --kernel
-
-  native-policy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-      - name: Build the engine for policy-apply
-        working-directory: engine
-        run: CGO_ENABLED=0 go build -trimpath -o /tmp/caddy-abuseguard .
-      - name: Install nftables, fail2ban and network test tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables fail2ban iproute2 iputils-ping python3
-      - name: Verify service units and sandboxing definitions
-        run: |
-          sudo install -d -m 0755 /usr/local/libexec
-          sudo install -m 0755 /tmp/caddy-abuseguard /usr/local/libexec/caddy-abuseguard
-          sudo useradd --system --no-create-home abuseguard 2>/dev/null || true
-          sudo install -d /etc/caddy-abuseguard /var/lib/caddy-abuseguard /run/fail2ban
-          # caddy.service is excluded: this job installs neither /usr/local/bin/caddy nor the caddy user.
-          systemd-analyze verify \
-            assets/systemd/caddy-abuseguard-firewall.service \
-            assets/systemd/caddy-abuseguard-policy.service \
-            assets/systemd/caddy-abuseguard-report.service \
-            assets/systemd/caddy-abuseguard-report.timer \
-            assets/systemd/caddy-abuseguard-sync.service \
-            assets/systemd/caddy-abuseguard-sync.timer
-      - name: Verify native allowlist + intel enforcement
-        run: sudo env ABUSEGUARD_ENGINE_BIN=/tmp/caddy-abuseguard bash ./scripts/test-native-policy.sh --kernel
-      - name: Verify the installed sandboxed sync and boot policy services
-        run: sudo env ABUSEGUARD_CI_SERVICE_TEST=1 bash ./scripts/test-policy-units.sh
 
   log-contract:
     runs-on: ubuntu-latest

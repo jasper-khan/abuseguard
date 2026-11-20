@@ -71,9 +71,11 @@ done
 
 ENGINE="${ABUSEGUARD_ENGINE_BIN:-/usr/local/libexec/caddy-abuseguard}"
 if [ ! -x "$ENGINE" ]; then
-	command -v go >/dev/null 2>&1 \
-		|| { echo "engine not found; set ABUSEGUARD_ENGINE_BIN or install go" >&2; exit 1; }
-	( cd "$ROOT/engine" && CGO_ENABLED=0 go build -trimpath -o "$TMP/engine" . ) \
+	command -v cargo >/dev/null 2>&1 \
+		|| { echo "engine not found; set ABUSEGUARD_ENGINE_BIN or install cargo" >&2; exit 1; }
+	( cd "$ROOT/engine-rs" \
+		&& cargo build --locked --release \
+		&& cp target/release/caddy-abuseguard "$TMP/engine" ) \
 		|| fail "could not build the engine"
 	ENGINE="$TMP/engine"
 fi

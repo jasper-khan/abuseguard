@@ -10,7 +10,7 @@ cleanup() {
 	rmdir -- "$TMP"
 }
 trap cleanup EXIT
-(cd "$ROOT/engine" && go build -o "$TMP/engine" .)
+(cd "$ROOT/engine-rs" && cargo build --locked --release && cp target/release/caddy-abuseguard "$TMP/engine")
 # Native binaries (Windows here, Linux in CI) must receive native paths inside
 # config/env; cygpath converts only when it exists.
 native_path() { command -v cygpath >/dev/null 2>&1 && cygpath -m "$1" || printf '%s' "$1"; }

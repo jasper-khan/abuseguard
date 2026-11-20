@@ -8,7 +8,7 @@
 # Usage:
 #   sudo ./install.sh                        # Caddy (default), prebuilt engine
 #   sudo ./install.sh --proxy=nginx          # distro Nginx + Certbot DNS-01
-#   sudo ./install.sh --from-source          # build the Go engine here (needs `go`)
+#   sudo ./install.sh --from-source          # build the Rust engine here (needs `cargo`)
 #   sudo ./install.sh --proxy=nginx --from-source
 #   sudo ABUSEGUARD_ENGINE_BIN=/path/engine ./install.sh
 #
@@ -98,7 +98,7 @@ usage() {
 
   --proxy=caddy   使用 Caddy（首次安装默认）
   --proxy=nginx   使用发行版 Nginx + Certbot Cloudflare DNS（首次安装）
-  --from-source   本地编译 Go 引擎（可与 --proxy 以任意顺序组合）
+  --from-source   本地编译 Rust 引擎（可与 --proxy 以任意顺序组合）
 EOF
 }
 
@@ -693,7 +693,7 @@ if [ "$FROM_SOURCE" = 0 ] && [ -z "${ABUSEGUARD_ENGINE_BIN:-}" ] && [ -z "$RELEA
 	RELEASE_TAG="$(latest_release_tag)" || die "无法确定最新 release，安装未开始。请检查网络后重试。"
 	fetch_release=1
 fi
-if [ "$fetch_release" = 1 ] || [ ! -d "$SRC_DIR/engine" ] || [ ! -d "$SRC_DIR/assets" ]; then
+if [ "$fetch_release" = 1 ] || [ ! -d "$SRC_DIR/engine-rs" ] || [ ! -d "$SRC_DIR/assets" ]; then
 	command -v tar >/dev/null 2>&1 || die "自举需要 tar 命令。"
 	AG_REF="${ABUSEGUARD_REF:-main}"
 	archive_ref="heads/$AG_REF"
@@ -1018,11 +1018,13 @@ stage_engine() {
 		return
 	fi
 	if [ "$FROM_SOURCE" = "1" ]; then
-		command -v go >/dev/null 2>&1 || die "--from-source 需要 Go 工具链（请先安装 go）。"
-		log "从源码编译引擎（$SRC_DIR/engine）"
+		command -v cargo >/dev/null 2>&1 || die "--from-source 需要 Rust 工具链（请先安装 cargo）。"
+		log "从源码编译引擎（$SRC_DIR/engine-rs）"
 		STAGED_BIN="$(mktemp "$(dirname "$ENGINE_BIN")/.engine.tmp.XXXXXX")" \
 			|| die "无法创建引擎临时文件。"
-		( cd "$SRC_DIR/engine" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$TARGET_VERSION" -o "$STAGED_BIN" . ) \
+		( cd "$SRC_DIR/engine-rs" \
+			&& cargo build --locked --release \
+			&& cp target/release/caddy-abuseguard "$STAGED_BIN" ) \
 			|| die "引擎编译失败；未替换当前引擎。"
 		chmod 0755 "$STAGED_BIN"
 		return

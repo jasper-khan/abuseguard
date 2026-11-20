@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.md)
 
-AbuseGuard is a drop-in abuse-mitigation layer for a [Caddy](https://caddyserver.com/) or Nginx reverse proxy on Debian/Ubuntu. For connections that reach the origin directly, it bans abusive and known-malicious IPs at the firewall (nftables) and can optionally auto-report them to [AbuseIPDB](https://www.abuseipdb.com/) — driven by fail2ban plus a small Go engine.
+AbuseGuard is a drop-in abuse-mitigation layer for a [Caddy](https://caddyserver.com/) or Nginx reverse proxy on Debian/Ubuntu. For connections that reach the origin directly, it bans abusive and known-malicious IPs at the firewall (nftables) and can optionally auto-report them to [AbuseIPDB](https://www.abuseipdb.com/) — driven by fail2ban plus a small Rust engine.
 
 One command installs a hardened Caddy (with the `caddy-dns/cloudflare` TLS module) or the distro Nginx (chosen once at first install, immutable afterwards), an nftables input firewall, the fail2ban jails, a threat-intel sync, the optional reporter, and an interactive `ag` panel.
 
@@ -24,7 +24,7 @@ intel feed ──(6h sync, engine validates)──▶ root apply ──▶ dedic
 - Installation enables three behavioural Web jails and `sshd`, sharing one allowlist. A ban from any jail drops that source IP on every port and protocol at the origin, including SSH.
 - Threat intel no longer runs through fail2ban: after a sync, the engine's root-only `policy-apply` loads the validated list into a dedicated kernel set, so listed sources are dropped at the first packet before reaching the reverse proxy or SSH. The set is independent of the port firewall table, so port edits never rebuild it.
 - The allowlist is one file: panel edits update fail2ban `ignoreip` and the nft intel exception together. Hand edits need an explicit apply; see Threat intel.
-- A Go engine (stdlib only, single static binary) validates feeds, flushes queued reports and loads kernel policy. Only the root-only `policy-apply` subcommand writes nftables/fail2ban; sync, report and enqueue still run unprivileged.
+- A Rust engine (small locked dependency set, single static binary) validates feeds, flushes queued reports and loads kernel policy. Only the root-only `policy-apply` subcommand writes nftables/fail2ban; sync, report and enqueue still run unprivileged.
 
 ## Requirements
 
@@ -45,7 +45,7 @@ or clone and run:
 git clone https://github.com/jasper-khan/abuseguard
 cd abuseguard
 sudo ./install.sh                 # download the prebuilt engine from the latest release
-sudo ./install.sh --from-source   # or build the Go engine locally (needs `go`)
+sudo ./install.sh --from-source   # or build the Rust engine locally (needs `cargo`)
 sudo ./install.sh --proxy=nginx   # choose Nginx on first install (combines with --from-source)
 ```
 
@@ -75,7 +75,7 @@ The first install must choose one reverse-proxy backend. The choice is written t
 - There is no switching or migration between backends. To change it, uninstall and reinstall.
 - The installer refuses to coexist with the other reverse proxy: if the other backend's binary, package, or service is present (even inactive), it aborts before changing the host. Remove that backend first.
 
-Both backends share the same Go engine, fail2ban jail/filter/action identities, nftables allowlist and intel, report queue, and `ag` panel. Only the reverse proxy, TLS issuance, and access-log source differ.
+Both backends share the same Rust engine, fail2ban jail/filter/action identities, nftables allowlist and intel, report queue, and `ag` panel. Only the reverse proxy, TLS issuance, and access-log source differ.
 
 Caddy mode keeps the existing behaviour: hardened `/usr/local/bin/caddy` (with `caddy-dns/cloudflare`), the `/etc/caddy` layout, DNS-01, and `import abuseguard`.
 
@@ -105,7 +105,7 @@ with `--from-source`.
 Both the engine and the cloudflare-enabled Caddy are downloaded from this
 repo's GitHub release (Caddy is built by CI with `xcaddy`). If a Caddy with
 the `caddy-dns/cloudflare` module already exists, the installer detects and
-keeps it, skipping the download. Nginx mode only downloads the Go engine
+keeps it, skipping the download. Nginx mode only downloads the Rust engine
 from the release; Nginx and Certbot come from distro packages.
 
 **Integrity check (mandatory)**: the downloaded engine and Caddy MUST match the
@@ -234,7 +234,7 @@ Shared by both backends:
 
 ```
 /usr/local/bin/ag                             control panel
-/usr/local/libexec/caddy-abuseguard           Go engine (root-only policy-apply subcommand)
+/usr/local/libexec/caddy-abuseguard           Rust engine (root-only policy-apply subcommand)
 /etc/caddy-abuseguard/web-server              recorded backend (strictly caddy or nginx, root-owned)
 /etc/caddy-abuseguard/config.json             engine config
 /etc/caddy-abuseguard/whitelist               never-ban list
@@ -312,8 +312,8 @@ Uninstall also removes this project's port table, independent intel table, root-
 
 ## Build / release
 
-- `engine/` is a single Go module, stdlib only, `go 1.21`.
-- CI runs Go tests, shell/panel tests, the real Caddy log contract, the real Nginx → JSON → fail2ban-regex contract (HTTP/1.1 and HTTP/2, trusted and spoofed Cloudflare headers, privacy fields, rotation), and the isolated Nginx rollback/certificate-fixture suite; the real nftables and systemd sandbox gates stay separate.
+- `engine-rs/` is a single Cargo crate with a small, locked dependency set; `engine-rs/Cargo.toml` keeps `version` in sync with the top-level `VERSION` file.
+- CI runs the locked Rust engine tests, shell/panel tests, the real Caddy log contract, the real Nginx → JSON → fail2ban-regex contract (HTTP/1.1 and HTTP/2, trusted and spoofed Cloudflare headers, privacy fields, rotation), and the isolated Nginx rollback/certificate-fixture suite; the real nftables and systemd sandbox gates stay separate.
 - Tagging `vX.Y.Z` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `caddy-abuseguard-linux-{amd64,arm64}` and attaches them to the release. `install.sh` downloads these by default; Nginx mode publishes/downloads no such assets and uses distro packages.
 - Versioned engine assets remain immutable after release. Weekly/manual refreshes replace only the upstream-tracking Caddy assets and regenerate checksums plus build metadata for the complete asset set.
 

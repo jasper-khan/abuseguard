@@ -14,6 +14,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      RUST_TOOLCHAIN: '1.100.0'
     steps:
       - uses: actions/checkout@v4
 
@@ -23,18 +25,25 @@ jobs:
 
       - name: Build engine binaries (linux amd64/arm64)
         if: github.event_name == 'push'
-        working-directory: engine
+        working-directory: engine-rs
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           set -eu
           version="$(tr -d '[:space:]' < ../VERSION)"
           [ -n "$version" ] || { echo "VERSION is empty" >&2; exit 1; }
           mkdir -p ../dist
-          go test ./...
-          for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              go build -trimpath -ldflags "-s -w -X main.version=$version" \
-              -o "../dist/caddy-abuseguard-linux-$arch" .
-          done
+          # VERSION is the single source of truth; the release build injects it
+          # into the crate manifest so the binary reports it.
+          sed -i "0,/^version = /s/^version = .*/version = \"$version\"/" Cargo.toml
+          cargo "+$RUST_TOOLCHAIN" test --locked
+          rustup "+$RUST_TOOLCHAIN" target add aarch64-unknown-linux-gnu
+          sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          cargo "+$RUST_TOOLCHAIN" build --locked --release
+          cargo "+$RUST_TOOLCHAIN" build --locked --release --target aarch64-unknown-linux-gnu
+          cp target/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-amd64
+          cp target/aarch64-unknown-linux-gnu/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-arm64
+          chmod 0755 ../dist/caddy-abuseguard-linux-*
           got="$(../dist/caddy-abuseguard-linux-amd64 version | awk '{print $2}')"
           [ "$got" = "$version" ] || {
             echo "engine amd64 reports $got, want $version" >&2
@@ -95,21 +104,22 @@ jobs:
           xcaddy_ver="$(go list -m -versions github.com/caddyserver/xcaddy | awk '{print $NF}')"
           cf_ver="$(go list -m -versions github.com/caddy-dns/cloudflare | awk '{print $NF}')"
           go_ver="$(go version | awk '{print $3}')"
+          rustc_ver="$(rustc "+$RUST_TOOLCHAIN" --version | awk '{print $2}')"
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             version="$(tr -d '[:space:]' < VERSION)"
             engine="$(jq -cn \
               --arg source_commit "$GITHUB_SHA" \
               --arg built_at "$built_at" \
-              --arg go_version "$go_ver" \
-              '{source_commit:$source_commit,built_at:$built_at,go_version:$go_version}')"
+              --arg rustc_version "$rustc_ver" \
+              '{source_commit:$source_commit,built_at:$built_at,rustc_version:$rustc_version}')"
           else
             version="$(jq -r '.abuseguard_version' dist/BUILD-METADATA.json)"
             engine="$(jq -c '
               if .engine then .engine else {
                 source_commit: .source_commit,
                 built_at: .built_at,
-                go_version: .go_version
+                rustc_version: .go_version
               } end' dist/BUILD-METADATA.json)"
           fi
           jq -n \

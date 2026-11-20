@@ -202,7 +202,7 @@ rm -f -- "$STAGED_BIN"
 STAGED_BIN=""
 
 # Build the real engine so panel validation is tested against its parser.
-(cd "$ROOT/engine" && go build -o "$ENGINE_BUILD" .)
+(cd "$ROOT/engine-rs" && cargo build --locked --release && cp target/release/caddy-abuseguard "$ENGINE_BUILD")
 
 # The engine removed the enqueue --mode flag; fail2ban must not keep sending it.
 if grep -q -- '--mode' "$ROOT/assets/fail2ban/action.d/caddy-abuseguard-queue.conf"; then
