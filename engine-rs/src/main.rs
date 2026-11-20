@@ -1,13 +1,17 @@
 // main.rs — CLI dispatch: enqueue | report send-auto | sync-intel |
-// allowlist-validate | allowlist-check | policy-apply | version.
+// allowlist-validate | allowlist-check | policy-apply | panel commands | version.
 mod allow;
+mod caddy_render;
 mod config;
+mod config_render;
 mod filelock;
 mod http;
 mod intel;
+mod nginx_render;
 mod policy;
 mod queue;
 mod report;
+mod status;
 #[cfg(test)]
 mod testutil;
 mod util;
@@ -41,6 +45,10 @@ fn main() {
         "allowlist-validate" => run_allowlist_validate(&rest),
         "allowlist-check" => run_allowlist_check(&rest),
         "policy-apply" => policy::run_policy_apply(&rest),
+        "status" => status::run(&rest, VERSION),
+        "firewall-render" => config_render::run_firewall_render(&rest),
+        "nginx-render" => nginx_render::run(&rest),
+        "caddy-render" => caddy_render::run(&rest),
         "version" | "-v" | "--version" => println!("abuseguard-engine {}", VERSION),
         _ => {
             usage();
@@ -50,7 +58,7 @@ fn main() {
 }
 
 fn usage() {
-    logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | policy-apply (root, Linux) | version");
+    logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | policy-apply (root, Linux) | status --json | firewall-render | nginx-render | caddy-render | version");
 }
 
 fn must_config() -> config::Config {

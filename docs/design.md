@@ -121,3 +121,16 @@ An engine is built only for a version tag and remains immutable under that relea
 - No IPv6 threat intel (the list is IPv4); IPv6 clients can still be rate/probe banned.
 - No authentication for your sites — that is your application's job.
 - No blocking of proxied/CDN visitor traffic by source: kernel enforcement only sees the packet source reaching the origin, so it cannot act on visitors hidden behind an edge proxy.
+
+### 面板的 Rust 子命令
+
+面板继续由 Shell 负责交互和系统操作的顺序；同一个引擎负责状态采集与
+候选配置生成。不新增守护进程、二进制或权限：
+
+- `status --json` 输出 schema version 1 的只读状态快照。不能可靠读取的
+  状态或计数为 JSON `null`，不会猜测成关闭、未运行或 0。
+- `firewall-render`、`caddy-render` 和 `nginx-render` 校验并生成候选配置，
+  由现有流程继续调用 nftables、Caddy 或 Nginx 的原生校验，按原顺序应用、
+  重载和回滚。Nginx 安装早期尚未切换引擎时使用兼容路径。
+- 安装和发版都检查引擎是否能运行并报告预期版本。Caddy-only 刷新不替换已
+  发布的引擎；Go 历史发布包仍保留原始来源信息。

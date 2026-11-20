@@ -953,12 +953,29 @@ verify_sha256() {  # FILE BASENAME -- return failure unless the release checksum
 	log "已校验 $fn（sha256 ✓）"
 }
 
+# Keep the existing version ABI for Go rollback binaries and custom overrides.
+# Check the process exit status before trusting any version text it printed.
+probe_binary() {  # FILE LABEL [EXPECTED_ENGINE_VERSION]
+	local file="$1" label="$2" expected="${3:-}" got
+	if ! PROBED_BINARY_VERSION_OUTPUT="$("$file" version 2>/dev/null)"; then
+		warn "$label 启动检查失败，保留当前版本。"
+		return 1
+	fi
+	if [ -n "$expected" ]; then
+		got="$(awk 'NR == 1 { print $2; exit }' <<< "$PROBED_BINARY_VERSION_OUTPUT")"
+		if [ "$got" != "$expected" ]; then
+			warn "$label 版本不匹配（需要 $expected，实际 ${got:-未知}），保留当前版本。"
+			return 1
+		fi
+	fi
+}
+
 # Stage a release binary beside its destination, then verify and probe it before
 # an atomic rename. A failed download, checksum, or startup check leaves the
 # currently installed binary untouched. The caller decides when to commit, so a
 # long download can finish while fail2ban still runs the old engine.
 stage_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
-	local url="$1" dest="$2" fn="$3" label="$4" expected="${5:-}" tmp version_output
+	local url="$1" dest="$2" fn="$3" label="$4" expected="${5:-}" tmp
 	sums_require
 	tmp="$(mktemp "$(dirname "$dest")/.${fn}.tmp.XXXXXX")" \
 		|| { warn "$label：无法创建临时下载文件。"; return 1; }
@@ -971,14 +988,13 @@ stage_release_binary() {  # URL DEST BASENAME LABEL [EXPECTED_ENGINE_VERSION]
 		rm -f -- "$tmp"
 		return 1
 	fi
-	if ! chmod 0755 "$tmp" || ! version_output="$("$tmp" version 2>/dev/null)"; then
+	if ! chmod 0755 "$tmp"; then
 		rm -f -- "$tmp"
-		warn "$label 启动检查失败，保留当前版本。"
+		warn "$label：无法设置可执行权限。"
 		return 1
 	fi
-	if [ -n "$expected" ] && [ "$(awk 'NR == 1 { print $2 }' <<< "$version_output")" != "$expected" ]; then
+	if ! probe_binary "$tmp" "$label" "$expected"; then
 		rm -f -- "$tmp"
-		warn "$label 版本不匹配（需要 $expected），保留当前版本。"
 		return 1
 	fi
 	STAGED_RELEASE_BIN="$tmp"
@@ -1015,6 +1031,7 @@ stage_engine() {
 			|| die "无法创建引擎临时文件。"
 		install -m 0755 "$ABUSEGUARD_ENGINE_BIN" "$STAGED_BIN" \
 			|| die "无法暂存 ABUSEGUARD_ENGINE_BIN。"
+		probe_binary "$STAGED_BIN" "引擎" "$TARGET_VERSION" || die "指定引擎版本或启动检查失败。"
 		return
 	fi
 	if [ "$FROM_SOURCE" = "1" ]; then
@@ -1027,6 +1044,7 @@ stage_engine() {
 			&& cp target/release/caddy-abuseguard "$STAGED_BIN" ) \
 			|| die "引擎编译失败；未替换当前引擎。"
 		chmod 0755 "$STAGED_BIN"
+		probe_binary "$STAGED_BIN" "引擎" "$TARGET_VERSION" || die "编译后的引擎版本或启动检查失败。"
 		return
 	fi
 	local fn="caddy-abuseguard-linux-$ARCH"
@@ -1049,10 +1067,7 @@ commit_engine() {
 	ENGINE_SWAPPED=1
 }
 stage_engine
-INSTALLED_VERSION="$("$STAGED_BIN" version 2>/dev/null | awk 'NR == 1 { print $2 }' || true)"
-[ "$INSTALLED_VERSION" = "$TARGET_VERSION" ] \
-	|| die "引擎版本不匹配：需要 $TARGET_VERSION，实际 ${INSTALLED_VERSION:-未知}。"
-log "引擎：$("$STAGED_BIN" version)"
+log "引擎：$PROBED_BINARY_VERSION_OUTPUT"
 
 # --- config, whitelist, key (only if absent) ---------------------------------
 if [ ! -f "$CONF_DIR/config.json" ]; then

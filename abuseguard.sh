@@ -107,7 +107,6 @@ nginx_runtime_load() {
 C_G=$'\033[1;32m'; C_Y=$'\033[1;33m'; C_R=$'\033[1;31m'; C_B=$'\033[1;36m'; C_D=$'\033[22;39m'; C_H=$'\033[1m'; C_0=$'\033[0m'
 PANEL_WIDTH=76
 pause() { echo; read -r -p "按回车继续..." _; }
-svc_state() { systemctl is-active "$1" 2>/dev/null || echo inactive; }
 
 panel_sep() {
 	local fill
@@ -196,29 +195,21 @@ panel_option() { panel_row " $1. $2"; }
 panel_pair() { panel_option "$1" "$2"; panel_option "$3" "$4"; }
 panel_footer() { panel_option 0 "$1"; panel_sep; }
 
-count_banned() {
-	local total=0 n
-	for j in $JAILS; do
-		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
-		[ -n "$n" ] && total=$((total + n))
-	done
-	echo "$total"
+# One read-only engine snapshot per screen. Old or unavailable engine builds
+# yield unknowns, not false negatives. Keep colour/labels in the panel.
+panel_status_snapshot() {
+	local data
+	data="$("$ENGINE" status --json 2>/dev/null)" || return 1
+	jq -e 'type == "object" and .schema_version == 1' >/dev/null <<< "$data" || return 1
+	printf '%s' "$data"
+}
+panel_status_value() {
+	jq -r "$2 | if . == null then empty else . end" 2>/dev/null <<< "$1"
 }
 
 reporting_state() {
 	[ -f "$CONFIG" ] || { echo "?"; return; }
 	[ "$(jq -r '.abuseipdb.enabled' "$CONFIG" 2>/dev/null)" = "true" ] && echo on || echo off
-}
-
-# 情报最后同步距今小时数（无 meta 或解析失败则回空）
-intel_age_h() {
-	local meta="$STATE_DIR/intel-last-sync.txt" gen ts now
-	[ -f "$meta" ] || { echo ""; return; }
-	gen="$(jq -r '.generated_at // empty' "$meta" 2>/dev/null)"
-	[ -n "$gen" ] || { echo ""; return; }
-	ts="$(date -d "$gen" +%s 2>/dev/null)" || { echo ""; return; }
-	now="$(date +%s)"
-	echo $(( (now - ts) / 3600 ))
 }
 
 # Root engine subcommand: validates the whitelist + feed in-process, applies one
@@ -230,15 +221,6 @@ policy_apply() {
 
 # Applied kernel policy count/age (from the root-owned snapshot metadata).
 intel_applied_count() { jq -r '.intel_entries // empty' "$POLICY_APPLIED" 2>/dev/null || true; }
-intel_applied_age_h() {
-	local ts gen now
-	gen="$(jq -r '.applied_at // empty' "$POLICY_APPLIED" 2>/dev/null)"
-	[ -n "$gen" ] || { echo ""; return; }
-	ts="$(date -d "$gen" +%s 2>/dev/null)" || { echo ""; return; }
-	now="$(date +%s)"
-	echo $(( (now - ts) / 3600 ))
-}
-
 # Terse listing avoids dumping feed elements; no grep -q (SIGPIPE under pipefail
 # would turn a successful match into rc 141). Whole-line declaration match so a
 # foreign rule comment naming the table cannot read as present.
@@ -247,122 +229,116 @@ intel_table_present() {
 }
 
 header() {
-	local mode proxy_svc proxy_label proxy_state f2b intel banned rep age version ssh_ports sites applied applied_age
-	local firewall_ok=0 issue_text='' protect_value report_value intel_note applied_note
-	if mode="$(proxy_mode)"; then
-		if [ "$mode" = nginx ]; then proxy_svc=nginx; proxy_label=Nginx
-		else proxy_svc=caddy; proxy_label=Caddy
-		fi
-		proxy_state="$(svc_state "$proxy_svc")"
-	else
-		mode=''; proxy_svc=''; proxy_label='后端'; proxy_state=unknown
-	fi
-	f2b="$(svc_state fail2ban)"
-	intel="$( [ -f "$INTEL" ] && wc -l < "$INTEL" | tr -d ' ' || echo 0 )"
-	banned="$(count_banned)"; rep="$(reporting_state)"
+	local snapshot mode proxy_label proxy_state f2b intel banned rep age version ssh_ports sites applied applied_age
+	local key firewall_ok intel_ok issue_text='' protect_value report_value intel_note applied_note site_data
+	snapshot="$(panel_status_snapshot)" || snapshot='{}'
+	mode="$(panel_status_value "$snapshot" '.backend')"
+	case "$mode" in nginx) proxy_label=Nginx ;; caddy) proxy_label=Caddy ;; *) proxy_label='后端' ;; esac
+	proxy_state="$(panel_status_value "$snapshot" '.services.proxy')"
+	f2b="$(panel_status_value "$snapshot" '.services.fail2ban')"
+	intel="$(panel_status_value "$snapshot" '.intel.local_entries')"
+	banned="$(panel_status_value "$snapshot" '.banned_total')"
+	rep="$(panel_status_value "$snapshot" '.reporting_enabled')"
+	key="$(panel_status_value "$snapshot" '.report_key_present')"
+	age="$(panel_status_value "$snapshot" '.intel.synced_age_hours')"
+	applied="$(panel_status_value "$snapshot" '.intel.applied_entries')"
+	applied_age="$(panel_status_value "$snapshot" '.intel.applied_age_hours')"
+	version="$(panel_status_value "$snapshot" '.version')"
+	firewall_ok="$(panel_status_value "$snapshot" '.firewall_table_present')"
+	intel_ok="$(panel_status_value "$snapshot" '.intel_table_present')"
 	ssh_ports="$(ssh_current_ports)"
-	[ -n "$ssh_ports" ] || ssh_ports="?"
-	ssh_ports="$(printf '%s' "$ssh_ports" | tr '\n' ' ')"
-	ssh_ports="${ssh_ports% }"
-	version="$("$ENGINE" version 2>/dev/null | awk 'NR == 1 { print $2 }')"
-	[ -n "$version" ] || version="?"
-	sites="$(sites_lines 2>/dev/null | wc -l | tr -d ' ')"
-	if firewall_running; then firewall_ok=1; fi
+	[ -n "$ssh_ports" ] || ssh_ports="未知"
+	ssh_ports="${ssh_ports//$'
+'/ }"
+	sites=未知
+	if site_data="$(sites_lines 2>/dev/null)"; then
+		if [ -z "$site_data" ]; then sites=0
+		else sites="$(printf '%s
+' "$site_data" | wc -l | tr -d ' ')"
+		fi
+	fi
 
-	# 缺少标记的旧安装按 Caddy 处理；标记损坏时明确报错，绝不假装正常。
-	if [ -z "$mode" ]; then issue_text='后端选择记录异常'
+	if [ -z "$mode" ]; then issue_text='后端状态未知'
+	elif [ -z "$proxy_state" ]; then issue_text="$proxy_label 状态未知"
 	elif [ "$proxy_state" != active ]; then issue_text="$proxy_label 未运行"
 	elif [ "$mode" = nginx ] && ! nginx_runtime_load >/dev/null 2>&1; then issue_text='Nginx 辅助脚本缺失'
 	fi
 	if [ "$f2b" != active ]; then
 		[ -z "$issue_text" ] || issue_text+=' · '
-		issue_text+='Fail2Ban 未运行'
+		if [ -z "$f2b" ]; then issue_text+='Fail2Ban 状态未知'; else issue_text+='Fail2Ban 未运行'; fi
 	fi
-	if [ "$firewall_ok" = 0 ]; then
+	if [ "$firewall_ok" != true ]; then
 		[ -z "$issue_text" ] || issue_text+=' · '
-		issue_text+='防火墙未就绪'
+		if [ "$firewall_ok" = false ]; then issue_text+='防火墙未就绪'; else issue_text+='防火墙状态未知'; fi
 	fi
-	if ! intel_table_present; then
+	if [ "$intel_ok" != true ]; then
 		[ -z "$issue_text" ] || issue_text+=' · '
-		issue_text+='情报策略未应用'
+		if [ "$intel_ok" = false ]; then issue_text+='情报策略未应用'; else issue_text+='情报策略状态未知'; fi
 	fi
 	if [ -z "$issue_text" ]; then
 		protect_value="${C_G}正常${C_0}（${proxy_label} / Fail2Ban / 防火墙）"
 	else
-		protect_value="${C_R}异常${C_0}（${issue_text}）"
+		protect_value="${C_Y}需要检查${C_0}（${issue_text}）"
 	fi
-
-	if [ "$rep" = on ]; then
-		if [ -s "$KEYFILE" ]; then report_value="${C_G}已开启${C_0}"
-		else report_value="${C_Y}未配置 API Key${C_0}"
-		fi
-	else
-		report_value='已关闭'
-	fi
-	age="$(intel_age_h)"
-	if [ -z "$age" ]; then intel_note="${C_Y}尚未同步${C_0}"
+	case "$rep:$key" in
+		true:true) report_value="${C_G}已开启${C_0}" ;;
+		true:false) report_value="${C_Y}未配置 API Key${C_0}" ;;
+		false:*) report_value='已关闭' ;;
+		*) report_value='未知' ;;
+	esac
+	if [ -z "$age" ]; then intel_note="同步时间未知"
 	elif [ "$age" -gt 12 ]; then intel_note="${C_Y}${age} 小时前，建议检查${C_0}"
 	else intel_note="${age} 小时前同步"
 	fi
-	applied="$(intel_applied_count)"
-	if [ -z "$applied" ]; then
-		applied_note="${C_Y}尚未应用${C_0}"
-	else
-		applied_age="$(intel_applied_age_h)"
-		if [ -z "$applied_age" ]; then applied_note="${C_H}$(thousands "$applied")${C_0} 条"
-		else applied_note="${C_H}$(thousands "$applied")${C_0} 条（${applied_age} 小时前应用）"
-		fi
+	if [ -z "$applied" ]; then applied_note='未知'
+	elif [ -z "$applied_age" ]; then applied_note="${C_H}$(thousands "$applied")${C_0} 条"
+	else applied_note="${C_H}$(thousands "$applied")${C_0} 条（${applied_age} 小时前应用）"
 	fi
 
 	panel_start "AbuseGuard 控制中心"
 	panel_kv "防护状态" "$protect_value"
-	panel_kv "封禁记录" "${C_H}$(thousands "$banned")${C_0}"
-	panel_kv "情报库" "${C_H}$(thousands "$intel")${C_0} 条（${intel_note}）"
+	panel_kv "封禁记录" "${C_H}$(thousands "${banned:-未知}")${C_0}"
+	if [ -z "$intel" ]; then panel_kv "情报库" "条目未知（${intel_note}）"
+	else panel_kv "情报库" "${C_H}$(thousands "$intel")${C_0} 条（${intel_note}）"; fi
 	panel_kv "内核策略" "$applied_note"
 	panel_kv "自动上报" "$report_value"
 	panel_kv "SSH 端口" "${C_H}${ssh_ports}${C_0}"
 	panel_kv "保护站点" "${C_H}${sites}${C_0}"
-	panel_kv "版本" "$version"
+	panel_kv "版本" "${version:-未知}"
+}
+
+panel_service_state() {
+	case "$1" in
+		active) printf '%s' "${C_G}运行中${C_0}" ;;
+		inactive|failed) printf '%s' "${C_R}未运行${C_0}" ;;
+		'') printf '%s' "${C_Y}未知${C_0}" ;;
+		*) printf '%s' "$1" ;;
+	esac
 }
 
 act_status() {
-	local st n desc next d u mode proxy_svc proxy_label cert_lines
-	local -a units
-	if mode="$(proxy_mode)"; then
-		if [ "$mode" = nginx ]; then proxy_svc=nginx; proxy_label=Nginx
-		else proxy_svc=caddy; proxy_label=Caddy
-		fi
-	else
-		mode=''; proxy_svc=''; proxy_label='后端'
-	fi
+	local snapshot st n desc next d u mode proxy_svc cert_lines j
+	local -a timers
+	snapshot="$(panel_status_snapshot)" || snapshot='{}'
+	mode="$(panel_status_value "$snapshot" '.backend')"
+	proxy_svc="${mode:-后端}"
 	panel_start "运行概览"
 	panel_row " ${C_D}服务${C_0}"
-	if [ -n "$proxy_svc" ]; then
-		for s in "$proxy_svc" fail2ban; do
-			if [ "$(svc_state "$s")" = active ]; then st="${C_G}运行中${C_0}"; else st="${C_R}未运行${C_0}"; fi
-			panel_row " $(panel_pad "$s" 24)$st"
-		done
-	else
-		panel_row " $(panel_pad "$proxy_label" 24)${C_R}选择记录异常${C_0}"
-		panel_row " $(panel_pad fail2ban 24)$( [ "$(svc_state fail2ban)" = active ] && echo "${C_G}运行中${C_0}" || echo "${C_R}未运行${C_0}")"
-	fi
-	units=(caddy-abuseguard-report.timer caddy-abuseguard-sync.timer)
-	[ "$mode" != nginx ] || units+=(certbot.timer)
-	for u in "${units[@]}"; do
-		case "$u" in
-			*report*) desc="上报队列冲刷" ;;
-			*sync*) desc="威胁情报同步" ;;
-			certbot.timer) desc="证书自动续期" ;;
+	panel_row " $(panel_pad "$proxy_svc" 24)$(panel_service_state "$(panel_status_value "$snapshot" '.services.proxy')")"
+	panel_row " $(panel_pad fail2ban 24)$(panel_service_state "$(panel_status_value "$snapshot" '.services.fail2ban')")"
+	timers=(report sync)
+	[ "$mode" != nginx ] || timers+=(certbot)
+	for u in "${timers[@]}"; do
+		case "$u" in report) desc="上报队列冲刷" ;; sync) desc="威胁情报同步" ;; certbot) desc="证书自动续期" ;; esac
+		case "$(panel_status_value "$snapshot" ".timers.$u.state")" in
+			active)
+				next="$(panel_status_value "$snapshot" ".timers.$u.next")"
+				st="${C_G}已启用${C_0}"
+				[ -z "$next" ] || st+="${C_D}（下次 $next）${C_0}" ;;
+			inactive|failed) st="${C_D}未启用${C_0}" ;;
+			*) st="${C_Y}未知${C_0}" ;;
 		esac
-		if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then
-			next="$(systemctl show "$u" -p NextElapseUSecRealtime --value 2>/dev/null)"
-			case "$next" in ""|0|n/a) next="" ;; esac
-			st=""
-			[ -n "$next" ] && st="${C_D}（下次 $next）${C_0}"
-			panel_row " $(panel_pad "$desc" 24)${C_G}已启用${C_0}$st"
-		else
-			panel_row " $(panel_pad "$desc" 24)${C_D}未启用${C_0}"
-		fi
+		panel_row " $(panel_pad "$desc" 24)$st"
 	done
 	panel_sep
 	panel_row " ${C_D}站点${C_0}"
@@ -393,12 +369,12 @@ act_status() {
 	panel_sep
 	panel_row " ${C_D}封禁${C_0}"
 	for j in $JAILS; do
-		n="$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Currently banned:[[:space:]]*\([0-9]*\).*/\1/p')"
+		n="$(panel_status_value "$snapshot" ".jails[\"$j\"]")"
 		if [ -n "$n" ]; then
 			printf -v st ' %-24s%7s' "$j" "$n"
 			panel_row "$st"
 		else
-			panel_row " $(panel_pad "$j" 24)${C_D}未启用${C_0}"
+			panel_row " $(panel_pad "$j" 24)${C_Y}未知${C_0}"
 		fi
 	done
 	panel_pause
@@ -645,43 +621,14 @@ firewall_policy_load() {
 }
 
 firewall_render() {
-	local proto port source
 	firewall_policy_load
 	case "${1:-}" in
 		ipv4) fw_ipv4_in="$2" ;;
 		ipv6) fw_ipv6_in="$2" ;;
 	esac
-	printf '# policy ipv4-in=%s ipv6-in=%s\n' "$fw_ipv4_in" "$fw_ipv6_in"
-	cat <<'NFT'
-# Managed by ag. Change ports through the firewall menu.
-add table inet caddy_abuseguard
-delete table inet caddy_abuseguard
-table inet caddy_abuseguard {
-	chain input {
-		type filter hook input priority filter; policy drop;
-		iifname "lo" accept
-		ct state established,related accept
-		ct state invalid drop
-		meta l4proto { icmp, ipv6-icmp } accept
-		udp sport 67 udp dport 68 accept
-		udp sport 547 udp dport 546 accept
-NFT
-	if [ "$fw_ipv4_in" = 0 ]; then printf '\t\tmeta nfproto ipv4 drop\n'; fi
-	if [ "$fw_ipv6_in" = 0 ]; then printf '\t\tmeta nfproto ipv6 drop\n'; fi
-	while read -r proto port source; do
-		[ -n "$proto" ] || continue
-		case "$proto" in tcp|udp) ;; *) return 1 ;; esac
-		port_valid "$port" || return 1
-		if [ -n "$source" ] && [ "$source" != any ]; then
-			case "$source" in
-				*:*) printf '\t\tip6 saddr %s %s dport %s accept\n' "$source" "$proto" "$port" ;;
-				*) printf '\t\tip saddr %s %s dport %s accept\n' "$source" "$proto" "$port" ;;
-			esac
-		else
-			printf '\t\t%s dport %s accept\n' "$proto" "$port"
-		fi
-	done
-	printf '\t}\n}\n'
+	# Only generate the candidate here. nft validation and the live transaction
+	# remain in firewall_save.
+	"$ENGINE" firewall-render "$fw_ipv4_in" "$fw_ipv6_in"
 }
 
 firewall_save() {
@@ -1516,7 +1463,7 @@ sites_lines() {
 }
 
 act_sites() {
-	local choice dom t hp up tls f backup num target out d u mode
+	local choice dom t hp up tls f backup candidate num target out d u mode
 	local -a doms
 	while true; do
 		panel_start "站点与证书"
@@ -1589,19 +1536,24 @@ act_sites() {
 					fi
 					sleep 2; continue
 				fi
-				if cf_is_set; then
-					tls=$'\ttls {\n\t\tdns cloudflare {env.CF_API_TOKEN}\n\t}\n'
-				else
-					tls=""
+				tls=auto
+				if cf_is_set; then tls=cloudflare; fi
+				if ! out="$("$ENGINE" caddy-render "$dom" "$up" "$tls")"; then
+					echo "  无法生成 Caddy 配置；未修改配置。"
+					sleep 2; continue
 				fi
 				f="$SITES_DIR/$dom.caddy"
-				{
-					printf '%s {\n' "$dom"
-					printf '\timport abuseguard\n'
-					[ -n "$tls" ] && printf '%s' "$tls"
-					printf '\treverse_proxy %s\n}\n' "$up"
-				} > "$f"
-				chmod 0644 "$f"
+				candidate="$(mktemp "$SITES_DIR/.site-candidate.XXXXXX")" || {
+					echo "  无法创建站点候选文件。"
+					sleep 2; continue
+				}
+				if ! printf '%s\n' "$out" > "$candidate" || ! chmod 0644 "$candidate" \
+					|| ! ln -T -- "$candidate" "$f"; then
+					rm -f -- "$candidate"
+					echo "  无法写入站点配置，或该域名已存在。"
+					sleep 2; continue
+				fi
+				rm -f -- "$candidate"
 				out="$(validate_caddyfile "$CADDYFILE" 2>&1)"
 				if [ $? -ne 0 ]; then
 					rm -f "$f"

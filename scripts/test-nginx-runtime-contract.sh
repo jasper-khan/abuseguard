@@ -7,6 +7,8 @@
 # reload rollback, reuse of an existing lineage, and unrelated-site preservation.
 #
 # Usage: scripts/test-nginx-runtime-contract.sh
+# Set ABUSEGUARD_TEST_NGINX_RENDER_BIN to exercise real Rust rendering; without
+# it this fixture deliberately has no installed engine and tests bootstrap.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -157,6 +159,26 @@ export FAKE_CERTBOT_LOG FAKE_NGINX_CONFIG_OK FAKE_RELOAD_FAIL FAKE_RELOAD_NOOP \
 	FAKE_RELOAD_NOOP_NAME FAKE_RELOAD_DRAIN_FILE FAKE_NGINX_SKIP_NAME \
 	FAKE_MASTER_PID_FILE NGINX_SITES_ENABLED NGINX_LETSENCRYPT_DIR
 
+if [ -n "${ABUSEGUARD_TEST_NGINX_RENDER_BIN:-}" ]; then
+	[ -x "$ABUSEGUARD_TEST_NGINX_RENDER_BIN" ] || fail "Rust renderer executable not found"
+	FAKE_NGINX_RENDER_BIN="$NGINX_LIBEXEC_DIR/fixture-engine"
+	FAKE_NGINX_RENDER_LOG="$TMP/nginx-render.log"
+	export FAKE_NGINX_RENDER_BIN FAKE_NGINX_RENDER_LOG
+	install -m 0755 "$ABUSEGUARD_TEST_NGINX_RENDER_BIN" "$FAKE_NGINX_RENDER_BIN"
+	cat > "$NGINX_LIBEXEC_DIR/caddy-abuseguard" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "${1-}" "${2-}" >> "$FAKE_NGINX_RENDER_LOG"
+if [ "${FAKE_NGINX_RENDER_SITE_FAIL:-0}" = 1 ] && [ "${2-}" = site ]; then
+	exit 1
+fi
+exec "$FAKE_NGINX_RENDER_BIN" "$@"
+SH
+	chmod 0755 "$NGINX_LIBEXEC_DIR/caddy-abuseguard"
+	_nginx_rust_renderer_available || fail "fixture engine lacks nginx-render"
+else
+	! _nginx_rust_renderer_available || fail "bootstrap fixture unexpectedly loaded an engine"
+fi
+
 "$BASE/bin/nginx-master" &
 MASTER_PID=$!
 for _ in $(seq 1 50); do
@@ -251,6 +273,20 @@ grep -q -- '--deploy-hook' "$FAKE_CERTBOT_LOG" || fail "renewal deploy hook not 
 grep -qE -- '--nginx|--standalone|--webroot' "$FAKE_CERTBOT_LOG" && fail "HTTP-01 challenge mode used" || true
 [ "$(nginx_sites_lines)" = $'example.com\t127.0.0.1:3000' ] || fail "sites_lines output wrong"
 ok "site add issues DNS-01, validates, enables and reloads"
+if [ -n "${ABUSEGUARD_TEST_NGINX_RENDER_BIN:-}" ]; then
+	for action in validate-domain validate-upstream site; do
+		grep -qx "nginx-render $action" "$FAKE_NGINX_RENDER_LOG" ||
+			fail "fixture bypassed Rust action $action"
+	done
+	ok "site validation and rendering used the Rust engine"
+	if out="$(FAKE_NGINX_RENDER_SITE_FAIL=1 _nginx_render_site example.com 127.0.0.1:3000)"; then
+		fail "renderer error was silently replaced by a Bash config"
+	fi
+	[ -z "$out" ] || fail "renderer failure returned a partial config"
+	ok "Rust render failure does not fall back to Bash"
+else
+	ok "site rendered through bootstrap fallback"
+fi
 
 # duplicate add is refused and does not mint another cert
 certs_before="$(wc -l < "$FAKE_CERTBOT_LOG")"

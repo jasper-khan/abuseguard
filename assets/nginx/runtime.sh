@@ -82,7 +82,34 @@ _nginx_copy_exec() {
 	fi
 }
 
+# A fresh install or a rollback can run this helper before the matching
+# engine is installed. Probe the exact installed binary, not PATH. A renderer
+# that advertises this protocol owns both the validation and the output; don't
+# silently replace a rejection or a write failure with shell-generated output.
+_nginx_rust_renderer_available() {
+	local engine="$NGINX_LIBEXEC_DIR/caddy-abuseguard" protocol
+	[ -x "$engine" ] || return 1
+	protocol="$("$engine" nginx-render supported 2>/dev/null)" || return 1
+	[ "$protocol" = nginx-render-v1 ]
+}
+
 _nginx_domain_valid() {
+	if _nginx_rust_renderer_available; then
+		"$NGINX_LIBEXEC_DIR/caddy-abuseguard" nginx-render validate-domain "$1" >/dev/null 2>&1
+	else
+		_nginx_domain_valid_shell "$1"
+	fi
+}
+
+_nginx_upstream_valid() {
+	if _nginx_rust_renderer_available; then
+		"$NGINX_LIBEXEC_DIR/caddy-abuseguard" nginx-render validate-upstream "$1" >/dev/null 2>&1
+	else
+		_nginx_upstream_valid_shell "$1"
+	fi
+}
+
+_nginx_domain_valid_shell() {
 	local d="$1"
 	[ "${#d}" -ge 1 ] && [ "${#d}" -le 235 ] || return 1
 	case "$d" in
@@ -91,7 +118,7 @@ _nginx_domain_valid() {
 	printf '%s' "$d" | grep -qE '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
 }
 
-_nginx_upstream_valid() {
+_nginx_upstream_valid_shell() {
 	local up="$1" host port label
 	case "$up" in
 		''|*[[:space:]]*|*[!A-Za-z0-9.:_-]*) return 1 ;;
@@ -311,8 +338,63 @@ _nginx_issue_cert() {
 	return 0
 }
 
+_nginx_render_site() {
+	if _nginx_rust_renderer_available; then
+		"$NGINX_LIBEXEC_DIR/caddy-abuseguard" nginx-render site "$1" "$2" \
+			"$NGINX_LETSENCRYPT_DIR" "$NGINX_CF_TRUST_INCLUDE" "$NGINX_ACCESS_LOG"
+	else
+		_nginx_render_site_shell "$1" "$2"
+	fi
+}
+
+# Retained for bootstrap, rollback and test fixtures that ship no engine.
+_nginx_render_site_shell() {
+	local domain="$1" upstream="$2" name sni_re
+	name="$(_nginx_site_name "$domain")"
+	printf 'server {\n'
+	printf '    listen 443 ssl http2;\n'
+	printf '    listen [::]:443 ssl http2;\n'
+	printf '    server_name %s;\n' "$domain"
+	printf '    ssl_certificate "%s/live/%s/fullchain.pem";\n' "$NGINX_LETSENCRYPT_DIR" "$name"
+	printf '    ssl_certificate_key "%s/live/%s/privkey.pem";\n' "$NGINX_LETSENCRYPT_DIR" "$name"
+	printf '    ssl_protocols TLSv1.2 TLSv1.3;\n'
+	printf '    include "%s";\n' "$NGINX_CF_TRUST_INCLUDE"
+	printf '    access_log "%s" abuseguard_json;\n' "$NGINX_ACCESS_LOG"
+	printf '    client_max_body_size 0;\n'
+	printf '    # Caddy returns 404 for a Host it does not serve; the first site\n'
+	printf '    # becomes the default vhost, so reject unknown Hosts/SNI here\n'
+	printf '    # instead of proxying them to this site upstream. RFC 6066 makes\n'
+	printf '    # SNI case-insensitive while $ssl_server_name keeps client case.\n'
+	printf '    if ($http_host = "") {\n'
+	printf '        return 404;\n'
+	printf '    }\n'
+	printf '    if ($host != %s) {\n' "$domain"
+	printf '        return 404;\n'
+	printf '    }\n'
+	sni_re="$(printf '%s' "$domain" | sed 's/\./\\./g')"
+	printf '    if ($ssl_server_name !~* ^%s$) {\n' "$sni_re"
+	printf '        return 404;\n'
+	printf '    }\n'
+	printf '    location / {\n'
+	printf '        proxy_pass http://%s;\n' "$upstream"
+	printf '        proxy_http_version 1.1;\n'
+	printf '        # Caddy streams and keeps idle upgraded/slow responses open;\n'
+	printf '        # Nginx defaults would buffer SSE and cut WS at 60 idle seconds.\n'
+	printf '        proxy_buffering off;\n'
+	printf '        proxy_read_timeout 1h;\n'
+	printf '        proxy_set_header Upgrade $http_upgrade;\n'
+	printf '        proxy_set_header Connection $abuseguard_connection_upgrade;\n'
+	printf '        proxy_set_header Host $http_host;\n'
+	printf '        proxy_set_header X-Real-IP $remote_addr;\n'
+	printf '        proxy_set_header X-Forwarded-For $remote_addr;\n'
+	printf '        proxy_set_header X-Forwarded-Proto $scheme;\n'
+	printf '        proxy_set_header X-Forwarded-Host $http_host;\n'
+	printf '    }\n'
+	printf '}\n'
+}
+
 nginx_add_site() {
-	local domain upstream name available enabled tmp sni_re
+	local domain upstream name available enabled tmp
 	if [ "$#" -ne 2 ]; then
 		_nginx_err "用法：nginx_add_site <域名> <主机或IP:端口>"
 		return 2
@@ -358,48 +440,7 @@ nginx_add_site() {
 		_nginx_err "无法在 $NGINX_SITES_AVAILABLE 创建临时文件。"
 		return 1
 	}
-	if ! {
-		printf 'server {\n'
-		printf '    listen 443 ssl http2;\n'
-		printf '    listen [::]:443 ssl http2;\n'
-		printf '    server_name %s;\n' "$domain"
-		printf '    ssl_certificate "%s/live/%s/fullchain.pem";\n' "$NGINX_LETSENCRYPT_DIR" "$name"
-		printf '    ssl_certificate_key "%s/live/%s/privkey.pem";\n' "$NGINX_LETSENCRYPT_DIR" "$name"
-		printf '    ssl_protocols TLSv1.2 TLSv1.3;\n'
-		printf '    include "%s";\n' "$NGINX_CF_TRUST_INCLUDE"
-		printf '    access_log "%s" abuseguard_json;\n' "$NGINX_ACCESS_LOG"
-		printf '    client_max_body_size 0;\n'
-		printf '    # Caddy returns 404 for a Host it does not serve; the first site\n'
-		printf '    # becomes the default vhost, so reject unknown Hosts/SNI here\n'
-		printf '    # instead of proxying them to this site upstream. RFC 6066 makes\n'
-		printf '    # SNI case-insensitive while $ssl_server_name keeps client case.\n'
-		printf '    if ($http_host = "") {\n'
-		printf '        return 404;\n'
-		printf '    }\n'
-		printf '    if ($host != %s) {\n' "$domain"
-		printf '        return 404;\n'
-		printf '    }\n'
-		sni_re="$(printf '%s' "$domain" | sed 's/\./\\./g')"
-		printf '    if ($ssl_server_name !~* ^%s$) {\n' "$sni_re"
-		printf '        return 404;\n'
-		printf '    }\n'
-		printf '    location / {\n'
-		printf '        proxy_pass http://%s;\n' "$upstream"
-		printf '        proxy_http_version 1.1;\n'
-		printf '        # Caddy streams and keeps idle upgraded/slow responses open;\n'
-		printf '        # Nginx defaults would buffer SSE and cut WS at 60 idle seconds.\n'
-		printf '        proxy_buffering off;\n'
-		printf '        proxy_read_timeout 1h;\n'
-		printf '        proxy_set_header Upgrade $http_upgrade;\n'
-		printf '        proxy_set_header Connection $abuseguard_connection_upgrade;\n'
-		printf '        proxy_set_header Host $http_host;\n'
-		printf '        proxy_set_header X-Real-IP $remote_addr;\n'
-		printf '        proxy_set_header X-Forwarded-For $remote_addr;\n'
-		printf '        proxy_set_header X-Forwarded-Proto $scheme;\n'
-		printf '        proxy_set_header X-Forwarded-Host $http_host;\n'
-		printf '    }\n'
-		printf '}\n'
-	} > "$tmp"; then
+	if ! _nginx_render_site "$domain" "$upstream" > "$tmp"; then
 		rm -f -- "$tmp"
 		_nginx_err "无法写入站点配置，未启用站点。"
 		return 1

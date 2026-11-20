@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 cleanup() {
+	rm -rf -- "$TMP/engine-target"
 	rm -f -- "$TMP/panel.sh"
 	rm -f -- "$TMP/firewall.nft"
 	rm -f -- "$TMP/live.nft"
@@ -18,11 +19,25 @@ cleanup() {
 trap cleanup EXIT
 awk '/^# The panel needs root/{exit} {print}' "$ROOT/abuseguard.sh" > "$TMP/panel.sh"
 
+ENGINE_BIN="${ABUSEGUARD_ENGINE_BIN:-}"
+if [ -z "$ENGINE_BIN" ]; then
+	command -v cargo >/dev/null 2>&1 || {
+		echo 'Set ABUSEGUARD_ENGINE_BIN to a test engine or install cargo.' >&2
+		exit 1
+	}
+	cargo build --locked --release --manifest-path "$ROOT/engine-rs/Cargo.toml" \
+		--target-dir "$TMP/engine-target"
+	ENGINE_BIN="$TMP/engine-target/release/caddy-abuseguard"
+	[ ! -x "$ENGINE_BIN.exe" ] || ENGINE_BIN="$ENGINE_BIN.exe"
+fi
+[ -x "$ENGINE_BIN" ] || { echo "Test engine not executable: $ENGINE_BIN" >&2; exit 1; }
+
 if [ "${1:-}" = --kernel ]; then
-	unshare --net bash -s -- "$TMP/panel.sh" "$TMP/kernel.nft" <<'KERNEL'
+	unshare --net bash -s -- "$TMP/panel.sh" "$TMP/kernel.nft" "$ENGINE_BIN" <<'KERNEL'
 set -euo pipefail
 source "$1"
 rules="$2"
+ENGINE="$3"
 # Drain nft's listing: grep -q + SIGPIPE + pipefail would abort with rc 141.
 table_has() { nft list table "$1" "$2" | grep -F "$3" >/dev/null; }
 # Stand in for Fail2Ban's independent table, including an IPv4 ban set.
@@ -82,6 +97,7 @@ KERNEL
 fi
 
 source "$TMP/panel.sh"
+ENGINE="$ENGINE_BIN"
 CONF_DIR="$TMP"
 FIREWALL_FILE="$TMP/firewall.nft"
 SSHD_MAIN="$TMP/sshd_config"

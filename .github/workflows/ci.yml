@@ -69,7 +69,7 @@ jobs:
           cargo "+$RUST_TOOLCHAIN" test --locked
           cargo "+$RUST_TOOLCHAIN" build --locked --release
           test -x target/release/caddy-abuseguard
-          target/release/caddy-abuseguard version
+          bash ../scripts/check-engine-version.sh ../VERSION target/release/caddy-abuseguard
       - name: Verify review fixes
         run: |
           bash ./scripts/test-review-fixes.sh
@@ -87,18 +87,14 @@ jobs:
               echo "$t engine is not static" >&2; exit 1;
             }
           done
-          target/x86_64-unknown-linux-musl/release/caddy-abuseguard version
+          bash ../scripts/check-engine-version.sh ../VERSION target/x86_64-unknown-linux-musl/release/caddy-abuseguard
       - name: Boot-check the arm64 musl artifact under qemu
         working-directory: engine-rs
         run: |
           set -eu
           sudo apt-get install -y -qq qemu-user-static
-          out="$(qemu-aarch64-static target/aarch64-unknown-linux-musl/release/caddy-abuseguard version)"
-          echo "$out"
-          case "$out" in
-            "abuseguard-engine "*) ;;
-            *) echo "unexpected arm64 version output: $out" >&2; exit 1 ;;
-          esac
+          bash ../scripts/check-engine-version.sh ../VERSION \
+            target/aarch64-unknown-linux-musl/release/caddy-abuseguard qemu-aarch64-static
       - name: Upload amd64 test binary
         uses: actions/upload-artifact@v4
         with:
@@ -146,8 +142,16 @@ jobs:
 
   shell:
     runs-on: ubuntu-latest
+    env:
+      RUST_TOOLCHAIN: '1.100.0'
     steps:
       - uses: actions/checkout@v4
+      - name: Build the Rust panel helpers
+        working-directory: engine-rs
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          cargo "+$RUST_TOOLCHAIN" build --locked --release
+          echo "ABUSEGUARD_ENGINE_BIN=$GITHUB_WORKSPACE/engine-rs/target/release/caddy-abuseguard" >> "$GITHUB_ENV"
       - name: Syntax-check the shell scripts
         run: |
           set -eu
@@ -156,6 +160,7 @@ jobs:
           done
           bash ./scripts/test-proxy-selection.sh
           bash ./scripts/test-nginx-runtime-contract.sh
+          ABUSEGUARD_TEST_NGINX_RENDER_BIN="$ABUSEGUARD_ENGINE_BIN" bash ./scripts/test-nginx-runtime-contract.sh
           bash ./scripts/test-panel-refresh.sh
           bash ./scripts/test-site-migration.sh
           bash ./scripts/test-firewall.sh
@@ -164,7 +169,7 @@ jobs:
       - name: Verify isolated nftables transactions
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq nftables
-          sudo bash ./scripts/test-firewall.sh --kernel
+          sudo --preserve-env=ABUSEGUARD_ENGINE_BIN bash ./scripts/test-firewall.sh --kernel
 
   log-contract:
     runs-on: ubuntu-latest

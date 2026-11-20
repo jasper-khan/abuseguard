@@ -82,6 +82,7 @@ fail() {
 
 # The generic installer helper must stage, verify, probe, and only then replace.
 extract_function verify_sha256 "$ROOT/install.sh" > "$FUNCTIONS"
+extract_function probe_binary "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function stage_release_binary "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function commit_staged_binary "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function install_release_binary "$ROOT/install.sh" >> "$FUNCTIONS"
@@ -187,6 +188,15 @@ install_release_binary test-url "$OLD_BIN" test-name test-label 0.3.33 \
 [ "$("$OLD_BIN" version)" = 'abuseguard-engine 0.3.33' ] || fail "matching engine was not installed"
 find "$TMP" -maxdepth 1 -name '.*.tmp.*' -print -quit | grep -q . \
 	&& fail "installer left a staged binary behind"
+
+# Override/source binaries use the same probe without needing a newer CLI
+# command. They must not pass if they print a valid version then exit nonzero.
+printf '#!/usr/bin/env bash\nprintf "abuseguard-engine 0.3.33\\n"\nexit 1\n' > "$BROKEN_BIN"
+if probe_binary "$BROKEN_BIN" "engine" 0.3.33; then
+	fail "failing engine probe accepted version text"
+fi
+probe_binary "$GOOD_BIN" "engine" 0.3.33 || fail "matching legacy engine probe was rejected"
+[ "$PROBED_BINARY_VERSION_OUTPUT" = 'abuseguard-engine 0.3.33' ] || fail "version output was lost"
 
 # The Caddy release download must not reuse the engine's staging slot: the
 # engine is staged first, committed only after fail2ban is paused.

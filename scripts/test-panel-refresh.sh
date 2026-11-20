@@ -219,29 +219,18 @@ footer="$(panel_footer "返回首页" | sed $'s/\033\\[[0-9;]*m//g')"
 # colored states and the fallbacks for missing jails and disabled timers.
 panel_start() { :; }
 panel_pause() { :; }
-svc_state() { case "$1" in fail2ban) echo active ;; *) echo inactive ;; esac; }
 sites_lines() { printf '%s\t%s\n' "example.com" "127.0.0.1:3000"; }
-systemctl() {
-	case "$1" in
-		is-active) case "$2" in caddy-abuseguard-sync.timer) echo active ;; *) echo inactive ;; esac ;;
-		show) case "$2" in caddy-abuseguard-sync.timer) echo "Tue 2026-11-04 03:00:00 CST" ;; *) echo n/a ;; esac ;;
-	esac
-}
-fail2ban-client() {
-	case "$2" in
-		caddy-rate-local) echo "Status for the jail: $2. Currently banned: 158" ;;
-		caddy-probe-h1) echo "Currently banned: 0" ;;
-		caddy-probe-h2) echo "Currently banned: 0" ;;
-		sshd) echo "NOK: $2" ;;
-		*) echo "Currently banned: 0" ;;
-	esac
+panel_status_snapshot() {
+	cat <<'JSON'
+{"schema_version":1,"backend":"caddy","services":{"proxy":"inactive","fail2ban":"active"},"timers":{"report":{"state":"inactive"},"sync":{"state":"active","next":"Tue 2026-11-04 03:00:00 CST"}},"jails":{"caddy-rate-local":158,"caddy-probe-h1":0,"caddy-probe-h2":0,"sshd":null}}
+JSON
 }
 status="$(act_status | sed $'s/\033\\[[0-9;]*m//g')"
 count_rows="$(printf '%s\n' "$status" | grep -E '^ +(caddy-(rate-local|probe-h[12])|sshd) +[0-9]+$')"
 # Every count row must end in the same column: 3 leading + 24 label + 7 count.
 [ "$(printf '%s\n' "$count_rows" | awk '{print length($0)}' | sort -u)" = 34 ]
 [ "$(printf '%s\n' "$count_rows" | wc -l)" -eq 3 ]
-[ "$(printf '%s\n' "$status" | grep -cE 'sshd +未启用' || true)" -eq 1 ]
+[ "$(printf '%s\n' "$status" | grep -cE 'sshd +未知' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE 'caddy +未运行' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE 'fail2ban +运行中' || true)" -eq 1 ]
 [ "$(printf '%s\n' "$status" | grep -cE 'example\.com +→ 127\.0\.0\.1:3000' || true)" -eq 1 ]
@@ -279,17 +268,13 @@ panel_pause() { :; }
 pause() { :; }
 panel_row() { printf '%s\n' "$1" | sed $'s/\033\\[[0-9;]*m//g'; }
 ENGINE=:
-svc_state() { echo active; }
+panel_status_snapshot() {
+	cat <<'JSON'
+{"schema_version":1,"backend":"nginx","services":{"proxy":"active","fail2ban":"active"},"banned_total":0,"reporting_enabled":false,"firewall_table_present":true,"intel_table_present":true}
+JSON
+}
 systemctl() { return 1; }
 journalctl() { printf '%s\n' "$*"; }
-count_banned() { echo 0; }
-reporting_state() { echo off; }
-fail2ban-client() {
-	case "$1" in
-		status) printf 'Status for the jail: %s\nCurrently banned: 0\n' "$2" ;;
-		*) return 1 ;;
-	esac
-}
 ssh_current_ports() { echo 22; }
 firewall_running() { return 0; }
 intel_table_present() { return 0; }
@@ -319,3 +304,30 @@ printf '%s\n' "$logs_view" | grep -F -- '-u certbot' >/dev/null
 if printf '%s\n' "$logs_view" | grep -F -- '-u caddy' >/dev/null; then exit 1; fi
 
 echo "panel refresh, navigation and layout tests passed"
+
+# With a compiled engine, exercise the Caddy menu's generator without touching
+# the host Caddyfile or calling a real service.
+if [ -n "${ABUSEGUARD_ENGINE_BIN:-}" ]; then
+	caddy_sites="$TMP/caddy-sites"
+	mkdir "$caddy_sites"
+	(
+		source "$PANEL_SOURCE"
+		ENGINE="$ABUSEGUARD_ENGINE_BIN"
+		SITES_DIR="$caddy_sites"
+		proxy_mode() { printf 'caddy'; }
+		cf_is_set() { return 1; }
+		validate_caddyfile() { return 0; }
+		caddy_reload_or_restart() { return 0; }
+		sleep() { :; }
+		act_sites <<< $'1\nexample.com\n1\n127.0.0.1:3000\n0' >/dev/null
+	)
+	cmp - "$caddy_sites/example.com.caddy" <<'CADDY'
+example.com {
+	import abuseguard
+	reverse_proxy 127.0.0.1:3000
+}
+CADDY
+	rm -f -- "$caddy_sites/example.com.caddy"
+	rmdir -- "$caddy_sites"
+	echo "Caddy panel renderer fixture passed"
+fi

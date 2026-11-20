@@ -34,7 +34,7 @@ jobs:
           CC_aarch64_unknown_linux_musl: clang
           AR_aarch64_unknown_linux_musl: llvm-ar
         run: |
-          set -eu
+          set -euo pipefail
           version="$(tr -d '[:space:]' < ../VERSION)"
           [ -n "$version" ] || { echo "VERSION is empty" >&2; exit 1; }
           # the tag itself must carry the same version: 0.7.1 code under a
@@ -44,10 +44,11 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match VERSION $version" >&2
             exit 1
           }
-          # VERSION and the crate manifest must already agree in the tagged
-          # commit; the release build never patches them on the fly (that
-          # would desync Cargo.lock and fail --locked).
-          manifest_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          # Let Cargo parse the actual package metadata; do not rewrite the
+          # manifest (that would invalidate the locked dependency graph).
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          manifest_version="$(cargo "+$RUST_TOOLCHAIN" metadata --locked --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "abuseguard") | .version')"
           [ "$manifest_version" = "$version" ] || {
             echo "Cargo.toml says $manifest_version but VERSION says $version;" >&2
             echo "bump both in the same commit and re-tag" >&2
@@ -57,27 +58,23 @@ jobs:
           cargo "+$RUST_TOOLCHAIN" test --locked
           rustup "+$RUST_TOOLCHAIN" target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           sudo apt-get update -qq
-          sudo apt-get install -y -qq musl-tools clang lld llvm
+          sudo apt-get install -y -qq musl-tools clang lld llvm qemu-user-static
           cargo "+$RUST_TOOLCHAIN" build --locked --release --target x86_64-unknown-linux-musl
           RUSTFLAGS="-C link-arg=-Qunused-arguments -C link-arg=-target -C link-arg=aarch64-unknown-linux-musl -C link-arg=-fuse-ld=lld" \
             cargo "+$RUST_TOOLCHAIN" build --locked --release --target aarch64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-amd64
           cp target/aarch64-unknown-linux-musl/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-arm64
           chmod 0755 ../dist/caddy-abuseguard-linux-*
-          # boot check + static check: a NEEDED-free binary runs on every
-          # supported distro, so this covers the oldest supported system too.
-          ../dist/caddy-abuseguard-linux-amd64 version
-          [ "$(readelf -d ../dist/caddy-abuseguard-linux-amd64 | grep -c NEEDED)" = 0 ] || {
-            echo "amd64 engine is not static" >&2; exit 1;
-          }
-          [ "$(readelf -d ../dist/caddy-abuseguard-linux-arm64 | grep -c NEEDED)" = 0 ] || {
-            echo "arm64 engine is not static" >&2; exit 1;
-          }
-          got="$(../dist/caddy-abuseguard-linux-amd64 version | awk '{print $2}')"
-          [ "$got" = "$version" ] || {
-            echo "engine amd64 reports $got, want $version" >&2
-            exit 1
-          }
+          # Require successful startup and the exact version on both artifacts.
+          bash ../scripts/check-engine-version.sh ../VERSION ../dist/caddy-abuseguard-linux-amd64
+          bash ../scripts/check-engine-version.sh ../VERSION ../dist/caddy-abuseguard-linux-arm64 qemu-aarch64-static
+          for engine in ../dist/caddy-abuseguard-linux-{amd64,arm64}; do
+            dynamic="$(readelf -d "$engine")"
+            if grep -q NEEDED <<< "$dynamic"; then
+              echo "$engine is not static" >&2
+              exit 1
+            fi
+          done
 
       # Scheduled/manual refreshes may update Caddy, but a versioned engine is
       # immutable. Download the existing engine assets instead of rebuilding
@@ -94,7 +91,28 @@ jobs:
           echo "LATEST_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir dist \
             --pattern 'caddy-abuseguard-linux-*' \
-            --pattern 'BUILD-METADATA.json'
+            --pattern 'BUILD-METADATA.json' \
+            --pattern 'SHA256SUMS.txt'
+          version="$(jq -er '.abuseguard_version | strings | select(length > 0)' dist/BUILD-METADATA.json)"
+          [ "$tag" = "v$version" ] || {
+            echo "existing metadata version $version does not match release tag $tag" >&2
+            exit 1
+          }
+          # Never write a fresh checksum for broken or missing immutable bytes.
+          # The existing Caddy checksums are ignored because Caddy is rebuilt below.
+          (
+            cd dist
+            for engine in caddy-abuseguard-linux-{amd64,arm64}; do
+              awk -v asset="$engine" '
+                $2 == asset || $2 == "*" asset { print; count++ }
+                END { exit count != 1 }
+              ' SHA256SUMS.txt > "$engine.sha256" || {
+                echo "expected exactly one checksum for $engine" >&2
+                exit 1
+              }
+              sha256sum --strict -c "$engine.sha256"
+            done
+          )
 
       - name: Build Caddy with caddy-dns/cloudflare (linux amd64/arm64, upstream latest)
         run: |
@@ -123,7 +141,7 @@ jobs:
           bash ./scripts/verify-log-contract.sh "$PWD/dist/caddy-linux-amd64"
 
       - name: Checksums
-        run: ( cd dist && sha256sum caddy-abuseguard-linux-* caddy-linux-* > SHA256SUMS.txt )
+        run: ( cd dist && sha256sum caddy-abuseguard-linux-{amd64,arm64} caddy-linux-{amd64,arm64} > SHA256SUMS.txt )
 
       # Regenerated on every run. On refresh, preserve the engine provenance
       # from the existing release and update only the Caddy provenance.
@@ -133,9 +151,9 @@ jobs:
           xcaddy_ver="$(go list -m -versions github.com/caddyserver/xcaddy | awk '{print $NF}')"
           cf_ver="$(go list -m -versions github.com/caddy-dns/cloudflare | awk '{print $NF}')"
           go_ver="$(go version | awk '{print $3}')"
-          rustc_ver="$(rustc "+$RUST_TOOLCHAIN" --version | awk '{print $2}')"
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           if [ "$GITHUB_EVENT_NAME" = push ]; then
+            rustc_ver="$(rustc "+$RUST_TOOLCHAIN" --version | awk '{print $2}')"
             version="$(tr -d '[:space:]' < VERSION)"
             engine="$(jq -cn \
               --arg source_commit "$GITHUB_SHA" \
