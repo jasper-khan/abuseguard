@@ -57,7 +57,10 @@ jobs:
           mkdir -p ../dist
           cargo "+$RUST_TOOLCHAIN" test --locked
           rustup "+$RUST_TOOLCHAIN" target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-          sudo apt-get update -qq
+          # update may fail on stale third-party indexes baked into the runner
+          # image; apt install below stays strict and fails if the packages we
+          # actually need are not installable.
+          sudo apt-get update -qq || true
           sudo apt-get install -y -qq musl-tools clang lld llvm qemu-user-static
           cargo "+$RUST_TOOLCHAIN" build --locked --release --target x86_64-unknown-linux-musl
           RUSTFLAGS="-C link-arg=-Qunused-arguments -C link-arg=-target -C link-arg=aarch64-unknown-linux-musl -C link-arg=-fuse-ld=lld" \
