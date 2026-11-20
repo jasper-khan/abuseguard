@@ -202,9 +202,15 @@ rm -f -- "$STAGED_BIN"
 STAGED_BIN=""
 
 # Build the real engine so panel validation is tested against its parser.
-eng_bin="$ROOT/engine-rs/target/release/caddy-abuseguard"
-[ -f "$eng_bin" ] || eng_bin="$eng_bin.exe" # Windows cargo adds .exe
-(cd "$ROOT/engine-rs" && cargo build --locked --release && cp "$eng_bin" "$ENGINE_BUILD")
+# Windows cargo adds .exe; probe only after the build, before any probe the
+# artifact has not been produced yet.
+(cd "$ROOT/engine-rs" \
+	&& cargo build --locked --release \
+	&& if [ -f target/release/caddy-abuseguard ]; then \
+		cp target/release/caddy-abuseguard "$ENGINE_BUILD"; \
+	else \
+		cp target/release/caddy-abuseguard.exe "$ENGINE_BUILD"; \
+	fi)
 
 # The engine removed the enqueue --mode flag; fail2ban must not keep sending it.
 if grep -q -- '--mode' "$ROOT/assets/fail2ban/action.d/caddy-abuseguard-queue.conf"; then

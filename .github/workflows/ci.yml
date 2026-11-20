@@ -88,6 +88,17 @@ jobs:
             }
           done
           target/x86_64-unknown-linux-musl/release/caddy-abuseguard version
+      - name: Boot-check the arm64 musl artifact under qemu
+        working-directory: engine-rs
+        run: |
+          set -eu
+          sudo apt-get install -y -qq qemu-user-static
+          out="$(qemu-aarch64-static target/aarch64-unknown-linux-musl/release/caddy-abuseguard version)"
+          echo "$out"
+          case "$out" in
+            "abuseguard-engine "*) ;;
+            *) echo "unexpected arm64 version output: $out" >&2; exit 1 ;;
+          esac
       - name: Upload amd64 test binary
         uses: actions/upload-artifact@v4
         with:
@@ -100,15 +111,18 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUST_TOOLCHAIN: '1.100.0'
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
     steps:
       - uses: actions/checkout@v4
-      - name: Build the engine for policy-apply
+      - name: Build the published (static musl) engine for policy tests
         working-directory: engine-rs
         run: |
           set -eu
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          cargo "+$RUST_TOOLCHAIN" build --locked --release
-          cp target/release/caddy-abuseguard /tmp/caddy-abuseguard
+          rustup "+$RUST_TOOLCHAIN" target add x86_64-unknown-linux-musl
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+          cargo "+$RUST_TOOLCHAIN" build --locked --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/caddy-abuseguard /tmp/caddy-abuseguard
       - name: Install nftables, fail2ban and network test tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables fail2ban iproute2 iputils-ping python3
       - name: Verify service units and sandboxing definitions

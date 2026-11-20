@@ -37,6 +37,13 @@ jobs:
           set -eu
           version="$(tr -d '[:space:]' < ../VERSION)"
           [ -n "$version" ] || { echo "VERSION is empty" >&2; exit 1; }
+          # the tag itself must carry the same version: 0.7.1 code under a
+          # v0.7.2 tag would boot, but every installer run against that
+          # release would refuse the binary.
+          [ "$GITHUB_REF_NAME" = "v$version" ] || {
+            echo "tag $GITHUB_REF_NAME does not match VERSION $version" >&2
+            exit 1
+          }
           # VERSION and the crate manifest must already agree in the tagged
           # commit; the release build never patches them on the fly (that
           # would desync Cargo.lock and fail --locked).

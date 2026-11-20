@@ -10,9 +10,15 @@ cleanup() {
 	rmdir -- "$TMP"
 }
 trap cleanup EXIT
-bin="$ROOT/engine-rs/target/release/caddy-abuseguard"
-[ -f "$bin" ] || bin="$bin.exe" # Windows cargo adds .exe
-(cd "$ROOT/engine-rs" && cargo build --locked --release && cp "$bin" "$TMP/engine")
+# Windows cargo adds .exe; probe only after the build, before any probe the
+# artifact has not been produced yet.
+(cd "$ROOT/engine-rs" \
+	&& cargo build --locked --release \
+	&& if [ -f target/release/caddy-abuseguard ]; then \
+		cp target/release/caddy-abuseguard "$TMP/engine"; \
+	else \
+		cp target/release/caddy-abuseguard.exe "$TMP/engine"; \
+	fi)
 # Native binaries (Windows here, Linux in CI) must receive native paths inside
 # config/env; cygpath converts only when it exists.
 native_path() { command -v cygpath >/dev/null 2>&1 && cygpath -m "$1" || printf '%s' "$1"; }
