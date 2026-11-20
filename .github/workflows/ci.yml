@@ -37,15 +37,31 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       RUST_TOOLCHAIN: '1.100.0'
+      # target-scoped linker/CC settings for the static musl builds below;
+      # lld flags live inside the arm64 build step because RUSTFLAGS is global.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: clang
+      CC_aarch64_unknown_linux_musl: clang
+      AR_aarch64_unknown_linux_musl: llvm-ar
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: |
           set -eu
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup "+$RUST_TOOLCHAIN" target add aarch64-unknown-linux-gnu
+          rustup "+$RUST_TOOLCHAIN" target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          sudo apt-get install -y -qq musl-tools clang lld llvm
+      - name: Check VERSION and Cargo.toml agree
+        run: |
+          set -eu
+          version="$(tr -d '[:space:]' < VERSION)"
+          manifest_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' engine-rs/Cargo.toml | head -1)"
+          [ "$manifest_version" = "$version" ] || {
+            echo "engine-rs/Cargo.toml says $manifest_version but VERSION says $version;" >&2
+            echo "bump both in the same commit (release builds assert this too)" >&2
+            exit 1
+          }
       - name: Test the locked Rust engine
         working-directory: engine-rs
         run: |
@@ -58,18 +74,25 @@ jobs:
         run: |
           bash ./scripts/test-review-fixes.sh
           bash ./scripts/test-ban-policy.sh
-      - name: Cross-compile the release targets
+      - name: Build the static release targets (musl)
         working-directory: engine-rs
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           set -eu
-          cargo "+$RUST_TOOLCHAIN" build --locked --release --target aarch64-unknown-linux-gnu
+          cargo "+$RUST_TOOLCHAIN" build --locked --release --target x86_64-unknown-linux-musl
+          RUSTFLAGS="-C link-arg=-Qunused-arguments -C link-arg=-target -C link-arg=aarch64-unknown-linux-musl -C link-arg=-fuse-ld=lld" \
+            cargo "+$RUST_TOOLCHAIN" build --locked --release --target aarch64-unknown-linux-musl
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            bin="target/$t/release/caddy-abuseguard"
+            [ "$(readelf -d "$bin" | grep -c NEEDED)" = 0 ] || {
+              echo "$t engine is not static" >&2; exit 1;
+            }
+          done
+          target/x86_64-unknown-linux-musl/release/caddy-abuseguard version
       - name: Upload amd64 test binary
         uses: actions/upload-artifact@v4
         with:
           name: caddy-abuseguard-linux-amd64-${{ github.sha }}
-          path: engine-rs/target/release/caddy-abuseguard
+          path: engine-rs/target/x86_64-unknown-linux-musl/release/caddy-abuseguard
           if-no-files-found: error
           retention-days: 1
 

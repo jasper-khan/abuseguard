@@ -23,27 +23,49 @@ jobs:
         with:
           go-version: 'stable'
 
-      - name: Build engine binaries (linux amd64/arm64)
+      - name: Build engine binaries (linux amd64/arm64, static musl)
         if: github.event_name == 'push'
         working-directory: engine-rs
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          # target-scoped linker/CC for the static musl builds; lld flags live
+          # inside the arm64 build command because RUSTFLAGS is global.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: clang
+          CC_aarch64_unknown_linux_musl: clang
+          AR_aarch64_unknown_linux_musl: llvm-ar
         run: |
           set -eu
           version="$(tr -d '[:space:]' < ../VERSION)"
           [ -n "$version" ] || { echo "VERSION is empty" >&2; exit 1; }
+          # VERSION and the crate manifest must already agree in the tagged
+          # commit; the release build never patches them on the fly (that
+          # would desync Cargo.lock and fail --locked).
+          manifest_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          [ "$manifest_version" = "$version" ] || {
+            echo "Cargo.toml says $manifest_version but VERSION says $version;" >&2
+            echo "bump both in the same commit and re-tag" >&2
+            exit 1
+          }
           mkdir -p ../dist
-          # VERSION is the single source of truth; the release build injects it
-          # into the crate manifest so the binary reports it.
-          sed -i "0,/^version = /s/^version = .*/version = \"$version\"/" Cargo.toml
           cargo "+$RUST_TOOLCHAIN" test --locked
-          rustup "+$RUST_TOOLCHAIN" target add aarch64-unknown-linux-gnu
-          sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
-          cargo "+$RUST_TOOLCHAIN" build --locked --release
-          cargo "+$RUST_TOOLCHAIN" build --locked --release --target aarch64-unknown-linux-gnu
-          cp target/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-amd64
-          cp target/aarch64-unknown-linux-gnu/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-arm64
+          rustup "+$RUST_TOOLCHAIN" target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools clang lld llvm
+          cargo "+$RUST_TOOLCHAIN" build --locked --release --target x86_64-unknown-linux-musl
+          RUSTFLAGS="-C link-arg=-Qunused-arguments -C link-arg=-target -C link-arg=aarch64-unknown-linux-musl -C link-arg=-fuse-ld=lld" \
+            cargo "+$RUST_TOOLCHAIN" build --locked --release --target aarch64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-amd64
+          cp target/aarch64-unknown-linux-musl/release/caddy-abuseguard ../dist/caddy-abuseguard-linux-arm64
           chmod 0755 ../dist/caddy-abuseguard-linux-*
+          # boot check + static check: a NEEDED-free binary runs on every
+          # supported distro, so this covers the oldest supported system too.
+          ../dist/caddy-abuseguard-linux-amd64 version
+          [ "$(readelf -d ../dist/caddy-abuseguard-linux-amd64 | grep -c NEEDED)" = 0 ] || {
+            echo "amd64 engine is not static" >&2; exit 1;
+          }
+          [ "$(readelf -d ../dist/caddy-abuseguard-linux-arm64 | grep -c NEEDED)" = 0 ] || {
+            echo "arm64 engine is not static" >&2; exit 1;
+          }
           got="$(../dist/caddy-abuseguard-linux-amd64 version | awk '{print $2}')"
           [ "$got" = "$version" ] || {
             echo "engine amd64 reports $got, want $version" >&2
@@ -119,7 +141,7 @@ jobs:
               if .engine then .engine else {
                 source_commit: .source_commit,
                 built_at: .built_at,
-                rustc_version: .go_version
+                go_version: .go_version
               } end' dist/BUILD-METADATA.json)"
           fi
           jq -n \
