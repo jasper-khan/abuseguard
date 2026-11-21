@@ -874,15 +874,41 @@ act_firewall() {
 # ---- SSH 端口 ----
 # 修改端口时新旧端口同时监听；确认新端口可登录后，再到防火墙管理关闭旧端口。
 ssh_current_ports() {
-	sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -un || true
+	local ports
+	ports="$(sshd -T 2>/dev/null | "$ENGINE" ssh-admin effective-ports)" || return 1
+	printf '%s\n' "$ports"
 }
 
-# 列出声明 Port 的位置（可只匹配某个端口），格式：文件:行:内容。
+# List validated directives as file:line:Port n. Native checks still prevail.
 ssh_port_sites() {
-	local pat='^[[:space:]]*Port[[:space:]]+[0-9]+'
-	[ -z "${1:-}" ] || pat='^[[:space:]]*Port[[:space:]]+'"$1"'([[:space:]]|$)'
-	grep -HnE "$pat" "$SSHD_MAIN" 2>/dev/null
-	grep -rnE --include='*.conf' "$pat" "$SSHD_DROPIN_DIR" 2>/dev/null || true
+	if [ "$#" -eq 0 ]; then
+		"$ENGINE" ssh-admin port-sites "$SSHD_MAIN" "$SSHD_DROPIN_DIR"
+	else
+		"$ENGINE" ssh-admin port-sites "$SSHD_MAIN" "$SSHD_DROPIN_DIR" "$1"
+	fi
+}
+
+# Render to a new same-directory file. Do not expose partial candidates to
+# sshd, and do not replace the existing file when validation/rendering fails.
+ssh_apply_candidate() {
+	local destination="$1" candidate
+	shift
+	[ ! -L "$destination" ] || { echo "拒绝替换 SSH 配置链接：$destination" >&2; return 1; }
+	candidate="$(mktemp -- "${destination%/*}/.abg-ssh.XXXXXXXX")" || return 1
+	if ! "$ENGINE" ssh-admin "$@" > "$candidate"; then
+		rm -f -- "$candidate"
+		return 1
+	fi
+	if [ -e "$destination" ]; then
+		if ! chown --reference="$destination" -- "$candidate" || ! chmod --reference="$destination" -- "$candidate"; then
+			rm -f -- "$candidate"
+			return 1
+		fi
+	fi
+	if ! mv -fT -- "$candidate" "$destination"; then
+		rm -f -- "$candidate"
+		return 1
+	fi
 }
 
 # 恢复某个 sshd 配置文件并重载（失败回滚）。
@@ -905,8 +931,8 @@ ssh_restore_file() {
 # 从 sshd 配置中移除某个端口；调用者保留备份直到防火墙提交成功。
 ssh_port_remove() {
 	local port="$1" sites files file backup
-	sites="$(ssh_port_sites "$port")"
-	files="$(printf '%s\n' "$sites" | grep . | cut -d: -f1 | sort -u)"
+	sites="$(ssh_port_sites "$port")" || return 1
+	files="$(printf '%s\n' "$sites" | awk -F: 'NF > 2 {print $1}' | sort -u)"
 	[ -n "$files" ] || return 1
 	[ "$(printf '%s\n' "$files" | grep -c .)" -eq 1 ] || return 1
 	file="$files"
@@ -915,12 +941,9 @@ ssh_port_remove() {
 		rm -f -- "$backup"
 		return 1
 	fi
-	if ! sed -i -E "/^[[:space:]]*Port[[:space:]]+$port([[:space:]]|$)/d" "$file"; then
-		ssh_restore_file "$file" "$backup"
+	if ! ssh_apply_candidate "$file" render-port-remove "$file" "$port"; then
+		rm -f -- "$backup"
 		return 1
-	fi
-	if [ "$file" = "$SSHD_DROPIN" ] && ! grep -qE '^[[:space:]]*Port[[:space:]]+' "$file"; then
-		rm -f -- "$file"
 	fi
 	if ! sshd -t; then
 		ssh_restore_file "$file" "$backup"
@@ -954,15 +977,17 @@ act_ssh_port() {
 	fi
 	command -v sshd >/dev/null 2>&1 || { echo "未找到 sshd，无法修改 SSH 端口。"; return 1; }
 	[ -d "$SSHD_DROPIN_DIR" ] || { echo "系统没有 $SSHD_DROPIN_DIR，面板不修改 SSH 端口。"; return 1; }
-	cur="$(ssh_current_ports)"
-	[ -n "$cur" ] || { echo "无法读取当前 SSH 端口，已取消。"; return 1; }
+	if ! cur="$(ssh_current_ports)" || [ -z "$cur" ]; then
+		echo "无法读取当前 SSH 端口，已取消。"
+		return 1
+	fi
 	if [ "$(printf '%s\n' "$cur" | grep -c .)" -ne 1 ]; then
 		echo "当前 SSH 监听多个端口（$(printf '%s' "$cur" | tr '\n' ' ')），请先在「防火墙」中关闭不需要的端口再切换。"
 		return 1
 	fi
 	echo "当前 SSH 端口：$cur"
-	port_sites="$(ssh_port_sites)"
-	port_count="$(printf '%s\n' "$port_sites" | grep -c .)"
+	port_sites="$(ssh_port_sites)" || return 1
+	port_count="$(printf '%s\n' "$port_sites" | awk 'NF { n++ } END { print n+0 }')"
 	if [ "$port_count" -gt 1 ]; then
 		echo "检测到多个 Port 指令，面板无法安全切换（sshd 会同时监听多个端口）："
 		printf '  %s\n' "$port_sites"
@@ -1002,20 +1027,17 @@ act_ssh_port() {
 			return 1
 		fi
 	fi
-	# 已有的单个 Port 留在原文件；我们的 drop-in 只负责新端口。没有 Port 时，
-	# 把当前端口也显式写出来，否则 sshd 只监听新端口。
-	if [ "$port_count" = 1 ] && [ "${port_sites%%:*}" != "$SSHD_DROPIN" ]; then
-		printf 'Port %s\n' "$new" > "$SSHD_DROPIN"
-	else
-		printf 'Port %s\nPort %s\n' "$cur" "$new" > "$SSHD_DROPIN"
+	# Rust renders a candidate retaining the currently configured port.
+	if ! ssh_apply_candidate "$SSHD_DROPIN" render-port-add "$SSHD_MAIN" "$SSHD_DROPIN_DIR" "$SSHD_DROPIN" "$cur" "$new"; then
+		[ -z "$backup" ] || rm -f -- "$backup"
+		return 1
 	fi
 	if ! sshd -t; then
 		echo "sshd 配置校验失败，已回滚。"
 		ssh_restore_file "$SSHD_DROPIN" "$backup"
 		return 1
 	fi
-	now="$(ssh_current_ports)"
-	if ! printf '%s\n' "$now" | grep -qxF "$cur" || ! printf '%s\n' "$now" | grep -qxF "$new"; then
+	if ! now="$(ssh_current_ports)" || ! printf '%s\n' "$now" | grep -qxF "$cur" || ! printf '%s\n' "$now" | grep -qxF "$new"; then
 		echo "sshd 未同时监听新旧端口，已回滚。"
 		ssh_restore_file "$SSHD_DROPIN" "$backup"
 		return 1
@@ -1070,59 +1092,19 @@ act_ssh_port() {
 
 # ---- SSH 登录方式 ----
 # 认证开关写入独立 drop-in；关闭密码登录前必须确认 root 有可用公钥。
-# 列出声明某认证指令的位置（可只匹配某指令），格式：文件:行:内容。
-ssh_auth_sites() {
-	local pat='^[[:space:]]*(PasswordAuthentication|PubkeyAuthentication)[[:space:]]+(yes|no)'
-	[ -z "${1:-}" ] || pat='^[[:space:]]*'"$1"'[[:space:]]+(yes|no)'
-	grep -HinE "$pat" "$SSHD_MAIN" 2>/dev/null || true
-	grep -rinE --include='*.conf' "$pat" "$SSHD_DROPIN_DIR" 2>/dev/null || true
-}
-
-# 真正压得过面板 drop-in 的指令位置（这些才拒绝修改）。sshd 首值生效，Include
-# 按文件名字典序展开；面板文件用 00- 排第一，主配置全局指令（Include 在主配置
-# 开头）和排序靠后的 drop-in 都被面板压住，不构成冲突。要拒绝的只有三种：
-#   1. 主配置没有 Include：drop-in 整体不生效
-#   2. Match 块内的指令：对匹配的连接覆盖全局设置
-#   3. 排序在面板文件之前的外部 drop-in
+# Rust refuses unknown Include layouts rather than guessing OpenSSH priorities.
 ssh_auth_conflicts() {
-	local directive="$1" row file rest fline inc mline file_match name mine
-	mine="${SSHD_AUTH_DROPIN##*/}"
-	inc="$(grep -nE "^[[:space:]]*Include[[:space:]]+$SSHD_DROPIN_DIR" "$SSHD_MAIN" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
-	[ -n "$inc" ] || { echo "$SSHD_MAIN 缺少 Include $SSHD_DROPIN_DIR，面板配置不会生效"; return 0; }
-	mline="$(grep -niE '^[[:space:]]*Match[[:space:]]' "$SSHD_MAIN" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
-	mline="${mline:-0}"
-	while IFS= read -r row; do
-		[ -n "$row" ] || continue
-		file="${row%%:*}"
-		rest="${row#*:}"
-		fline="${rest%%:*}"
-		if [ "$file" = "$SSHD_MAIN" ]; then
-			if [ "$mline" -gt 0 ] && [ "$fline" -gt "$mline" ]; then
-				echo "$row（Match 块内，会覆盖面板配置）"
-			elif [ "$fline" -lt "$inc" ]; then
-				echo "$row（在 Include 之前，先于面板生效）"
-			fi
-		else
-			name="${file##*/}"
-			file_match="$(grep -niE '^[[:space:]]*Match[[:space:]]' "$file" 2>/dev/null | head -n 1 | cut -d: -f1)" || true
-			if [ -n "$file_match" ] && [ "$fline" -gt "$file_match" ]; then
-				echo "$row（Match 块内，会覆盖面板配置）"
-			elif [ "$name" != "$mine" ] && [ "$name" \< "$mine" ]; then
-				echo "$row（drop-in 排序在面板之前）"
-			fi
-		fi
-	done < <(ssh_auth_sites "$directive")
+	"$ENGINE" ssh-admin auth-conflicts "$SSHD_MAIN" "$SSHD_DROPIN_DIR" "$SSHD_AUTH_DROPIN" "$1"
 }
 
-# 生效的认证开关（sshd -T 的输出是小写 on/off）。
+# Use the native effective config; read/parse errors are "unknown", not "off".
 ssh_auth_state() {
-	local key="$1" line
-	line="$(sshd -T 2>/dev/null | awk -v k="$key" '$1 == k && !found { print $2; found=1 }')" || line=""
-	case "$line" in
-		yes|on) echo on ;;
-		no|off) echo off ;;
-		*) echo unknown ;;
-	esac
+	local state
+	if state="$(sshd -T 2>/dev/null | "$ENGINE" ssh-admin effective-auth "$1")"; then
+		printf '%s\n' "$state"
+	else
+		echo unknown
+	fi
 }
 
 # 检查公钥内容和权限；无法运行 ssh-keygen 时不能认为公钥可用。
@@ -1188,12 +1170,7 @@ root_key_login_ready() {
 
 # 写入认证开关；调用者负责备份、校验与重载。
 ssh_auth_write() {
-	local pw="$1" pk="$2" line=""
-	[ -f "$SSHD_AUTH_DROPIN" ] && grep -vE '^[[:space:]]*(PasswordAuthentication|PubkeyAuthentication)[[:space:]]' "$SSHD_AUTH_DROPIN" > "$SSHD_AUTH_DROPIN.tmp"
-	[ -n "$pw" ] && line="${line}PasswordAuthentication $pw"$'\n'
-	[ -n "$pk" ] && line="${line}PubkeyAuthentication $pk"$'\n'
-	printf '%s' "$line" >> "$SSHD_AUTH_DROPIN.tmp"
-	mv -f -- "$SSHD_AUTH_DROPIN.tmp" "$SSHD_AUTH_DROPIN"
+	ssh_apply_candidate "$SSHD_AUTH_DROPIN" render-auth "$SSHD_AUTH_DROPIN" "$1" "$2"
 }
 
 # 开关某个认证方式（password|pubkey -> on|off）。
@@ -1209,7 +1186,10 @@ act_ssh_auth() {
 	[ "$cur" != unknown ] || { echo "无法读取当前 SSH 认证状态，已取消。"; return 1; }
 	target=off; [ "$cur" = off ] && target=on
 	# 只拒绝真正压不过面板的指令（见 ssh_auth_conflicts）。
-	conflicts="$(ssh_auth_conflicts "$directive")"
+	conflicts="$(ssh_auth_conflicts "$directive")" || {
+		echo "无法安全检查 SSH 配置优先级，已取消。"
+		return 1
+	}
 	if [ -n "$conflicts" ]; then
 		echo "以下位置的 $directive 指令优先级高于面板配置，面板不修改："
 		printf '  %s\n' "$conflicts"
@@ -1254,7 +1234,11 @@ act_ssh_auth() {
 	[ "$(ssh_auth_state pubkeyauthentication)" = on ] && ypk=yes
 	[ "$(ssh_auth_state pubkeyauthentication)" = off ] && ypk=no
 	if [ "$directive" = PasswordAuthentication ]; then ypw="$ysn"; else ypk="$ysn"; fi
-	ssh_auth_write "$ypw" "$ypk"
+	if ! ssh_auth_write "$ypw" "$ypk"; then
+		[ -z "$backup" ] || rm -f -- "$backup"
+		echo "候选 SSH 配置未写入，已取消。"
+		return 1
+	fi
 	root_target=""
 	if [ "$target" = off ]; then
 		root_target="$(ssh_root_config | awk -v k="$key" '$1 == k { print $2 }')" || root_target=""
@@ -1463,7 +1447,7 @@ sites_lines() {
 }
 
 act_sites() {
-	local choice dom t hp up tls f backup candidate num target out d u mode
+	local choice dom t hp up tls num target out d u mode
 	local -a doms
 	while true; do
 		panel_start "站点与证书"
@@ -1542,32 +1526,30 @@ act_sites() {
 					echo "  无法生成 Caddy 配置；未修改配置。"
 					sleep 2; continue
 				fi
-				f="$SITES_DIR/$dom.caddy"
-				candidate="$(mktemp "$SITES_DIR/.site-candidate.XXXXXX")" || {
-					echo "  无法创建站点候选文件。"
-					sleep 2; continue
-				}
-				if ! printf '%s\n' "$out" > "$candidate" || ! chmod 0644 "$candidate" \
-					|| ! ln -T -- "$candidate" "$f"; then
-					rm -f -- "$candidate"
+				if ! "$ENGINE" config-transaction add "$SITES_DIR" "$dom" <<< "$out"; then
 					echo "  无法写入站点配置，或该域名已存在。"
 					sleep 2; continue
 				fi
-				rm -f -- "$candidate"
-				out="$(validate_caddyfile "$CADDYFILE" 2>&1)"
-				if [ $? -ne 0 ]; then
-					rm -f "$f"
-					echo "  配置校验失败，已回滚。错误："
+				if ! out="$(validate_caddyfile "$CADDYFILE" 2>&1)"; then
+					if "$ENGINE" config-transaction rollback "$SITES_DIR" "$dom"; then
+						echo "  配置校验失败，已回滚。错误："
+					else
+						echo "  配置校验失败，且回滚未完成；请检查 $SITES_DIR/.site-transaction。错误：" >&2
+					fi
 					printf '%s\n' "$out" | grep -iE 'error|invalid' | head -3 | sed 's/^/    /'
 					sleep 2; continue
 				fi
 				if ! caddy_reload_or_restart; then
-					if rm -f -- "$f"; then
+					if "$ENGINE" config-transaction rollback "$SITES_DIR" "$dom"; then
 						echo "  Caddy 应用失败，新站点配置已移除。"
 						caddy_restart_active && echo "  Caddy 已恢复运行。" || echo "  Caddy 服务未恢复，请检查服务日志。" >&2
 					else
-						echo "  Caddy 应用失败，新站点配置移除失败：$f" >&2
+						echo "  Caddy 应用失败，新站点配置移除失败；请检查 $SITES_DIR/.site-transaction。" >&2
 					fi
+					sleep 2; continue
+				fi
+				if ! "$ENGINE" config-transaction commit "$SITES_DIR" "$dom"; then
+					echo "  Caddy 已应用配置，但站点事务未完成；请检查 $SITES_DIR/.site-transaction。" >&2
 					sleep 2; continue
 				fi
 				echo "  已添加 $dom → $up （caddy 已应用配置）"; sleep 1 ;;
@@ -1589,23 +1571,23 @@ act_sites() {
 					fi
 					sleep 2; continue
 				fi
-				f="$SITES_DIR/$target.caddy"
-				backup="$(mktemp "$SITES_DIR/.site-backup.XXXXXX")" || { echo "  无法备份站点配置，未删除。"; sleep 1; continue; }
-				if ! mv -- "$f" "$backup"; then
-					rm -f -- "$backup"
+				if ! "$ENGINE" config-transaction remove "$SITES_DIR" "$target"; then
 					echo "  无法备份站点配置，未删除。"
 					sleep 1; continue
 				fi
 				if ! caddy_reload_or_restart; then
-					if mv -f -- "$backup" "$f"; then
+					if "$ENGINE" config-transaction rollback "$SITES_DIR" "$target"; then
 						echo "  Caddy 应用失败，已恢复原站点配置。"
 						caddy_restart_active && echo "  Caddy 已恢复运行。" || echo "  Caddy 服务未恢复，请检查服务日志。" >&2
 					else
-						echo "  Caddy 应用失败，原站点配置恢复失败：$backup" >&2
+						echo "  Caddy 应用失败，原站点配置恢复失败；请检查 $SITES_DIR/.site-transaction。" >&2
 					fi
 					sleep 2; continue
 				fi
-				rm -f -- "$backup"
+				if ! "$ENGINE" config-transaction commit "$SITES_DIR" "$target"; then
+					echo "  Caddy 已应用配置，但站点事务未完成；请检查 $SITES_DIR/.site-transaction。" >&2
+					sleep 2; continue
+				fi
 				echo "  已删除 $target （caddy 已应用配置）"; sleep 1 ;;
 			3) panel_title "站点与证书 / Cloudflare API Token"; act_cftoken ;;
 			''|0) return ;;

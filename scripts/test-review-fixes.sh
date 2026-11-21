@@ -424,12 +424,23 @@ grep -q '^restart caddy$' "$SYSTEMCTL_LOG" || fail "token success did not restar
 grep -q '^reload caddy$' "$SYSTEMCTL_LOG" && fail "token success used reload"
 
 rm -f -- "$SITES_TEST/example.com.caddy"
+CADDY_VALIDATE_RC=1
+: > "$SYSTEMCTL_LOG"
+site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)"
+[ ! -e "$SITES_TEST/example.com.caddy" ] || fail "failed Caddy validation kept the new site"
+[ ! -e "$SITES_TEST/.site-transaction" ] || fail "failed Caddy validation left a pending site transaction"
+[ ! -s "$SYSTEMCTL_LOG" ] || fail "failed Caddy validation contacted the service"
+case "$site_output" in *"配置校验失败，已回滚"*) ;; *) fail "failed validation did not report rollback" ;; esac
+CADDY_VALIDATE_RC=0
+
+rm -f -- "$SITES_TEST/example.com.caddy"
 SYSTEMCTL_RELOAD_RC=1
 SYSTEMCTL_RESTART_RC=0
 : > "$SYSTEMCTL_LOG"
 site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)" \
 	|| fail "site update failed while restart fallback succeeded"
 [ -f "$SITES_TEST/example.com.caddy" ] || fail "successful restart fallback did not keep the new site"
+[ ! -e "$SITES_TEST/.site-transaction" ] || fail "successful restart fallback left a pending site transaction"
 grep -q 'reverse_proxy 127\.0\.0\.1:8080' "$SITES_TEST/example.com.caddy" \
 	|| fail "new site did not use the entered local upstream"
 case "$site_output" in *"已添加 example.com"*) ;; *) fail "successful restart fallback did not report success" ;; esac
@@ -443,6 +454,7 @@ reset_caddy_env
 : > "$SYSTEMCTL_LOG"
 site_output="$(printf '1\nexample.com\n1\n127.0.0.1:8080\n0\n' | act_sites 2>&1)"
 [ ! -e "$SITES_TEST/example.com.caddy" ] || fail "failed site add kept the new site"
+[ ! -e "$SITES_TEST/.site-transaction" ] || fail "site add rollback left a pending site transaction"
 case "$site_output" in *"已添加 example.com"*) fail "failed site add displayed success" ;; esac
 case "$site_output" in *"新站点配置已移除"*) ;; *) fail "failed site add did not report rollback" ;; esac
 [ "$(grep -c '^restart caddy$' "$SYSTEMCTL_LOG")" -eq 2 ] || fail "site add rollback did not restart the old service"
@@ -455,6 +467,7 @@ SYSTEMCTL_RESTART_RC=1
 : > "$SYSTEMCTL_LOG"
 site_output="$(printf '2\n1\n0\n' | act_sites 2>&1)"
 cmp "$SITE_EXPECTED" "$SITES_TEST/existing.example.com.caddy" || fail "failed site delete did not restore the site"
+[ ! -e "$SITES_TEST/.site-transaction" ] || fail "site delete rollback left a pending site transaction"
 case "$site_output" in *"已删除 existing.example.com"*) fail "failed site delete displayed success" ;; esac
 case "$site_output" in *"已恢复原站点配置"*) ;; *) fail "failed site delete did not report rollback" ;; esac
 [ "$(grep -c '^restart caddy$' "$SYSTEMCTL_LOG")" -eq 2 ] || fail "site delete rollback did not restart the old service"

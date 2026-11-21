@@ -9,11 +9,11 @@
 #   --keep-sites | --drop-sites   managed sites: keep (de-protect) / delete
 #   --yes            skip confirmation      --dry-run   print, change nothing
 #
-# Uninstall is symmetric to install: it reads /var/lib/caddy-abuseguard/
-# install-manifest (written at install time) and only removes things AbuseGuard
-# itself created. If the mode record or manifest is missing it falls back to
-# the safest path (touch nothing that might be the user's: proxy, accounts,
-# config, certificates).
+# The installed engine verifies /etc/caddy-abuseguard/install-manifest
+# alongside the proxy mode and package ownership records. Legacy snapshots
+# under the service-writable state directory do not authorize --purge.
+# If the records cannot be verified, preserve the user's proxy, accounts,
+# config, sites and certificates.
 set -uo pipefail
 
 # Test hook parity with install.sh; production uses /etc/caddy-abuseguard.
@@ -30,7 +30,7 @@ SNIPPET=/etc/caddy/abuseguard.caddy
 SITES_DIR=/etc/caddy/sites
 CADDY_ENV=/etc/caddy/.env
 CADDY_LIB=/var/lib/caddy
-MANIFEST="$STATE_DIR/install-manifest"
+MANIFEST="$CONF_DIR/install-manifest"
 
 # Immutable proxy mode + root-trusted ownership metadata.
 MODE_FILE="$CONF_DIR/web-server"
@@ -105,97 +105,42 @@ remove_owned_tree() {
 
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
 
-# --- proxy mode (never sourced) ----------------------------------------------
-proxy_mode_valid() { case "${1:-}" in caddy|nginx) return 0 ;; esac; return 1; }
-read_mode_record() {
-	local mode
-	[ -e "$MODE_FILE" ] || [ -L "$MODE_FILE" ] || return 1
-	[ -f "$MODE_FILE" ] && [ ! -L "$MODE_FILE" ] || return 2
-	mode="$(cat -- "$MODE_FILE" 2>/dev/null)" || return 2
-	proxy_mode_valid "$mode" || return 2
-	if [ "$(stat -c %u -- "$MODE_FILE" 2>/dev/null)" != 0 ]; then return 2; fi
-	printf '%s' "$mode"
-}
+# --- read root-trusted decisions before the engine is removed ----------------
+load_uninstall_inventory() {
+	local row bit='[01]' pkg='(0|1|unknown)' schema
+	PROXY_MODE=""
+	MANIFEST_OK=0
+	m_caddy_bin=1 m_caddy_svc=1 m_caddy_user=1 m_ag_user=1
+	m_caddyfile=1 m_caddy_etc=1 m_log_dir=1 m_caddy_lib=1
+	m_nginx_pkg=unknown m_nginx_core_pkg=unknown m_nginx_common_pkg=unknown
+	m_certbot_pkg=unknown m_certbot_cf_pkg=unknown
 
-mval() {
-	local v=""
-	[ -f "$MANIFEST" ] && v="$(grep -E "^$1=" "$MANIFEST" 2>/dev/null | head -1 | cut -d= -f2)"
-	echo "${v:-1}"
+	# An old or missing engine may still be uninstalled, but cannot authorize
+	# a destructive fallback. Never source records or evaluate tool output.
+	[ -f "$ENGINE_BIN" ] && [ -x "$ENGINE_BIN" ] && [ ! -L "$ENGINE_BIN" ] \
+		&& [ -O "$ENGINE_BIN" ] || return 0
+	row="$("$ENGINE_BIN" install-inventory inspect "$MODE_FILE" "$MANIFEST" "$PACKAGE_RECORD" 2>/dev/null)" \
+		|| return 0
+	schema="^v1\|(caddy|nginx|unknown)\|(verified|unknown)(\|$bit){8}(\|$pkg){5}$"
+	[[ "$row" =~ $schema ]] || return 0
+	local revision manifest_status
+	IFS='|' read -r revision PROXY_MODE manifest_status \
+		m_caddy_bin m_caddy_svc m_caddy_user m_ag_user m_caddyfile m_caddy_etc m_log_dir m_caddy_lib \
+		m_nginx_pkg m_nginx_core_pkg m_nginx_common_pkg m_certbot_pkg m_certbot_cf_pkg <<< "$row"
+	if [ "$PROXY_MODE" = unknown ]; then PROXY_MODE=""; fi
+	if [ "$manifest_status" = verified ] && [ -n "$PROXY_MODE" ]; then MANIFEST_OK=1; fi
 }
-if [ -f "$MANIFEST" ]; then MANIFEST_OK=1; else MANIFEST_OK=0; fi
+load_uninstall_inventory
 
-PROXY_MODE=""
-nginx_abuse_files_present() {
-	local f
-	if [ -e "$NGINX_HTTP_CONF" ] || [ -e "$NGINX_RUNTIME_PATH" ] || [ -e "$NGINX_DEPLOY_HOOK" ] \
-		|| [ -e "$AG_NGINX_CF_CREDENTIALS" ] || [ -e "$NGINX_SELFTEST_CONF" ] || [ -e "$NGINX_CF_TRUST_INCLUDE" ]; then
-		return 0
-	fi
-	for f in "$NGINX_SITES_AVAILABLE"/abuseguard-*.conf; do
-		[ -e "$f" ] || [ -L "$f" ] || continue
-		return 0
-	done
-	return 1
-}
-caddy_abuse_files_present() {
-	[ -e "$SNIPPET" ] || [ -e "$CADDY_ETC/Caddyfile.pre-abuseguard" ] \
-		|| [ -e /etc/systemd/system/caddy.service ]
-}
-if mode="$(read_mode_record)"; then
-	PROXY_MODE="$mode"
-else
-	rc=$?
-	mode_bad=0
-	if [ "$rc" = 2 ]; then
-		warn "代理模式记录 $MODE_FILE 缺失或无效；无法确认反向代理。"
-		mode_bad=1
-	fi
-	if [ "$mode_bad" = 0 ] && nginx_abuse_files_present; then
-		warn "检测到 AbuseGuard Nginx 文件，但模式记录不可用；按保守方式处理。"
-	elif [ "$mode_bad" = 0 ] && [ "$MANIFEST_OK" = 1 ]; then
-		mws="$(sed -n 's/^web_server=//p' "$MANIFEST" | head -n 1)"
-		if [ "$mws" = nginx ]; then
-			warn "安装清单记录 Nginx，但模式记录不可用；按保守方式处理。"
-		elif caddy_abuse_files_present; then
-			PROXY_MODE=caddy
-		fi
-	elif [ "$mode_bad" = 0 ] && caddy_abuse_files_present; then
-		PROXY_MODE=caddy
-	fi
-fi
 if [ -z "$PROXY_MODE" ]; then
-	warn "无法确定已安装的反向代理；按保守卸载处理（保留代理/证书/配置，仅移除核心）。"
+	warn "无法验证反向代理模式；仅移除 AbuseGuard 核心，保留反向代理、站点与证书。"
+	MODE=conservative
+	KEEP_SITES=keep
+elif [ "$MANIFEST_OK" = 0 ]; then
+	warn "无法确认安装归属（缺少可信安装清单或引擎不支持校验）；按保守方式保留软件包、账户、配置、站点与证书。"
 	MODE=conservative
 	KEEP_SITES=keep
 fi
-
-if [ "$MANIFEST_OK" = 0 ]; then
-	warn "未找到安装清单，无法确认哪些是 AbuseGuard 安装的；为安全起见将不动 Caddy/账户/配置。"
-fi
-m_caddy_bin="$(mval caddy_bin_preexisting)"
-m_caddy_svc="$(mval caddy_service_preexisting)"
-m_caddy_user="$(mval caddy_user_preexisting)"
-m_ag_user="$(mval abuseguard_user_preexisting)"
-m_caddyfile="$(mval caddyfile_preexisting)"
-m_caddy_etc="$(mval caddy_etc_preexisting)"
-m_log_dir="$(mval log_dir_preexisting)"
-m_caddy_lib="$(mval caddy_lib_preexisting)"
-
-# Root-trusted package ownership; missing/symlinked/unknown values stay
-# conservative and never authorize package removal. Field value 0 means the
-# package was absent before this install (ours to remove), 1 means pre-existing.
-pkg_owner() {
-	[ -f "$PACKAGE_RECORD" ] && [ ! -L "$PACKAGE_RECORD" ] || { echo unknown; return 0; }
-	[ "$(stat -c %u -- "$PACKAGE_RECORD" 2>/dev/null)" = 0 ] || { echo unknown; return 0; }
-	local v
-	v="$(grep -E "^$1=" "$PACKAGE_RECORD" 2>/dev/null | head -1 | cut -d= -f2)"
-	case "$v" in 0|1) echo "$v" ;; *) echo unknown ;; esac
-}
-m_nginx_pkg="$(pkg_owner nginx_preexisting)"
-m_nginx_core_pkg="$(pkg_owner nginx_core_preexisting)"
-m_nginx_common_pkg="$(pkg_owner nginx_common_preexisting)"
-m_certbot_pkg="$(pkg_owner certbot_preexisting)"
-m_certbot_cf_pkg="$(pkg_owner certbot_dns_cloudflare_preexisting)"
 
 # Source the installed Nginx helper (if still present) for full-context
 # validation/reload during file transactions. It is source-only by contract.

@@ -19,6 +19,11 @@ cleanup() {
 trap cleanup EXIT
 awk '/^# The panel needs root/{exit} {print}' "$ROOT/abuseguard.sh" > "$TMP/panel.sh"
 source "$TMP/panel.sh"
+ENGINE="${ABUSEGUARD_ENGINE_BIN:-$ROOT/engine-rs/target/debug/caddy-abuseguard}"
+if [ ! -x "$ENGINE" ] && [ -z "${ABUSEGUARD_ENGINE_BIN:-}" ]; then
+	cargo build --locked --manifest-path "$ROOT/engine-rs/Cargo.toml"
+fi
+[ -x "$ENGINE" ] || { echo "Missing test engine: $ENGINE" >&2; exit 1; }
 
 # Keep the real firewall close implementation for the retire-old-port tests.
 eval "$(declare -f firewall_change_port | sed '1s/^firewall_change_port/real_firewall_change_port/')"
@@ -36,7 +41,11 @@ SOCKET_ACTIVE=0
 RELOAD_FAIL=0
 SSHD_T_FAIL=0
 SAVE_FAIL=0
-mktemp() { : > "$TMP/ssh-backup"; printf '%s\n' "$TMP/ssh-backup"; }
+mktemp() {
+	if [ "$#" -gt 0 ]; then command mktemp "$@"; return; fi
+	: > "$TMP/ssh-backup"
+	printf '%s\n' "$TMP/ssh-backup"
+}
 ss() {
 	local filter="${!#}" port
 	if [ "$filter" = -tlnp ] || [ "$filter" = -tln ]; then

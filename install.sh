@@ -448,6 +448,8 @@ FAIL2BAN_PAUSED=0
 FAIL2BAN_STOPPED=0
 ENGINE_SWAPPED=0
 ENGINE_BACKUP=""
+PANEL_WORKDIR=""
+PANEL_SWAPPED=0
 UNIT_ROLLBACK_DIR=""
 INSTALL_COMPLETE=0
 STAGED_BIN=""
@@ -559,6 +561,50 @@ restore_engine_backup() {
 	return 0
 }
 
+# Stage the panel on its destination filesystem. Keep the old panel until
+# its matching replacement engine is in place, and preserve it for rollback.
+stage_panel() {
+	PANEL_WORKDIR="$(mktemp -d "$(dirname -- "$PANEL_BIN")/.ag.upgrade.XXXXXX")" \
+		|| die "无法创建控制面板候选目录。"
+	if [ -e "$PANEL_BIN" ] || [ -L "$PANEL_BIN" ]; then
+		{ [ -f "$PANEL_BIN" ] || [ -L "$PANEL_BIN" ]; } \
+			&& cp -aT -- "$PANEL_BIN" "$PANEL_WORKDIR/previous" \
+			|| die "无法备份旧控制面板。"
+	fi
+	install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_WORKDIR/next" \
+		|| die "无法暂存新控制面板。"
+}
+
+commit_panel() {
+	# Mark the attempt before renaming so a signal cannot bypass rollback.
+	PANEL_SWAPPED=1
+	mv -fT -- "$PANEL_WORKDIR/next" "$PANEL_BIN" \
+		|| die "无法安装新控制面板。"
+}
+
+restore_panel_backup() {
+	[ "${PANEL_SWAPPED:-0}" != 0 ] || return 0
+	if [ -e "$PANEL_WORKDIR/previous" ] || [ -L "$PANEL_WORKDIR/previous" ]; then
+		if ! mv -fT -- "$PANEL_WORKDIR/previous" "$PANEL_BIN"; then
+			warn "无法恢复旧控制面板；备份保留在 $PANEL_WORKDIR。"
+			return 1
+		fi
+	elif ! rm -f -- "$PANEL_BIN"; then
+		warn "无法移除新安装的控制面板。"
+		return 1
+	fi
+	PANEL_SWAPPED=0
+}
+
+discard_panel_stage() {
+	[ -n "${PANEL_WORKDIR:-}" ] || return 0
+	if ! rm -f -- "$PANEL_WORKDIR/next" "$PANEL_WORKDIR/previous" || ! rmdir -- "$PANEL_WORKDIR"; then
+		warn "无法清理控制面板暂存目录：$PANEL_WORKDIR。"
+		return 0
+	fi
+	PANEL_WORKDIR=""
+}
+
 on_install_exit() {
 	if declare -F restore_proxy_autostart >/dev/null 2>&1; then
 		restore_proxy_autostart
@@ -566,6 +612,7 @@ on_install_exit() {
 	[ -z "$STAGED_BIN" ] || rm -f -- "$STAGED_BIN"
 	[ -z "$STAGED_RELEASE_BIN" ] || rm -f -- "$STAGED_RELEASE_BIN"
 	if [ "$INSTALL_COMPLETE" = 1 ]; then
+		[ -z "${PANEL_WORKDIR:-}" ] || discard_panel_stage
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 		[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
@@ -576,7 +623,9 @@ on_install_exit() {
 		resume_fail2ban_after_failure
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
-	elif restore_engine_backup; then
+	elif [ -n "$ENGINE_BACKUP" ] \
+		&& { [ "${PANEL_SWAPPED:-0}" = 0 ] || restore_panel_backup; } \
+		&& restore_engine_backup; then
 		# Restore the old units only after their engine is back: the new units
 		# run policy-apply, which the old engine does not implement.
 		if [ -n "${UNIT_ROLLBACK_DIR:-}" ] && [ -s "$UNIT_ROLLBACK_DIR/manifest" ]; then
@@ -602,8 +651,8 @@ on_install_exit() {
 			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，但 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
 		fi
 	else
-		# Fresh install (no previous engine) or unreadable backup: the new
-		# engine+unit pair is compatible, so keep it and start detection.
+		# No previous engine, or the old panel/engine could not be restored.
+		# Keep the new engine rather than pair a new panel with the old one.
 		[ -z "$ENGINE_BACKUP" ] || warn "警告：旧引擎备份仍保留在 $ENGINE_BACKUP。"
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 		if systemctl restart fail2ban >/dev/null 2>&1; then
@@ -611,6 +660,11 @@ on_install_exit() {
 		else
 			warn "安装未完成：已保留新 fail2ban 配置，但 fail2ban 未能启动；请检查 journalctl -u fail2ban。"
 		fi
+	fi
+	if [ -n "${PANEL_WORKDIR:-}" ] && { [ "${PANEL_SWAPPED:-0}" = 0 ] || {
+		[ ! -e "$PANEL_WORKDIR/previous" ] && [ ! -L "$PANEL_WORKDIR/previous" ];
+	}; }; then
+		discard_panel_stage
 	fi
 	[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
 	[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
@@ -673,7 +727,12 @@ parse_install_args "$@"
 # any other host change. An in-progress install keeps its marker, so a retry
 # cannot switch backends.
 UPDATE_MODE=0
-if [ -f "$STATE_DIR/install-manifest" ] || [ -x "$PANEL_BIN" ]; then UPDATE_MODE=1; fi
+INSTALL_MANIFEST="$CONF_DIR/install-manifest"
+if [ -e "$INSTALL_MANIFEST" ] || [ -L "$INSTALL_MANIFEST" ] \
+	|| [ -e "$STATE_DIR/install-manifest" ] || [ -L "$STATE_DIR/install-manifest" ] \
+	|| [ -x "$PANEL_BIN" ]; then
+	UPDATE_MODE=1
+fi
 if [ -n "${ABUSEGUARD_PROXY_CHOICE:-}" ]; then
 	[ -n "$REQUESTED_PROXY" ] || set_requested_proxy "$ABUSEGUARD_PROXY_CHOICE"
 	unset ABUSEGUARD_PROXY_CHOICE
@@ -826,14 +885,51 @@ systemctl enable --now rsyslog >/dev/null 2>&1 || die "rsyslog 启动失败（�
 # --- record pre-install state (for symmetric uninstall) ----------------------
 # Snapshot what already exists BEFORE creating anything, so uninstall can tell
 # "installed by AbuseGuard" (safe to remove) from "user already had it" (keep).
-PRE_CADDY_BIN=0;  [ -e "$CADDY_BIN" ] && PRE_CADDY_BIN=1 || :
-PRE_CADDY_SVC=0;  [ -e /etc/systemd/system/caddy.service ] && PRE_CADDY_SVC=1 || :
+PRE_CADDY_BIN=0;  { [ -e "$CADDY_BIN" ] || [ -L "$CADDY_BIN" ]; } && PRE_CADDY_BIN=1 || :
+PRE_CADDY_SVC=0;  { [ -e /etc/systemd/system/caddy.service ] || [ -L /etc/systemd/system/caddy.service ]; } && PRE_CADDY_SVC=1 || :
 PRE_CADDY_USER=0; id caddy >/dev/null 2>&1 && PRE_CADDY_USER=1 || :
 PRE_AG_USER=0;    id abuseguard >/dev/null 2>&1 && PRE_AG_USER=1 || :
-PRE_CADDYFILE=0;  [ -e "$CADDYFILE" ] && PRE_CADDYFILE=1 || :
-PRE_CADDY_ETC=0;  [ -e "$CADDY_ETC" ] && PRE_CADDY_ETC=1 || :
-PRE_LOG_DIR=0;    [ -e "$LOG_DIR" ] && PRE_LOG_DIR=1 || :
-PRE_CADDY_LIB=0;  [ -e /var/lib/caddy ] && PRE_CADDY_LIB=1 || :
+PRE_CADDYFILE=0;  { [ -e "$CADDYFILE" ] || [ -L "$CADDYFILE" ]; } && PRE_CADDYFILE=1 || :
+PRE_CADDY_ETC=0;  { [ -e "$CADDY_ETC" ] || [ -L "$CADDY_ETC" ]; } && PRE_CADDY_ETC=1 || :
+PRE_LOG_DIR=0;    { [ -e "$LOG_DIR" ] || [ -L "$LOG_DIR" ]; } && PRE_LOG_DIR=1 || :
+PRE_CADDY_LIB=0;  { [ -e /var/lib/caddy ] || [ -L /var/lib/caddy ]; } && PRE_CADDY_LIB=1 || :
+
+# Keep the first observation across retries, before creating accounts/paths.
+# Never promote a legacy record from the service-writable state directory:
+# a missing trustworthy snapshot must stay missing on an upgrade.
+if [ "$UPDATE_MODE" = 0 ]; then
+	if [ ! -d "$CONF_DIR" ] && [ ! -L "$CONF_DIR" ]; then
+		install -d -m 0750 -o root -g root "$CONF_DIR" || die "无法创建 $CONF_DIR。"
+	fi
+	manifest_dir_mode="$(stat -c '%a' -- "$CONF_DIR" 2>/dev/null || true)"
+	if [ -d "$CONF_DIR" ] && [ ! -L "$CONF_DIR" ] && [ -O "$CONF_DIR" ] \
+		&& [[ "$manifest_dir_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$manifest_dir_mode & 8#022) == 0 )); then
+		manifest_tmp="$(mktemp "$CONF_DIR/.install-manifest.XXXXXX")" || die "无法创建安装清单。"
+		if ! (
+			cat > "$manifest_tmp" <<EOF || exit 1
+version=1
+web_server=$PROXY_MODE
+caddy_bin_preexisting=$PRE_CADDY_BIN
+caddy_service_preexisting=$PRE_CADDY_SVC
+caddy_user_preexisting=$PRE_CADDY_USER
+abuseguard_user_preexisting=$PRE_AG_USER
+caddyfile_preexisting=$PRE_CADDYFILE
+caddy_etc_preexisting=$PRE_CADDY_ETC
+log_dir_preexisting=$PRE_LOG_DIR
+caddy_lib_preexisting=$PRE_CADDY_LIB
+EOF
+			chown root:root "$manifest_tmp" && chmod 0640 "$manifest_tmp" \
+				&& ln -T -- "$manifest_tmp" "$INSTALL_MANIFEST"
+		); then
+			rm -f -- "$manifest_tmp"
+			die "无法安全保存安装清单；没有覆盖现有记录。"
+		fi
+		rm -f -- "$manifest_tmp"
+		log "已记录安装清单（供卸载时核对归属）"
+	else
+		warn "配置目录 $CONF_DIR 不符合安装清单的归属要求；将只支持保守卸载。"
+	fi
+fi
 
 # --- service accounts --------------------------------------------------------
 if [ "$PROXY_MODE" = caddy ] && ! id caddy >/dev/null 2>&1; then
@@ -853,24 +949,6 @@ if [ "$PROXY_MODE" = caddy ]; then
 fi
 install -d -m 0750 -o root -g abuseguard "$CONF_DIR"
 install -d -m 0750 -o abuseguard -g abuseguard "$STATE_DIR" "$REPORTS_DIR"
-
-# Write the install manifest ONCE (first install); a re-run must not overwrite
-# the original pre-install snapshot.
-if [ ! -f "$STATE_DIR/install-manifest" ]; then
-	cat > "$STATE_DIR/install-manifest" <<EOF
-web_server=$PROXY_MODE
-caddy_bin_preexisting=$PRE_CADDY_BIN
-caddy_service_preexisting=$PRE_CADDY_SVC
-caddy_user_preexisting=$PRE_CADDY_USER
-abuseguard_user_preexisting=$PRE_AG_USER
-caddyfile_preexisting=$PRE_CADDYFILE
-caddy_etc_preexisting=$PRE_CADDY_ETC
-log_dir_preexisting=$PRE_LOG_DIR
-caddy_lib_preexisting=$PRE_CADDY_LIB
-EOF
-	chmod 0640 "$STATE_DIR/install-manifest"
-	log "已记录安装清单（供卸载时对称回滚）"
-fi
 
 trap on_install_exit EXIT
 trap 'exit 130' INT TERM
@@ -1324,7 +1402,8 @@ migrate_caddy_sites() {
 		fi
 	done
 
-	if ! bash "$migrator" "$candidate_source" "$out_main" "$out_sites" "$candidate_sites" > "$domains"; then
+	if ! ABUSEGUARD_MIGRATION_ENGINE="${STAGED_BIN:-${ABUSEGUARD_MIGRATION_ENGINE:-$ENGINE_BIN}}" \
+		bash "$migrator" "$candidate_source" "$out_main" "$out_sites" "$candidate_sites" > "$domains"; then
 		migration_abort "$root" "$source" "Caddy 站点无法按 AbuseGuard 标准结构迁移；原 Caddyfile 和站点文件未改动。"
 	fi
 	if ! normalize_caddy_file "$out_main"; then
@@ -1472,7 +1551,7 @@ install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.service" /etc/s
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-report.timer"   /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-sync.timer"     /etc/systemd/system/
 install -m 0644 "$SRC_DIR/assets/systemd/caddy-abuseguard-firewall.service" /etc/systemd/system/
-install -m 0755 "$SRC_DIR/abuseguard.sh" "$PANEL_BIN"
+stage_panel
 
 # --- optional interactive setup ----------------------------------------------
 # Ask (y/N, default No) before prompting for each secret, so a plain Enter
@@ -1541,6 +1620,7 @@ verify_fail2ban_jails config
 # keeps running. Pause it only for the binary swap, then restart below.
 pause_fail2ban_for_upgrade
 commit_engine
+commit_panel
 # The new policy and sync units run `policy-apply`, which only the new engine
 # provides. Install and back them up only after the engine swap, so an ordinary
 # failure restores a compatible engine+unit+helper triple.
@@ -1596,6 +1676,7 @@ verify_fail2ban_jails running
 # engine+config. Reclaim the rollback copy without waiting for the EXIT trap
 # (the interactive path execs the panel, which skips EXIT traps).
 INSTALL_COMPLETE=1
+discard_panel_stage
 [ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 ENGINE_BACKUP=""
 [ -z "$UNIT_ROLLBACK_DIR" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"

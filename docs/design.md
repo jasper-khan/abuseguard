@@ -34,6 +34,8 @@ The main `/etc/caddy/Caddyfile` contains global settings and imports the shared 
 
 During install or update, protected single-domain site blocks found in the main Caddyfile are moved to that canonical layout. Legacy inline AbuseGuard log/probe directives are replaced by the shared import while the rest of each site block (TLS, matchers, routes, and upstreams) is preserved. The candidate main file and migrated site files are installed only if the complete Caddy configuration validates; an ambiguous protected block or an existing target filename aborts the migration instead of leaving two configuration layouts active.
 
+The panel's Caddy add/delete actions leave a private `.site-transaction` marker in the sites directory until native validation/reload succeeds or the previous file state is restored. An interrupted panel blocks further site actions rather than discarding recovery data. Inspect the `operation` record (change and site basename), the active site file, and Caddy's service status and logs. Once you have verified which configuration Caddy loaded, use `/usr/local/libexec/caddy-abuseguard config-transaction commit SITES_DIR SITE` to keep the staged change, or `/usr/local/libexec/caddy-abuseguard config-transaction rollback SITES_DIR SITE` to restore the old files. The rollback command changes files only; validate and reload Caddy separately before treating the old configuration as live. If a start was interrupted before the file change or another editor replaced the file, reconciliation may require manual review of the transaction directory; do not remove it blindly.
+
 ## Canonical Nginx layout
 
 Nginx mode uses the distro service and standard include directories. `/etc/nginx/conf.d/abuseguard.conf` holds only project-owned HTTP-level definitions: the `abuseguard_json` log format, the WebSocket upgrade map, and the case-insensitive probe-path map (Caddy's matcher is case-insensitive too). The Cloudflare trust snippet lives at `/etc/nginx/snippets/abuseguard-cloudflare.conf`; it contains validated `set_real_ip_from` lines from official IPv4/IPv6 ranges plus `real_ip_header CF-Connecting-IP` and `real_ip_recursive off`, so a spoofed header from any other source is ignored. The loopback self-test is `/etc/nginx/conf.d/zz-abuseguard-selftest.conf` on `127.0.0.1:<selftest port>`; it sorts after the shared log-format file under Debian/Ubuntu's `include /etc/nginx/conf.d/*.conf`.
@@ -134,3 +136,15 @@ An engine is built only for a version tag and remains immutable under that relea
   重载和回滚。Nginx 安装早期尚未切换引擎时使用兼容路径。
 - 安装和发版都检查引擎是否能运行并报告预期版本。Caddy-only 刷新不替换已
   发布的引擎；Go 历史发布包仍保留原始来源信息。
+
+### 系统管理迁移边界
+
+- 旧 Caddy 站点迁移先由 Rust 解析并生成候选树，安装器仍用 Caddy
+  校验完整配置，保留现有的验证、切换和回滚顺序。
+- 面板的 Caddy 站点文件事务由 Rust 负责，服务状态的确认和重载仍走
+  原生 Caddy/systemd 流程。文件事务成功不等于服务已经加载成功。
+- 卸载只以可验证的安装清单判定所有权。无法证明归属时保留代理、证书、
+  账号和共享依赖，不用当前机器状态反推哪些文件曾由安装器创建。
+- SSH 的解析和候选配置由 Rust 处理；仍以原生 `sshd` 校验、实际监听
+  检查和现有防锁定流程为准。不把「候选配置有效」当成「新 SSH 会话
+  已验证」。修改口令、软件包事务和真实服务切换不在本阶段。
