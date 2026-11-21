@@ -261,6 +261,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 - **保守卸载**：只删 AbuseGuard 组件。Caddy 模式从 Caddyfile 摘掉 `import abuseguard`、snippet 和自检站点；Nginx 模式在保留站点时（默认）保留受管站点、`conf.d/abuseguard.conf`、证书、`cloudflare.ini`、续期配置与部署钩子，只移除自检和核心组件；选择删除站点时才移除受管站点、项目 HTTP 配置/信任片段/logrotate、对应证书 lineage 和凭据，不碰其他 Nginx 配置。两种模式都**保留反向代理本身、账户和你的反代配置**。
 - Nginx 模式下，保守卸载会保留证书、`/etc/caddy-abuseguard/cloudflare.ini`、续期所需的 Nginx 片段、certbot 续期配置与部署钩子，因此移除核心后 HTTPS 与自动续期继续工作。
 - **彻底卸载**：再按清单删 AbuseGuard 安装的 Caddy/Nginx 包、账户和配置 —— 但**装之前你已有的一律不动**（原本就有 Caddy 或 Nginx 就不会删对应包）。Nginx 模式只删除项目创建且不再被引用的站点、证书 lineage、凭据和配置；若选择保留站点，Nginx/Certbot 软件包、证书、凭据与续期配置都会保留。绝不执行 `rm -rf /etc/nginx`、`rm -rf /etc/letsencrypt`、全局 `apt autoremove` 或关闭其他服务的 certbot 定时器。清单丢失时自动降级为最保守处理。
+- 新装时会在 root 管理的 `/etc/caddy-abuseguard/install-manifest` 保存首次安装的归属记录，重试或升级不会覆盖。旧版本在 `/var/lib/caddy-abuseguard` 留下的清单不会自动成为彻底卸载的依据；缺少可信清单时，即使指定 `--purge` 也只做保守卸载并保留站点。无法验证后端模式或引擎不支持检查时，只清理核心组件，不改代理配置。
 - 受管站点卸载时可选「保留反代、只去防护」或「一起删」；保留下来的 Nginx 站点若仍需续期文件，即使彻底卸载也会保留这些文件。以后重新安装时，保留且可识别的站点会恢复防护，不会被静默换成另一个后端。
 
 卸载同时删除本项目的端口表、独立情报表、根所有开机快照和生成的白名单 jail 配置，不会改动其他 nftables 表或其他 fail2ban jail。

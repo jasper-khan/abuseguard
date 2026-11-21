@@ -17,6 +17,11 @@ trap cleanup EXIT
 
 awk '/^# The panel needs root/{exit} {print}' "$ROOT/abuseguard.sh" > "$TMP/panel.sh"
 source "$TMP/panel.sh"
+ENGINE="${ABUSEGUARD_ENGINE_BIN:-$ROOT/engine-rs/target/debug/caddy-abuseguard}"
+if [ ! -x "$ENGINE" ] && [ -z "${ABUSEGUARD_ENGINE_BIN:-}" ]; then
+	cargo build --locked --manifest-path "$ROOT/engine-rs/Cargo.toml"
+fi
+[ -x "$ENGINE" ] || { echo "Missing test engine: $ENGINE" >&2; exit 1; }
 
 SSHD_MAIN="$TMP/sshd_config"
 SSHD_DROPIN_DIR="$TMP/auth"

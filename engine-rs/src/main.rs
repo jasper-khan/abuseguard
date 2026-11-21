@@ -4,13 +4,17 @@ mod allow;
 mod caddy_render;
 mod config;
 mod config_render;
+mod config_txn;
 mod filelock;
 mod http;
 mod intel;
+mod install_inventory;
 mod nginx_render;
 mod policy;
 mod queue;
 mod report;
+mod site_migration;
+mod ssh_admin;
 mod status;
 #[cfg(test)]
 mod testutil;
@@ -45,6 +49,10 @@ fn main() {
         "allowlist-validate" => run_allowlist_validate(&rest),
         "allowlist-check" => run_allowlist_check(&rest),
         "policy-apply" => policy::run_policy_apply(&rest),
+        "migrate-caddy-sites" => site_migration::run(&rest),
+        "config-transaction" => config_txn::run(&rest),
+        "install-inventory" => install_inventory::run(&rest),
+        "ssh-admin" => ssh_admin::run(&rest),
         "status" => status::run(&rest, VERSION),
         "firewall-render" => config_render::run_firewall_render(&rest),
         "nginx-render" => nginx_render::run(&rest),
@@ -58,7 +66,7 @@ fn main() {
 }
 
 fn usage() {
-    logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | policy-apply (root, Linux) | status --json | firewall-render | nginx-render | caddy-render | version");
+    logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | policy-apply (root, Linux) | status --json | firewall-render | nginx-render | caddy-render | migrate-caddy-sites | config-transaction | install-inventory | ssh-admin | version");
 }
 
 fn must_config() -> config::Config {

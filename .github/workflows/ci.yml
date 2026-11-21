@@ -163,6 +163,7 @@ jobs:
           ABUSEGUARD_TEST_NGINX_RENDER_BIN="$ABUSEGUARD_ENGINE_BIN" bash ./scripts/test-nginx-runtime-contract.sh
           bash ./scripts/test-panel-refresh.sh
           bash ./scripts/test-site-migration.sh
+          bash ./scripts/test-install-inventory.sh
           bash ./scripts/test-firewall.sh
           bash ./scripts/test-ssh-port.sh
           bash ./scripts/test-ssh-auth.sh

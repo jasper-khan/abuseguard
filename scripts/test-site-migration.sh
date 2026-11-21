@@ -17,6 +17,22 @@ cleanup_temp_tree() {
 }
 trap 'cleanup_temp_tree "$TMP"' EXIT
 
+# CI may provide the exact engine under test. Standalone runs build a locked
+# copy in the isolated fixture, never use a machine's installed engine.
+if [ -z "${ABUSEGUARD_MIGRATION_ENGINE:-}" ]; then
+	command -v cargo >/dev/null 2>&1 || {
+		echo "cargo or ABUSEGUARD_MIGRATION_ENGINE is required" >&2
+		exit 1
+	}
+	CARGO_TARGET_DIR="$TMP/engine-target" cargo build --quiet --locked --manifest-path "$ROOT/engine-rs/Cargo.toml"
+	ABUSEGUARD_MIGRATION_ENGINE="$TMP/engine-target/debug/caddy-abuseguard"
+fi
+[ -x "$ABUSEGUARD_MIGRATION_ENGINE" ] || {
+	echo "ABUSEGUARD_MIGRATION_ENGINE is not executable" >&2
+	exit 1
+}
+export ABUSEGUARD_MIGRATION_ENGINE
+
 mkdir -p "$TMP/existing" "$TMP/output-sites"
 printf '# placeholder\n' > "$TMP/existing/_placeholder.caddy"
 
@@ -83,7 +99,11 @@ static.example.com {
 }
 EOF
 
+bash "$MIGRATOR" --plan "$TMP/Caddyfile" "$TMP/existing" > "$TMP/domains.plan"
+test ! -e "$TMP/main.out"
+test -z "$(find "$TMP/output-sites" -mindepth 1 -maxdepth 1 -print -quit)"
 bash "$MIGRATOR" "$TMP/Caddyfile" "$TMP/main.out" "$TMP/output-sites" "$TMP/existing" > "$TMP/domains"
+cmp "$TMP/domains.plan" "$TMP/domains"
 
 diff -u <(printf 'admin.example.com\nlegacy.example.com\ncurrent.example.com\n') "$TMP/domains"
 ! grep -q '^admin\.example\.com {' "$TMP/main.out"
@@ -131,6 +151,49 @@ if bash "$MIGRATOR" "$TMP/conflict" "$TMP/conflict.out" "$TMP/conflict-sites" "$
 	echo "expected existing target migration to fail" >&2
 	exit 1
 fi
+
+# A later parse error cannot leave behind earlier generated candidates.
+for fixture in duplicate multiline malformed; do
+	cat > "$TMP/$fixture" <<'EOF'
+first.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+EOF
+	case "$fixture" in
+		duplicate)
+			cat >> "$TMP/$fixture" <<'EOF'
+FIRST.example.com {
+	import abuseguard
+}
+EOF
+			;;
+		multiline)
+			cat >> "$TMP/$fixture" <<'EOF'
+one.example.com,
+two.example.com {
+	import abuseguard
+}
+EOF
+			;;
+		malformed)
+			cat >> "$TMP/$fixture" <<'EOF'
+unclosed.example.com {
+	import abuseguard
+EOF
+			;;
+	esac
+	rc=0
+	bash "$MIGRATOR" "$TMP/$fixture" "$TMP/$fixture.out" "$TMP/$fixture-sites" "$TMP/existing" \
+		>"$TMP/$fixture.domains" 2>"$TMP/$fixture.err" || rc=$?
+	if [ "$rc" != 3 ] || [ -e "$TMP/$fixture.out" ] || [ -e "$TMP/$fixture-sites" ] ||
+		[ -s "$TMP/$fixture.domains" ]; then
+		echo "invalid $fixture migration wrote candidate output or returned unexpected status: $rc" >&2
+		exit 1
+	fi
+done
+grep -Fq 'target already exists: first.example.com.caddy' "$TMP/duplicate.err"
+grep -Fq 'protected non-single-domain block' "$TMP/multiline.err"
+grep -Fq 'unclosed top-level block' "$TMP/malformed.err"
 
 # The installer must not modify existing Caddy files before the full candidate
 # validates, and a failure while installing the final Caddyfile must restore
@@ -231,4 +294,97 @@ cmp "$TMP/transaction/Caddyfile.original" "$TMP/transaction/etc/Caddyfile"
 cmp "$TMP/transaction/site.original" "$TMP/transaction/etc/sites/example.com.caddy"
 cmp "$TMP/transaction/snippet.original" "$TMP/transaction/etc/abuseguard.caddy"
 
-echo "site migration tests: pass"
+# The new panel uses engine commands absent from v0.7.2. Use the real
+# promotion/EXIT helpers with inert engine/panel files and service doubles.
+for name in stage_panel commit_panel restore_panel_backup discard_panel_stage \
+	commit_staged_binary commit_engine restore_engine_backup on_install_exit; do
+	extract_function "$name" >> "$FUNCTIONS"
+done
+
+assert_file_contents() {
+	if [ "$(cat -- "$1")" != "$2" ]; then
+		echo "wrong contents for $1 after panel cutover" >&2
+		exit 1
+	fi
+}
+
+for phase in before-engine after-engine success no-old-panel first-install restore-panel-fails; do
+	(
+		source "$FUNCTIONS"
+		warn() { :; }
+		die() { echo "$*" >&2; exit 1; }
+		restore_f2b_assets() { :; }
+		resume_fail2ban_after_failure() { :; }
+		systemctl() { :; }
+
+		mkdir -p "$TMP/panel-cutover/$phase/src"
+		cd "$TMP/panel-cutover/$phase"
+		SRC_DIR="$PWD/src"
+		PANEL_BIN="$PWD/ag"
+		ENGINE_BIN="$PWD/engine"
+		STAGED_BIN="$PWD/staged-engine"
+		STAGED_RELEASE_BIN=""
+		PANEL_WORKDIR=""
+		PANEL_SWAPPED=0
+		ENGINE_BACKUP=""
+		ENGINE_SWAPPED=0
+		INSTALL_COMPLETE=0
+		UNIT_ROLLBACK_DIR=""
+		F2B_ROLLBACK_DIR=""
+		printf '%s\n' new-engine > "$STAGED_BIN"
+		printf '%s\n' new-panel > "$SRC_DIR/abuseguard.sh"
+		if [ "$phase" != first-install ]; then
+			printf '%s\n' old-engine > "$ENGINE_BIN"
+		fi
+		if [ "$phase" != no-old-panel ] && [ "$phase" != first-install ]; then
+			printf '%s\n' old-panel > "$PWD/old-panel"
+			ln -s old-panel "$PANEL_BIN"
+		fi
+		stage_panel
+		staged_panel_dir="$PANEL_WORKDIR"
+		case "$phase" in
+			no-old-panel|first-install) test ! -e "$PANEL_BIN" ;;
+			*) assert_file_contents "$PANEL_BIN" old-panel ;;
+		esac
+		if [ "$phase" != before-engine ]; then
+			commit_engine
+			case "$phase" in
+				no-old-panel|first-install) test ! -e "$PANEL_BIN" ;;
+				*) assert_file_contents "$PANEL_BIN" old-panel ;;
+			esac
+			commit_panel
+			assert_file_contents "$PANEL_BIN" new-panel
+			assert_file_contents "$ENGINE_BIN" new-engine
+		fi
+		if [ "$phase" = success ]; then
+			INSTALL_COMPLETE=1
+		elif [ "$phase" = restore-panel-fails ]; then
+			mv() {
+				case "$*" in *"/previous "*) return 1 ;; esac
+				command mv "$@"
+			}
+		fi
+		on_install_exit
+		case "$phase" in
+			success|first-install|restore-panel-fails)
+				assert_file_contents "$PANEL_BIN" new-panel
+				assert_file_contents "$ENGINE_BIN" new-engine ;;
+			no-old-panel)
+				test ! -e "$PANEL_BIN"
+				assert_file_contents "$ENGINE_BIN" old-engine ;;
+			*)
+				[ -L "$PANEL_BIN" ]
+				assert_file_contents "$PANEL_BIN" old-panel
+				assert_file_contents "$ENGINE_BIN" old-engine ;;
+		esac
+		if [ "$phase" = restore-panel-fails ]; then
+			[ "$(readlink -- "$staged_panel_dir/previous")" = old-panel ]
+			assert_file_contents "$PWD/old-panel" old-panel
+			assert_file_contents "$ENGINE_BACKUP" old-engine
+		else
+			test ! -e "$staged_panel_dir"
+		fi
+	)
+done
+
+echo "site migration and panel cutover tests: pass"
