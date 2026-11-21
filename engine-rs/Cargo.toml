@@ -2,7 +2,7 @@
 # MUST match the top-level VERSION file. CI and the release workflow both
 # hard-assert this equality and the release never patches it on the fly.
 name = "abuseguard"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 description = "caddy-abuseguard engine (Rust rewrite)"
 
