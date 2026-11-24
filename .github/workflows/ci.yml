@@ -119,8 +119,10 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
           cargo "+$RUST_TOOLCHAIN" build --locked --release --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/release/caddy-abuseguard /tmp/caddy-abuseguard
-      - name: Install nftables, fail2ban and network test tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables fail2ban iproute2 iputils-ping python3
+      - name: Install nftables, fail2ban-rs and network test tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq nftables iproute2 iputils-ping python3
+          sudo bash ./scripts/install-fail2ban-rs.sh
       - name: Verify service units and sandboxing definitions
         run: |
           sudo install -d -m 0755 /usr/local/libexec
@@ -159,6 +161,7 @@ jobs:
             bash -n "$f" && echo "ok: $f"
           done
           bash ./scripts/test-proxy-selection.sh
+          bash ./scripts/test-fail2ban-rs.sh
           bash ./scripts/test-nginx-runtime-contract.sh
           ABUSEGUARD_TEST_NGINX_RENDER_BIN="$ABUSEGUARD_ENGINE_BIN" bash ./scripts/test-nginx-runtime-contract.sh
           bash ./scripts/test-panel-refresh.sh
@@ -176,8 +179,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install fail2ban (for fail2ban-regex)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq fail2ban
+      - name: Install fail2ban-rs (for fail2ban-client and fail2ban-regex)
+        run: sudo bash ./scripts/install-fail2ban-rs.sh
       - name: Verify required jails and SSH configuration overrides
         run: bash ./scripts/test-jail-readiness.sh
       - name: Fetch upstream-latest Caddy
@@ -197,10 +200,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install real Nginx, fail2ban and fixture tools
+      - name: Install real Nginx, fail2ban-rs and fixture tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq nginx fail2ban curl openssl iproute2 python3 logrotate jq
+          sudo apt-get install -y -qq nginx curl openssl iproute2 python3 logrotate jq
+          sudo bash ./scripts/install-fail2ban-rs.sh
       - name: Verify the Nginx -> JSON -> fail2ban contract
         # Real Nginx inside an isolated netns; trusted vs spoofed
         # CF-Connecting-IP, h1/h2, privacy fields, real filters and rotation.

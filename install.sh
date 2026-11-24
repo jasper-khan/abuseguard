@@ -2,7 +2,7 @@
 # AbuseGuard installer for Debian/Ubuntu (amd64/arm64).
 #
 # Installs the selected reverse proxy (Caddy, or distro Nginx + Certbot DNS),
-# fail2ban jails that block abusive IPs with nftables, a threat-intel sync,
+# fail2ban-rs jails that block abusive IPs with nftables, a threat-intel sync,
 # an optional AbuseIPDB auto-reporter, and the `ag` control panel.
 #
 # Usage:
@@ -11,6 +11,7 @@
 #   sudo ./install.sh --from-source          # build the Rust engine here (needs `cargo`)
 #   sudo ./install.sh --proxy=nginx --from-source
 #   sudo ABUSEGUARD_ENGINE_BIN=/path/engine ./install.sh
+#   sudo ABUSEGUARD_FAIL2BAN_ARCHIVE=/path/fail2ban-rs.tar.gz ./install.sh
 #
 # The reverse proxy is chosen once on the first install and recorded in
 # /etc/caddy-abuseguard/web-server. Later runs must not switch it.
@@ -19,6 +20,7 @@ set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ABUSEGUARD_REPO="${ABUSEGUARD_REPO:-jasper-khan/abuseguard}"
+FAIL2BAN_RS_REPO="${ABUSEGUARD_FAIL2BAN_REPO:-jasper-khan/fail2ban-rs}"
 
 # All downloads come straight from GitHub; there is no built-in mirror or
 # proxy chain. A user behind a blocked network sets the standard
@@ -403,6 +405,16 @@ latest_release_tag() {
 	printf '%s' "$tag"
 }
 
+latest_fail2ban_rs_version() {
+	local url tag
+	url="$(curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null -w '%{url_effective}' \
+		"https://github.com/$FAIL2BAN_RS_REPO/releases/latest")" || return 1
+	case "$url" in *"https://github.com/$FAIL2BAN_RS_REPO/releases/tag/"*) ;; *) return 1 ;; esac
+	tag="${url##*/}"
+	[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	printf '%s' "${tag#v}"
+}
+
 # detect_ssh_port -- print the TCP port sshd actually listens on. Prefer the
 # live listener (covers custom and socket-activated ports), fall back to the
 # effective sshd config. Prints nothing when neither source is usable.
@@ -460,6 +472,254 @@ PAUSED_JAILS_DONE=""
 # Root-only test hook (scripts/test-native-policy.sh); production uses /etc.
 F2B_ETC="${F2B_ETC:-/etc/fail2ban}"
 POLICY_F2B="$F2B_ETC/jail.d/zzz-caddy-abuseguard-policy.local"
+F2B_BIN_DIR="${F2B_BIN_DIR:-/usr/local/bin}"
+F2B_UNIT_DIR="${F2B_UNIT_DIR:-/usr/local/lib/systemd/system}"
+F2B_MAN_DIR="${F2B_MAN_DIR:-/usr/local/share/man}"
+F2B_RS_STATE_DIR="${F2B_RS_STATE_DIR:-/usr/local/lib/fail2ban-rs}"
+F2B_RS_MARKER="$F2B_RS_STATE_DIR/installed"
+FAIL2BAN_RS_NEEDS_INSTALL=0
+FAIL2BAN_RS_SWAPPED=0
+FAIL2BAN_RS_HAD_PREV=0
+FAIL2BAN_RS_HAD_DISTRO=0
+FAIL2BAN_RS_TARGET_NAME=""
+FAIL2BAN_RS_STAGE_DIR=""
+FAIL2BAN_RS_ARCHIVE=""
+FAIL2BAN_RS_INSTALLER=""
+FAIL2BAN_RS_STAGED_CLIENT=""
+FAIL2BAN_RS_ROLLBACK_DIR=""
+
+fail2ban_rs_installed_matches() { # EXPECTED_NAME
+	local expected="$1" installed=""
+	[ -f "$F2B_RS_MARKER" ] || return 1
+	IFS= read -r installed < "$F2B_RS_MARKER" || return 1
+	[ "$installed" = "$expected" ] || return 1
+	[ -x "$F2B_BIN_DIR/fail2ban-server" ] \
+		&& [ -x "$F2B_BIN_DIR/fail2ban-client" ] \
+		&& [ -x "$F2B_BIN_DIR/fail2ban-regex" ] \
+		&& [ -f "$F2B_UNIT_DIR/fail2ban.service" ] \
+		&& [ -f "$F2B_ETC/fail2ban.conf" ] \
+		&& [ -f "$F2B_ETC/jail.conf" ]
+}
+
+fail2ban_rs_managed_paths() {
+	printf '%s\n' \
+		"$F2B_BIN_DIR/fail2ban-server" \
+		"$F2B_BIN_DIR/fail2ban-client" \
+		"$F2B_BIN_DIR/fail2ban-regex" \
+		"$F2B_UNIT_DIR/fail2ban.service" \
+		"$F2B_UNIT_DIR/fail2ban.socket" \
+		"$F2B_RS_STATE_DIR/installed" \
+		"$F2B_RS_STATE_DIR/apache-fakegooglebot.sha256" \
+		"$F2B_RS_STATE_DIR/python.zip" \
+		"$F2B_MAN_DIR/man1/fail2ban.1" \
+		"$F2B_MAN_DIR/man1/fail2ban-server.1" \
+		"$F2B_MAN_DIR/man1/fail2ban-client.1" \
+		"$F2B_MAN_DIR/man1/fail2ban-regex.1" \
+		"$F2B_MAN_DIR/man5/jail.conf.5"
+}
+
+cleanup_fail2ban_rs_stage() {
+	local dir="${FAIL2BAN_RS_STAGE_DIR:-}" root=""
+	FAIL2BAN_RS_STAGE_DIR=""
+	FAIL2BAN_RS_ARCHIVE=""
+	FAIL2BAN_RS_INSTALLER=""
+	FAIL2BAN_RS_STAGED_CLIENT=""
+	[ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+	root="${FAIL2BAN_RS_TARGET_NAME:-}"
+	if [ -n "$root" ]; then
+		rm -f -- \
+			"$dir/$root.tar.gz" "$dir/$root.tar.gz.sha256" \
+			"$dir/probe/$root/install.sh" \
+			"$dir/probe/$root/bin/fail2ban-server" \
+			"$dir/probe/$root/bin/fail2ban-client" \
+			"$dir/probe/$root/bin/fail2ban-regex"
+		rmdir -- "$dir/probe/$root/bin" "$dir/probe/$root" "$dir/probe" 2>/dev/null || true
+	fi
+	rm -f -- "$dir/archive.tar.gz" "$dir/archive.tar.gz.sha256"
+	rmdir -- "$dir/probe" "$dir" 2>/dev/null || true
+}
+
+cleanup_fail2ban_rs_rollback() {
+	local dir="${FAIL2BAN_RS_ROLLBACK_DIR:-}" state idx path
+	FAIL2BAN_RS_ROLLBACK_DIR=""
+	[ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+	if [ -f "$dir/manifest" ]; then
+		while IFS=$'\t' read -r state idx path; do
+			[ "$state" = present ] && rm -f -- "$dir/$idx" || true
+		done < "$dir/manifest"
+		rm -f -- "$dir/manifest"
+	fi
+	rmdir -- "$dir" 2>/dev/null || true
+}
+
+verify_fail2ban_rs_archive() { # ARCHIVE CHECKSUM [EXPECTED_NAME]
+	local archive="$1" checksum="$2" expected="${3:-}" digest="" got="" members="" first_member="" root=""
+	[ -f "$archive" ] && [ -f "$checksum" ] || { warn "fail2ban-rs 压缩包或校验文件缺失。"; return 1; }
+	read -r digest _ < "$checksum" || true
+	[[ "$digest" =~ ^[[:xdigit:]]{64}$ ]] || { warn "fail2ban-rs 校验值格式无效。"; return 1; }
+	got="$(sha256sum "$archive" 2>/dev/null | awk '{print $1}')"
+	[ "$got" = "$digest" ] || { warn "fail2ban-rs 校验失败（期望 $digest，实际 ${got:-空}）。"; return 1; }
+	members="$(tar -tzf "$archive" 2>/dev/null)" || { warn "fail2ban-rs 压缩包无法读取。"; return 1; }
+	first_member="${members%%$'\n'*}"
+	root="${first_member%%/*}"
+	[[ "$root" =~ ^fail2ban-rs-[0-9]+\.[0-9]+\.[0-9]+-linux-(amd64|arm64)$ ]] \
+		|| { warn "fail2ban-rs 压缩包根目录异常：${root:-空}"; return 1; }
+	if [ -n "$expected" ] && [ "$root" != "$expected" ]; then
+		warn "fail2ban-rs 压缩包名称不匹配（期望 $expected，实际 $root）。"
+		return 1
+	fi
+	FAIL2BAN_RS_TARGET_NAME="$root"
+}
+
+stage_fail2ban_rs() {
+	local ver="" target_name="" url="" archive="" checksum="" bin=""
+	FAIL2BAN_RS_NEEDS_INSTALL=0
+	FAIL2BAN_RS_TARGET_NAME=""
+	if [ -n "${ABUSEGUARD_FAIL2BAN_ARCHIVE:-}" ]; then
+		[ -f "$ABUSEGUARD_FAIL2BAN_ARCHIVE" ] \
+			|| die "找不到 ABUSEGUARD_FAIL2BAN_ARCHIVE 指定的文件 '$ABUSEGUARD_FAIL2BAN_ARCHIVE'。"
+		[ -f "$ABUSEGUARD_FAIL2BAN_ARCHIVE.sha256" ] \
+			|| die "找不到 fail2ban-rs 校验文件 '$ABUSEGUARD_FAIL2BAN_ARCHIVE.sha256'。"
+		FAIL2BAN_RS_STAGE_DIR="$(mktemp -d)" || die "无法创建 fail2ban-rs 暂存目录。"
+		archive="$FAIL2BAN_RS_STAGE_DIR/archive.tar.gz"
+		checksum="$archive.sha256"
+		cp -- "$ABUSEGUARD_FAIL2BAN_ARCHIVE" "$archive" || die "无法暂存 fail2ban-rs 压缩包。"
+		cp -- "$ABUSEGUARD_FAIL2BAN_ARCHIVE.sha256" "$checksum" || die "无法暂存 fail2ban-rs 校验文件。"
+		verify_fail2ban_rs_archive "$archive" "$checksum" || die "fail2ban-rs 本地包校验失败。"
+		case "$FAIL2BAN_RS_TARGET_NAME" in
+			*-linux-"$ARCH") : ;;
+			*) die "fail2ban-rs 本地包架构不匹配：$FAIL2BAN_RS_TARGET_NAME（当前架构 $ARCH）。" ;;
+		esac
+		if fail2ban_rs_installed_matches "$FAIL2BAN_RS_TARGET_NAME"; then
+			log "fail2ban-rs 已是目标版本（$FAIL2BAN_RS_TARGET_NAME）"
+			cleanup_fail2ban_rs_stage
+			return 0
+		fi
+	else
+		if [ -n "${ABUSEGUARD_FAIL2BAN_VERSION:-}" ]; then
+			ver="$ABUSEGUARD_FAIL2BAN_VERSION"
+			[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "无效的 ABUSEGUARD_FAIL2BAN_VERSION：'$ver'。"
+		else
+			ver="$(latest_fail2ban_rs_version)" || die "无法确定 fail2ban-rs 最新版本；请检查网络后重试。"
+		fi
+		target_name="fail2ban-rs-$ver-linux-$ARCH"
+		if fail2ban_rs_installed_matches "$target_name"; then
+			log "fail2ban-rs 已是最新（$target_name）"
+			return 0
+		fi
+		FAIL2BAN_RS_TARGET_NAME="$target_name"
+		FAIL2BAN_RS_STAGE_DIR="$(mktemp -d)" || die "无法创建 fail2ban-rs 暂存目录。"
+		archive="$FAIL2BAN_RS_STAGE_DIR/$target_name.tar.gz"
+		checksum="$archive.sha256"
+		url="https://github.com/$FAIL2BAN_RS_REPO/releases/download/v$ver/$target_name.tar.gz"
+		log "正在下载 fail2ban-rs v$ver（linux-$ARCH）..."
+		gh_fetch "$url" "$archive" "$AG_CURL_BIG" || die "fail2ban-rs 下载失败。"
+		gh_fetch "$url.sha256" "$checksum" "$AG_CURL_SUMS" || die "fail2ban-rs 校验文件下载失败。"
+		verify_fail2ban_rs_archive "$archive" "$checksum" "$target_name" || die "fail2ban-rs 校验失败。"
+	fi
+	mkdir -p "$FAIL2BAN_RS_STAGE_DIR/probe" || die "无法创建 fail2ban-rs 预检目录。"
+	tar -xzf "$archive" -C "$FAIL2BAN_RS_STAGE_DIR/probe" \
+		"$FAIL2BAN_RS_TARGET_NAME/install.sh" \
+		"$FAIL2BAN_RS_TARGET_NAME/bin/fail2ban-server" \
+		"$FAIL2BAN_RS_TARGET_NAME/bin/fail2ban-client" \
+		"$FAIL2BAN_RS_TARGET_NAME/bin/fail2ban-regex" \
+		|| die "fail2ban-rs 压缩包缺少必要文件。"
+	for bin in fail2ban-server fail2ban-client fail2ban-regex; do
+		"$FAIL2BAN_RS_STAGE_DIR/probe/$FAIL2BAN_RS_TARGET_NAME/bin/$bin" --version >/dev/null 2>&1 \
+			|| die "fail2ban-rs 预检失败：$bin 无法正常执行。"
+	done
+	FAIL2BAN_RS_ARCHIVE="$archive"
+	FAIL2BAN_RS_INSTALLER="$FAIL2BAN_RS_STAGE_DIR/probe/$FAIL2BAN_RS_TARGET_NAME/install.sh"
+	FAIL2BAN_RS_STAGED_CLIENT="$FAIL2BAN_RS_STAGE_DIR/probe/$FAIL2BAN_RS_TARGET_NAME/bin/fail2ban-client"
+	FAIL2BAN_RS_NEEDS_INSTALL=1
+	log "已校验 fail2ban-rs：$FAIL2BAN_RS_TARGET_NAME（sha256 ✓）"
+}
+
+backup_fail2ban_rs_install() {
+	local path idx=0
+	FAIL2BAN_RS_HAD_PREV=0
+	if [ ! -f "$F2B_RS_MARKER" ] && [ ! -f "$F2B_RS_STATE_DIR/python.zip" ]; then
+		return 0
+	fi
+	FAIL2BAN_RS_HAD_PREV=1
+	FAIL2BAN_RS_ROLLBACK_DIR="$(mktemp -d)" || die "无法创建 fail2ban-rs 回滚目录。"
+	: > "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
+	while IFS= read -r path; do
+		idx=$((idx + 1))
+		if [ -e "$path" ]; then
+			cp -a -- "$path" "$FAIL2BAN_RS_ROLLBACK_DIR/$idx" || die "无法备份 $path。"
+			printf 'present\t%s\t%s\n' "$idx" "$path" >> "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
+		else
+			printf 'absent\t%s\t%s\n' "$idx" "$path" >> "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
+		fi
+	done < <(fail2ban_rs_managed_paths)
+}
+
+restore_fail2ban_rs_install() {
+	local state idx path failed=0
+	[ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] || return 0
+	if [ "${FAIL2BAN_RS_HAD_PREV:-0}" = 1 ] && [ -n "${FAIL2BAN_RS_ROLLBACK_DIR:-}" ] \
+		&& [ -f "$FAIL2BAN_RS_ROLLBACK_DIR/manifest" ]; then
+		systemctl stop fail2ban.socket fail2ban.service >/dev/null 2>&1 || true
+		while IFS=$'\t' read -r state idx path; do
+			case "$state" in
+				present)
+					mkdir -p "$(dirname "$path")" 2>/dev/null || failed=1
+					cp -a -- "$FAIL2BAN_RS_ROLLBACK_DIR/$idx" "$path" || failed=1 ;;
+				absent) rm -f -- "$path" ;;
+			esac
+		done < "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
+		[ "$failed" = 0 ] || warn "警告：无法完整恢复旧版 fail2ban-rs，请手动检查 /usr/local。"
+		hash -r
+		systemctl daemon-reload >/dev/null 2>&1 || true
+	elif [ "${FAIL2BAN_RS_HAD_DISTRO:-0}" = 1 ] && [ -n "${FAIL2BAN_RS_INSTALLER:-}" ] \
+		&& [ -f "$FAIL2BAN_RS_INSTALLER" ]; then
+		systemctl stop fail2ban.socket fail2ban.service >/dev/null 2>&1 || true
+		bash "$FAIL2BAN_RS_INSTALLER" --uninstall >/dev/null 2>&1 \
+			|| warn "警告：无法回滚新安装的 fail2ban-rs，请手动检查 /usr/local。"
+		hash -r
+		systemctl daemon-reload >/dev/null 2>&1 || true
+	fi
+}
+
+unmask_fail2ban_service() {
+	if [ -L "$POLICY_UNIT_DIR/fail2ban.service" ] \
+		&& [ "$(readlink -f "$POLICY_UNIT_DIR/fail2ban.service" 2>/dev/null || true)" = /dev/null ]; then
+		rm -f -- "$POLICY_UNIT_DIR/fail2ban.service"
+	fi
+}
+
+commit_fail2ban_rs() {
+	[ "$FAIL2BAN_RS_NEEDS_INSTALL" = 1 ] && [ "$FAIL2BAN_RS_SWAPPED" = 0 ] || return 0
+	backup_fail2ban_rs_install
+	if systemctl is-active --quiet fail2ban.service 2>/dev/null \
+		|| systemctl is-active --quiet fail2ban.socket 2>/dev/null; then
+		log "正在停止当前 fail2ban 以切换至 $FAIL2BAN_RS_TARGET_NAME（现有封禁将在重启后从数据库恢复）..."
+		systemctl stop fail2ban.socket fail2ban.service \
+			|| die "无法停止现有 fail2ban，安装已中止。"
+		FAIL2BAN_STOPPED=1
+	fi
+	log "正在安装 $FAIL2BAN_RS_TARGET_NAME ..."
+	bash "$FAIL2BAN_RS_INSTALLER" "$FAIL2BAN_RS_ARCHIVE" >/dev/null \
+		|| die "安装 fail2ban-rs 失败。"
+	FAIL2BAN_RS_SWAPPED=1
+	hash -r
+}
+
+remove_distro_fail2ban_pkg() {
+	pkg_installed fail2ban || return 0
+	log "fail2ban-rs 已接管并运行正常，正在移除旧版发行版 fail2ban 软件包（保留 /etc/fail2ban 配置与 /var/lib/fail2ban 数据库）..."
+	if ! apt-get remove -y -qq fail2ban >/dev/null; then
+		warn "未能自动移除旧版 fail2ban 软件包；fail2ban-rs 已安装，稍后可手动执行：sudo apt-get remove -y fail2ban"
+	fi
+	unmask_fail2ban_service
+	hash -r
+	systemctl daemon-reload
+	systemctl disable --now fail2ban.socket >/dev/null 2>&1 || true
+	systemctl reenable fail2ban.service >/dev/null 2>&1 || systemctl enable fail2ban.service >/dev/null 2>&1 || true
+	systemctl restart fail2ban.service || die "移除旧版 fail2ban 软件包后，fail2ban-rs 未能重新启动（查看：journalctl -u fail2ban）"
+	verify_fail2ban_jails running
+}
 
 # Snapshot every fail2ban asset this installer overwrites, so a failure can
 # restore the old engine+config and resume detection instead of leaving
@@ -616,9 +876,14 @@ on_install_exit() {
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 		[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
+		if declare -F cleanup_fail2ban_rs_stage >/dev/null 2>&1; then cleanup_fail2ban_rs_stage; fi
+		if declare -F cleanup_fail2ban_rs_rollback >/dev/null 2>&1; then cleanup_fail2ban_rs_rollback; fi
 		return 0
 	fi
 	if [ "$ENGINE_SWAPPED" = 0 ]; then
+		if [ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] && declare -F restore_fail2ban_rs_install >/dev/null 2>&1; then
+			restore_fail2ban_rs_install
+		fi
 		restore_f2b_assets
 		resume_fail2ban_after_failure
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
@@ -641,6 +906,9 @@ on_install_exit() {
 				esac
 			done < "$UNIT_ROLLBACK_DIR/manifest"
 			systemctl daemon-reload >/dev/null 2>&1 || warn "警告：systemd 未能重新加载恢复后的策略单元。"
+		fi
+		if [ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] && declare -F restore_fail2ban_rs_install >/dev/null 2>&1; then
+			restore_fail2ban_rs_install
 		fi
 		# Restore the old config only after its engine is back, keeping the
 		# engine and its fail2ban config a compatible pair.
@@ -668,6 +936,8 @@ on_install_exit() {
 	fi
 	[ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
 	[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
+	if declare -F cleanup_fail2ban_rs_stage >/dev/null 2>&1; then cleanup_fail2ban_rs_stage; fi
+	if declare -F cleanup_fail2ban_rs_rollback >/dev/null 2>&1; then cleanup_fail2ban_rs_rollback; fi
 }
 
 validate_caddyfile() {
@@ -722,6 +992,10 @@ if [ "${ABUSEGUARD_LIB_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
 fi
 parse_install_args "$@"
 [ "$(id -u)" = "0" ] || die "请以 root 运行（sudo）。"
+case ":$PATH:" in
+	:"$F2B_BIN_DIR":*) ;;
+	*) PATH="$F2B_BIN_DIR:$PATH"; export PATH ;;
+esac
 
 # Resolve the immutable proxy mode and reject an opposite proxy before apt or
 # any other host change. An in-progress install keeps its marker, so a retry
@@ -828,12 +1102,14 @@ fi
 
 # --- dependencies ------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
+FAIL2BAN_RS_HAD_DISTRO=0
+if pkg_installed fail2ban; then FAIL2BAN_RS_HAD_DISTRO=1; fi
 if [ "$PROXY_MODE" = caddy ]; then
-	log "正在安装依赖（fail2ban、rsyslog、nftables、curl、jq、libcap2-bin）..."
+	log "正在安装依赖（rsyslog、nftables、curl、jq、libcap2-bin）..."
 	apt-get update -qq
-	apt-get install -y -qq fail2ban rsyslog nftables curl jq ca-certificates libcap2-bin >/dev/null
+	apt-get install -y -qq rsyslog nftables curl jq ca-certificates libcap2-bin >/dev/null
 else
-	log "正在安装依赖（fail2ban、rsyslog、nftables、curl、jq、nginx、certbot、certbot-dns-cloudflare）..."
+	log "正在安装依赖（rsyslog、nftables、curl、jq、nginx、certbot、certbot-dns-cloudflare）..."
 	apt-get update -qq
 	for pkg in nginx certbot python3-certbot-dns-cloudflare; do
 		apt-cache show "$pkg" >/dev/null 2>&1 \
@@ -841,7 +1117,7 @@ else
 	done
 	trap on_install_exit EXIT
 	inhibit_proxy_autostart
-	apt-get install -y -qq fail2ban rsyslog nftables curl jq ca-certificates \
+	apt-get install -y -qq rsyslog nftables curl jq ca-certificates \
 		nginx certbot python3-certbot-dns-cloudflare >/dev/null \
 		|| die "Nginx/Certbot 依赖安装失败。"
 	restore_proxy_autostart
@@ -952,6 +1228,18 @@ install -d -m 0750 -o abuseguard -g abuseguard "$STATE_DIR" "$REPORTS_DIR"
 
 trap on_install_exit EXIT
 trap 'exit 130' INT TERM
+stage_fail2ban_rs
+# On a fresh machine (no stock jail.conf and no running fail2ban daemon),
+# install fail2ban-rs now so stock /etc/fail2ban configs exist before copying
+# AbuseGuard's filters, actions and jails. Upgrades/migrations keep the live
+# daemon running until the cutover below.
+if [ "$FAIL2BAN_RS_NEEDS_INSTALL" = 1 ] \
+	&& [ ! -f "$F2B_ETC/jail.conf" ] \
+	&& ! systemctl is-active --quiet fail2ban.service 2>/dev/null \
+	&& ! systemctl is-active --quiet fail2ban.socket 2>/dev/null; then
+	commit_fail2ban_rs
+fi
+install -d -m 0755 "$F2B_ETC/filter.d" "$F2B_ETC/action.d" "$F2B_ETC/jail.d"
 # Snapshot every fail2ban file replaced below: a failure before the engine swap
 # restores this set, then resumes the old detection instead of leaving it off.
 backup_f2b_assets
@@ -1614,11 +1902,21 @@ else
 	nginx_validate || die "Nginx 配置校验失败。"
 fi
 log "正在校验 fail2ban 配置"
-fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
-verify_fail2ban_jails config
+if [ "$FAIL2BAN_RS_NEEDS_INSTALL" = 1 ] && [ "$FAIL2BAN_RS_SWAPPED" = 0 ]; then
+	PATH="$(dirname "$FAIL2BAN_RS_STAGED_CLIENT"):$PATH" fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
+	PATH="$(dirname "$FAIL2BAN_RS_STAGED_CLIENT"):$PATH" verify_fail2ban_jails config
+else
+	fail2ban-client -t >/dev/null || die "fail2ban 配置校验失败。"
+	verify_fail2ban_jails config
+fi
 # All long work (downloads/builds, jail files, prompts) is done while fail2ban
-# keeps running. Pause it only for the binary swap, then restart below.
-pause_fail2ban_for_upgrade
+# keeps running. When replacing/upgrading fail2ban-rs, stop the daemon cleanly
+# for the binary/unit swap; otherwise idle it only for the engine swap.
+if [ "$FAIL2BAN_RS_NEEDS_INSTALL" = 1 ] && [ "$FAIL2BAN_RS_SWAPPED" = 0 ]; then
+	commit_fail2ban_rs
+else
+	pause_fail2ban_for_upgrade
+fi
 commit_engine
 commit_panel
 # The new policy and sync units run `policy-apply`, which only the new engine
@@ -1665,9 +1963,11 @@ else
 	# an autostart policy behind.
 	systemctl enable nginx >/dev/null 2>&1 || warn "警告：无法让 nginx 开机自启。"
 fi
-systemctl enable fail2ban >/dev/null 2>&1 || true
+unmask_fail2ban_service
+systemctl disable --now fail2ban.socket >/dev/null 2>&1 || true
+systemctl reenable fail2ban.service >/dev/null 2>&1 || systemctl enable fail2ban.service >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
-systemctl restart fail2ban || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
+systemctl restart fail2ban.service || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
 verify_fail2ban_jails running
 # Re-run against the live daemon: writes/validates ignoreip, reloads if it
 # changed, and clears bans that a newly allowlisted source still carries.
@@ -1682,6 +1982,10 @@ ENGINE_BACKUP=""
 [ -z "$UNIT_ROLLBACK_DIR" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 UNIT_ROLLBACK_DIR=""
 [ -z "$F2B_ROLLBACK_DIR" ] || rm -rf -- "$F2B_ROLLBACK_DIR"
+F2B_ROLLBACK_DIR=""
+cleanup_fail2ban_rs_stage
+cleanup_fail2ban_rs_rollback
+remove_distro_fail2ban_pkg
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"

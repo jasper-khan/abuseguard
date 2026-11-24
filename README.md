@@ -2,7 +2,7 @@
 
 [English](README.en.md) | **简体中文**
 
-AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 或 Nginx 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 fail2ban 加一个小型 Rust 引擎驱动。
+AbuseGuard 是一个面向 Debian/Ubuntu 上 [Caddy](https://caddyserver.com/) 或 Nginx 反向代理的即插即用滥用缓解层。它对直接到达源站的连接在防火墙层（nftables）封禁滥用及已知恶意 IP，并可选地将其自动上报到 [AbuseIPDB](https://www.abuseipdb.com/) —— 由 [fail2ban-rs](https://github.com/jasper-khan/fail2ban-rs)（纯 Rust 实现的 Fail2Ban 1.1.1 替代品）加一个小型 Rust 引擎驱动。
 
 一条命令即可装好：加固版 Caddy（内置 `caddy-dns/cloudflare` TLS 模块）或发行版 Nginx（首次安装二选一，之后不可切换）、nftables 入站防火墙、fail2ban jail、威胁情报同步、可选上报器，以及交互式 `ag` 控制面板。
 
@@ -53,7 +53,7 @@ sudo ./install.sh --proxy=nginx   # 首次安装选择 Nginx（可与 --from-sou
 
 安装器是幂等的：已有的 config、whitelist、key 和无关的反代配置都会保留。Caddy 模式下，旧版或手工写在主 Caddyfile 中的 AbuseGuard 受保护站点，会迁移为标准的 `/etc/caddy/sites/<域名>.caddy`，站点内统一使用 `import abuseguard`；主配置、已有站点和防护片段先在候选副本上处理，完整配置通过校验后才替换正式文件，替换失败会回滚。Nginx 模式下不改动既有站点文件，安装/添加/删除站点都先对包含现有站点与候选文件的完整配置做 `nginx -t` 检查。
 
-安装器会自动补齐 `fail2ban`、`rsyslog`、`nftables` 等运行依赖；`rsyslog` 为 Debian/Ubuntu 默认的 `sshd` jail 提供 `/var/log/auth.log`，AbuseGuard 的网站防护仍使用独立的隐私精简 JSON 日志。已有 Caddy 服务中的 Cloudflare token 会安全写入 `/etc/caddy/.env`，Nginx 模式则写入 `/etc/caddy-abuseguard/cloudflare.ini`；两者都不会在终端显示。
+安装器会自动从 `jasper-khan/fail2ban-rs` 拉取最新 release 并校验 SHA-256 后安装 `fail2ban-rs` 到 `/usr/local`，同时补齐 `rsyslog`、`nftables` 等运行依赖（不再通过 `apt` 安装发行版 Python `fail2ban`）。若机器上已有发行版 `fail2ban`，安装器会先用暂存的 `fail2ban-rs` 校验配置、停旧服务并无缝接管原有 `/etc/fail2ban` 与 SQLite 数据库，待服务与全部 jail 验证运行后再自动 `apt-get remove fail2ban`（保留配置与数据库，不 purge）；更新时若已是最新 `fail2ban-rs` 则跳过下载并继续使用 `idle` 零中断升级。`rsyslog` 为依赖 `/var/log/auth.log` 的自定义配置保留兼容，AbuseGuard 的网站防护仍使用独立的隐私精简 JSON 日志。已有 Caddy 服务中的 Cloudflare token 会安全写入 `/etc/caddy/.env`，Nginx 模式则写入 `/etc/caddy-abuseguard/cloudflare.ini`；两者都不会在终端显示。
 
 首次安装会**交互询问**两个可选密钥 —— Cloudflare API token（用 DNS-01 签发 TLS 证书）和 AbuseIPDB API key（用于自动上报）。**直接回车即可跳过**，AbuseIPDB key 输入时不会回显；两者都能之后随时在面板里设置。更新时会保留现有密钥、跳过这些询问，并在成功后自动重新加载面板。装完终端会醒目显示进面板的命令：
 
@@ -264,7 +264,7 @@ sudo ./uninstall.sh --dry-run        # 只打印将删除什么，不做任何�
 - 新装时会在 root 管理的 `/etc/caddy-abuseguard/install-manifest` 保存首次安装的归属记录，重试或升级不会覆盖。旧版本在 `/var/lib/caddy-abuseguard` 留下的清单不会自动成为彻底卸载的依据；缺少可信清单时，即使指定 `--purge` 也只做保守卸载并保留站点。无法验证后端模式或引擎不支持检查时，只清理核心组件，不改代理配置。
 - 受管站点卸载时可选「保留反代、只去防护」或「一起删」；保留下来的 Nginx 站点若仍需续期文件，即使彻底卸载也会保留这些文件。以后重新安装时，保留且可识别的站点会恢复防护，不会被静默换成另一个后端。
 
-卸载同时删除本项目的端口表、独立情报表、根所有开机快照和生成的白名单 jail 配置，不会改动其他 nftables 表或其他 fail2ban jail。
+卸载同时删除本项目的端口表、独立情报表、根所有开机快照和生成的白名单 jail 配置，保留 `fail2ban-rs` 本身，也不会改动其他 nftables 表或其他 fail2ban jail。
 
 ## 安全须知
 
