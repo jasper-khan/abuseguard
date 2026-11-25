@@ -2160,7 +2160,8 @@ UNIT_ROLLBACK_DIR=""
 F2B_ROLLBACK_DIR=""
 cleanup_fail2ban_rs_stage
 cleanup_fail2ban_rs_rollback
-systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
+systemctl enable caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
+systemctl restart caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"
 log "已启用 SSH 防护；Web、SSH 和手动封禁共用白名单，并按源 IP 拦截所有端口。"

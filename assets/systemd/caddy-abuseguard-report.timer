@@ -2,8 +2,8 @@
 Description=AbuseGuard: periodic AbuseIPDB report flush
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=10min
+OnActiveSec=5min
+OnCalendar=*:0/10
 Persistent=true
 
 [Install]

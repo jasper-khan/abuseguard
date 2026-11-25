@@ -2,8 +2,8 @@
 Description=AbuseGuard: periodic threat-intel refresh
 
 [Timer]
-OnBootSec=10min
-OnUnitActiveSec=6h
+OnActiveSec=10min
+OnCalendar=*-*-* 0/6:00:00
 Persistent=true
 
 [Install]
