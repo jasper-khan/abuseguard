@@ -1010,14 +1010,6 @@ discard_panel_stage() {
 	PANEL_WORKDIR=""
 }
 
-revert_fail2ban_install_extras() {
-	if [ "${F2B_ENABLE_CHANGED:-0}" = 1 ]; then
-		# Remove newly enabled links while the unit file still exists.
-		systemctl disable fail2ban.service >/dev/null 2>&1 || true
-	fi
-	if [ "${F2B_LOGROTATE_CREATED:-0}" = 1 ]; then rm -f -- "$F2B_LOGROTATE"; fi
-}
-
 on_install_exit() {
 	if declare -F restore_proxy_autostart >/dev/null 2>&1; then
 		restore_proxy_autostart
@@ -1034,7 +1026,9 @@ on_install_exit() {
 		return 0
 	fi
 	if [ "$ENGINE_SWAPPED" = 0 ]; then
-		revert_fail2ban_install_extras
+		# Remove newly enabled links while the unit file still exists.
+		if [ "${F2B_ENABLE_CHANGED:-0}" = 1 ]; then systemctl disable fail2ban.service >/dev/null 2>&1 || true; fi
+		if [ "${F2B_LOGROTATE_CREATED:-0}" = 1 ]; then rm -f -- "$F2B_LOGROTATE"; fi
 		if [ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] && declare -F restore_fail2ban_rs_install >/dev/null 2>&1; then
 			restore_fail2ban_rs_install
 		fi
@@ -1066,7 +1060,8 @@ on_install_exit() {
 			done < "$UNIT_ROLLBACK_DIR/manifest"
 			systemctl daemon-reload >/dev/null 2>&1 || warn "警告：systemd 未能重新加载恢复后的策略单元。"
 		fi
-		revert_fail2ban_install_extras
+		if [ "${F2B_ENABLE_CHANGED:-0}" = 1 ]; then systemctl disable fail2ban.service >/dev/null 2>&1 || true; fi
+		if [ "${F2B_LOGROTATE_CREATED:-0}" = 1 ]; then rm -f -- "$F2B_LOGROTATE"; fi
 		if [ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] && declare -F restore_fail2ban_rs_install >/dev/null 2>&1; then
 			restore_fail2ban_rs_install
 		fi
@@ -1083,7 +1078,8 @@ on_install_exit() {
 		# First-time AbuseGuard install: no previous engine/panel to conflict
 		# with, so roll back fail2ban-rs and our fail2ban assets cleanly.
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
-		revert_fail2ban_install_extras
+		if [ "${F2B_ENABLE_CHANGED:-0}" = 1 ]; then systemctl disable fail2ban.service >/dev/null 2>&1 || true; fi
+		if [ "${F2B_LOGROTATE_CREATED:-0}" = 1 ]; then rm -f -- "$F2B_LOGROTATE"; fi
 		if declare -F restore_fail2ban_rs_install >/dev/null 2>&1; then
 			restore_fail2ban_rs_install
 		fi
