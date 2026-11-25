@@ -458,6 +458,7 @@ verify_fail2ban_jails() {
 # the fallback when idle is unavailable.
 FAIL2BAN_PAUSED=0
 FAIL2BAN_STOPPED=0
+FAIL2BAN_SOCKET_STOPPED=0
 ENGINE_SWAPPED=0
 ENGINE_BACKUP=""
 PANEL_WORKDIR=""
@@ -477,6 +478,8 @@ F2B_UNIT_DIR="${F2B_UNIT_DIR:-/usr/local/lib/systemd/system}"
 F2B_MAN_DIR="${F2B_MAN_DIR:-/usr/local/share/man}"
 F2B_RS_STATE_DIR="${F2B_RS_STATE_DIR:-/usr/local/lib/fail2ban-rs}"
 F2B_RS_MARKER="$F2B_RS_STATE_DIR/installed"
+F2B_LOGROTATE="${F2B_LOGROTATE:-/etc/logrotate.d/fail2ban}"
+F2B_PROC_ROOT="${F2B_PROC_ROOT:-/proc}"
 FAIL2BAN_RS_NEEDS_INSTALL=0
 FAIL2BAN_RS_SWAPPED=0
 FAIL2BAN_RS_HAD_PREV=0
@@ -660,7 +663,8 @@ restore_fail2ban_rs_install() {
 	[ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] || return 0
 	if [ "${FAIL2BAN_RS_HAD_PREV:-0}" = 1 ] && [ -n "${FAIL2BAN_RS_ROLLBACK_DIR:-}" ] \
 		&& [ -f "$FAIL2BAN_RS_ROLLBACK_DIR/manifest" ]; then
-		systemctl stop fail2ban.socket fail2ban.service >/dev/null 2>&1 || true
+		systemctl stop fail2ban.socket >/dev/null 2>&1 || true
+		systemctl stop fail2ban.service >/dev/null 2>&1 || true
 		while IFS=$'\t' read -r state idx path; do
 			case "$state" in
 				present)
@@ -672,11 +676,16 @@ restore_fail2ban_rs_install() {
 		[ "$failed" = 0 ] || warn "警告：无法完整恢复旧版 fail2ban-rs，请手动检查 /usr/local。"
 		hash -r
 		systemctl daemon-reload >/dev/null 2>&1 || true
-	elif [ "${FAIL2BAN_RS_HAD_DISTRO:-0}" = 1 ] && [ -n "${FAIL2BAN_RS_INSTALLER:-}" ] \
-		&& [ -f "$FAIL2BAN_RS_INSTALLER" ]; then
-		systemctl stop fail2ban.socket fail2ban.service >/dev/null 2>&1 || true
+	elif [ -n "${FAIL2BAN_RS_INSTALLER:-}" ] && [ -f "$FAIL2BAN_RS_INSTALLER" ]; then
+		systemctl stop fail2ban.socket >/dev/null 2>&1 || true
+		systemctl stop fail2ban.service >/dev/null 2>&1 || true
 		bash "$FAIL2BAN_RS_INSTALLER" --uninstall >/dev/null 2>&1 \
 			|| warn "警告：无法回滚新安装的 fail2ban-rs，请手动检查 /usr/local。"
+		# Also sweep managed paths in case the sub-installer exited before
+		# writing its installed marker (which --uninstall gates on).
+		while IFS= read -r path; do
+			rm -f -- "$path"
+		done < <(fail2ban_rs_managed_paths)
 		hash -r
 		systemctl daemon-reload >/dev/null 2>&1 || true
 	fi
@@ -689,20 +698,80 @@ unmask_fail2ban_service() {
 	fi
 }
 
+ensure_fail2ban_logrotate() {
+	[ ! -e "$F2B_LOGROTATE" ] && [ ! -L "$F2B_LOGROTATE" ] || return 0
+	install -d -m 0755 "$(dirname "$F2B_LOGROTATE")" || die "无法创建 logrotate 配置目录。"
+	cat > "$F2B_LOGROTATE" <<EOF || die "无法写入 $F2B_LOGROTATE。"
+/var/log/fail2ban.log {
+	weekly
+	rotate 4
+	compress
+	delaycompress
+	missingok
+	notifempty
+	postrotate
+		$F2B_BIN_DIR/fail2ban-client flushlogs 1>/dev/null || true
+	endscript
+	create 640 root adm
+}
+EOF
+	chmod 0644 "$F2B_LOGROTATE"
+	log "已创建 fail2ban 日志轮转规则（$F2B_LOGROTATE）"
+}
+
+verify_fail2ban_rs_daemon() {
+	local expected="" pid="" exe="" frag="" dropins="" d=""
+	expected="$(readlink -f "$F2B_BIN_DIR/fail2ban-server" 2>/dev/null || printf '%s' "$F2B_BIN_DIR/fail2ban-server")"
+	pid="$(systemctl show -p MainPID --value fail2ban.service 2>/dev/null || true)"
+	[[ "$pid" =~ ^[1-9][0-9]*$ ]] \
+		|| die "无法确认 fail2ban.service 的主进程 PID（得到：'${pid:-空}'）；安装未完成。"
+	exe="$(readlink -f "$F2B_PROC_ROOT/$pid/exe" 2>/dev/null || true)"
+	if [ "$exe" != "$expected" ]; then
+		die "fail2ban.service 当前运行的不是 fail2ban-rs（MainPID=$pid -> ${exe:-未知}，期望 $expected）。请检查 systemctl cat fail2ban.service 中的自定义 unit 或 drop-in 覆盖；安装已中止并将回滚。"
+	fi
+	frag="$(systemctl show -p FragmentPath --value fail2ban.service 2>/dev/null || true)"
+	if [ -n "$frag" ] && [ "$frag" != "$F2B_UNIT_DIR/fail2ban.service" ] && [ -f "$frag" ]; then
+		if grep -Ev '^[[:space:]]*[#;]' "$frag" 2>/dev/null | grep -qE '/usr/bin/fail2ban-(server|client)'; then
+			die "fail2ban.service 使用了自定义 unit（$frag）且仍引用 /usr/bin/fail2ban-*；请先更新或移除自定义 unit 后重试。"
+		fi
+	fi
+	dropins="$(systemctl show -p DropInPaths --value fail2ban.service 2>/dev/null || true)"
+	for d in $dropins; do
+		if [ -f "$d" ] && grep -Ev '^[[:space:]]*[#;]' "$d" 2>/dev/null | grep -qE '/usr/bin/fail2ban-(server|client)'; then
+			die "fail2ban.service 的 drop-in（$d）仍引用 /usr/bin/fail2ban-*；请先更新或移除该 drop-in 后重试。"
+		fi
+	done
+}
+
 commit_fail2ban_rs() {
+	local sock_active=0 svc_active=0
 	[ "$FAIL2BAN_RS_NEEDS_INSTALL" = 1 ] && [ "$FAIL2BAN_RS_SWAPPED" = 0 ] || return 0
 	backup_fail2ban_rs_install
-	if systemctl is-active --quiet fail2ban.service 2>/dev/null \
-		|| systemctl is-active --quiet fail2ban.socket 2>/dev/null; then
+	systemctl is-active --quiet fail2ban.socket 2>/dev/null && sock_active=1 || true
+	systemctl is-active --quiet fail2ban.service 2>/dev/null && svc_active=1 || true
+	if [ "$sock_active" = 1 ] || [ "$svc_active" = 1 ]; then
 		log "正在停止当前 fail2ban 以切换至 $FAIL2BAN_RS_TARGET_NAME（现有封禁将在重启后从数据库恢复）..."
-		systemctl stop fail2ban.socket fail2ban.service \
-			|| die "无法停止现有 fail2ban，安装已中止。"
-		FAIL2BAN_STOPPED=1
+		# Stop only units that are actually active (Debian packages ship no
+		# fail2ban.socket; stopping a missing unit alongside the service exits
+		# nonzero after stopping the service). Set the flag before stopping so
+		# an interrupted stop still triggers recovery on exit.
+		if [ "$sock_active" = 1 ]; then
+			FAIL2BAN_SOCKET_STOPPED=1
+			systemctl stop fail2ban.socket \
+				|| die "无法停止现有 fail2ban.socket，安装已中止。"
+		fi
+		if [ "$svc_active" = 1 ]; then
+			FAIL2BAN_STOPPED=1
+			systemctl stop fail2ban.service \
+				|| die "无法停止现有 fail2ban.service，安装已中止。"
+		fi
 	fi
+	# Mark before invoking the sub-installer: fail2ban-rs writes its version
+	# marker before copying binaries, so a partial write must still roll back.
+	FAIL2BAN_RS_SWAPPED=1
 	log "正在安装 $FAIL2BAN_RS_TARGET_NAME ..."
 	bash "$FAIL2BAN_RS_INSTALLER" "$FAIL2BAN_RS_ARCHIVE" >/dev/null \
 		|| die "安装 fail2ban-rs 失败。"
-	FAIL2BAN_RS_SWAPPED=1
 	hash -r
 }
 
@@ -718,6 +787,7 @@ remove_distro_fail2ban_pkg() {
 	systemctl disable --now fail2ban.socket >/dev/null 2>&1 || true
 	systemctl reenable fail2ban.service >/dev/null 2>&1 || systemctl enable fail2ban.service >/dev/null 2>&1 || true
 	systemctl restart fail2ban.service || die "移除旧版 fail2ban 软件包后，fail2ban-rs 未能重新启动（查看：journalctl -u fail2ban）"
+	verify_fail2ban_rs_daemon
 	verify_fail2ban_jails running
 }
 
@@ -803,8 +873,13 @@ resume_fail2ban_after_failure() {
 	done
 	if [ "$FAIL2BAN_PAUSED" = 1 ]; then
 		warn "安装失败：已恢复旧 fail2ban 检测（旧引擎仍在使用）。"
-	elif [ "$FAIL2BAN_STOPPED" = 1 ]; then
-		systemctl start fail2ban >/dev/null 2>&1 || warn "警告：无法重新启动 fail2ban。"
+	elif [ "$FAIL2BAN_STOPPED" = 1 ] || [ "${FAIL2BAN_SOCKET_STOPPED:-0}" = 1 ]; then
+		if [ "${FAIL2BAN_SOCKET_STOPPED:-0}" = 1 ]; then
+			systemctl start fail2ban.socket >/dev/null 2>&1 || warn "警告：无法重新启动 fail2ban.socket。"
+		fi
+		if [ "$FAIL2BAN_STOPPED" = 1 ]; then
+			systemctl start fail2ban.service >/dev/null 2>&1 || warn "警告：无法重新启动 fail2ban。"
+		fi
 		warn "安装失败：已恢复旧 fail2ban（旧引擎与旧配置仍在使用）。"
 	elif [ -n "$PAUSED_JAILS_DONE" ]; then
 		warn "安装失败：已恢复此前暂停的 fail2ban 检测（旧引擎仍在使用）。"
@@ -913,10 +988,33 @@ on_install_exit() {
 		# Restore the old config only after its engine is back, keeping the
 		# engine and its fail2ban config a compatible pair.
 		restore_f2b_assets
+		if [ "${FAIL2BAN_SOCKET_STOPPED:-0}" = 1 ]; then
+			systemctl start fail2ban.socket >/dev/null 2>&1 || true
+		fi
 		if systemctl restart fail2ban >/dev/null 2>&1; then
 			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，检测已恢复；修复问题后请重新运行安装器。"
 		else
 			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，但 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
+		fi
+	elif [ -z "$ENGINE_BACKUP" ] && [ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ]; then
+		# First-time AbuseGuard install: no previous engine/panel to conflict
+		# with, so roll back fail2ban-rs and our fail2ban assets cleanly.
+		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
+		if declare -F restore_fail2ban_rs_install >/dev/null 2>&1; then
+			restore_fail2ban_rs_install
+		fi
+		restore_f2b_assets
+		if [ "${FAIL2BAN_SOCKET_STOPPED:-0}" = 1 ]; then
+			systemctl start fail2ban.socket >/dev/null 2>&1 || true
+		fi
+		if [ "$FAIL2BAN_STOPPED" = 1 ]; then
+			if systemctl start fail2ban.service >/dev/null 2>&1; then
+				warn "安装未完成：已回滚 fail2ban-rs 与新增 fail2ban 配置，旧 fail2ban 已恢复运行；修复问题后请重新运行安装器。"
+			else
+				warn "安装未完成：已回滚 fail2ban-rs 与新增 fail2ban 配置，但旧 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
+			fi
+		else
+			warn "安装未完成：已回滚 fail2ban-rs 与新增 fail2ban 配置；修复问题后请重新运行安装器。"
 		fi
 	else
 		# No previous engine, or the old panel/engine could not be restored.
@@ -1105,11 +1203,11 @@ export DEBIAN_FRONTEND=noninteractive
 FAIL2BAN_RS_HAD_DISTRO=0
 if pkg_installed fail2ban; then FAIL2BAN_RS_HAD_DISTRO=1; fi
 if [ "$PROXY_MODE" = caddy ]; then
-	log "正在安装依赖（rsyslog、nftables、curl、jq、libcap2-bin）..."
+	log "正在安装依赖（rsyslog、nftables、logrotate、curl、jq、libcap2-bin）..."
 	apt-get update -qq
-	apt-get install -y -qq rsyslog nftables curl jq ca-certificates libcap2-bin >/dev/null
+	apt-get install -y -qq rsyslog nftables logrotate curl jq ca-certificates libcap2-bin >/dev/null
 else
-	log "正在安装依赖（rsyslog、nftables、curl、jq、nginx、certbot、certbot-dns-cloudflare）..."
+	log "正在安装依赖（rsyslog、nftables、logrotate、curl、jq、nginx、certbot、certbot-dns-cloudflare）..."
 	apt-get update -qq
 	for pkg in nginx certbot python3-certbot-dns-cloudflare; do
 		apt-cache show "$pkg" >/dev/null 2>&1 \
@@ -1117,7 +1215,7 @@ else
 	done
 	trap on_install_exit EXIT
 	inhibit_proxy_autostart
-	apt-get install -y -qq rsyslog nftables curl jq ca-certificates \
+	apt-get install -y -qq rsyslog nftables logrotate curl jq ca-certificates \
 		nginx certbot python3-certbot-dns-cloudflare >/dev/null \
 		|| die "Nginx/Certbot 依赖安装失败。"
 	restore_proxy_autostart
@@ -1964,10 +2062,12 @@ else
 	systemctl enable nginx >/dev/null 2>&1 || warn "警告：无法让 nginx 开机自启。"
 fi
 unmask_fail2ban_service
+ensure_fail2ban_logrotate
 systemctl disable --now fail2ban.socket >/dev/null 2>&1 || true
 systemctl reenable fail2ban.service >/dev/null 2>&1 || systemctl enable fail2ban.service >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
 systemctl restart fail2ban.service || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
+verify_fail2ban_rs_daemon
 verify_fail2ban_jails running
 # Re-run against the live daemon: writes/validates ignoreip, reloads if it
 # changed, and clears bans that a newly allowlisted source still carries.
