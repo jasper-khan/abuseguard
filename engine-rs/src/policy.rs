@@ -329,11 +329,62 @@ fn cmd_output(prog: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
+// Mirror every ancestor directory from `/` down to `real_target` inside
+// `root_mirror` with sibling symlinks. Any read_dir or symlink error aborts
+// the apply so a missing sibling cannot silently drop relative `[INCLUDES]`.
+#[cfg(unix)]
+fn mirror_ancestors(
+    root_mirror: &std::path::Path,
+    real_target: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::symlink;
+    use std::path::{Component, PathBuf};
+
+    let parts: Vec<std::ffi::OsString> = real_target
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_os_string()),
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        return Err(format!("无效的 fail2ban 配置目录：{}", real_target.display()));
+    }
+
+    let mut real_cur = PathBuf::from("/");
+    let mut mir_cur = root_mirror.to_path_buf();
+    std::fs::create_dir_all(&mir_cur).map_err(crate::util::io_err)?;
+    for part in &parts {
+        for entry in std::fs::read_dir(&real_cur).map_err(crate::util::io_err)? {
+            let entry = entry.map_err(crate::util::io_err)?;
+            let name = entry.file_name();
+            if name == *part {
+                continue;
+            }
+            let dst = mir_cur.join(&name);
+            if dst.symlink_metadata().is_err() {
+                symlink(real_cur.join(&name), &dst).map_err(crate::util::io_err)?;
+            }
+        }
+        real_cur.push(part);
+        mir_cur.push(part);
+        if mir_cur
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            std::fs::remove_file(&mir_cur).map_err(crate::util::io_err)?;
+        }
+        std::fs::create_dir_all(&mir_cur).map_err(crate::util::io_err)?;
+    }
+    Ok(mir_cur)
+}
+
 // Build a read-only symlink mirror of the fail2ban config directory inside
-// `work_dir` (already writable under ProtectSystem=strict), reproducing each
-// ancestor directory from `/` down to `f2b_root` with sibling symlinks and
-// omitting only AbuseGuard's generated policy file. Relative `[INCLUDES]` such
-// as `before = ../native.local` resolve identically without mutating `/etc`.
+// `work_dir` (already writable under ProtectSystem=strict), following the real
+// canonical directory paths so symlinked `/etc/fail2ban` (or `jail.d`) resolves
+// relative `[INCLUDES]` like `before = ../native.local` identically to the
+// kernel without mutating live config.
 #[cfg(unix)]
 fn build_f2b_mirror(
     f2b_dir: &str,
@@ -341,7 +392,7 @@ fn build_f2b_mirror(
     work_dir: &str,
 ) -> Result<std::path::PathBuf, String> {
     use std::os::unix::fs::symlink;
-    use std::path::{Component, Path, PathBuf};
+    use std::path::Path;
 
     let jail_dir = Path::new(f2b_dir);
     let f2b_root = jail_dir
@@ -353,69 +404,42 @@ fn build_f2b_mirror(
     let policy_name = Path::new(f2b_policy)
         .file_name()
         .ok_or_else(|| format!("无效的 fail2ban 策略路径：{}", f2b_policy))?;
-    let abs_root = if f2b_root.is_absolute() {
-        f2b_root.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(crate::util::io_err)?
-            .join(f2b_root)
-    };
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
-    for comp in abs_root.components() {
-        match comp {
-            Component::Normal(s) => parts.push(s.to_os_string()),
-            Component::ParentDir => {
-                parts.pop();
-            }
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-        }
-    }
-    if parts.is_empty() {
-        return Err(format!("无效的 fail2ban 配置目录：{}", f2b_dir));
-    }
+    let real_root = std::fs::canonicalize(f2b_root).map_err(crate::util::io_err)?;
+    let root_mirror = Path::new(work_dir).join("f2b-root");
+    let mir_root = mirror_ancestors(&root_mirror, &real_root)?;
 
-    let mut real_cur = PathBuf::from("/");
-    let mut mir_cur = Path::new(work_dir).join("f2b-root");
-    std::fs::create_dir_all(&mir_cur).map_err(crate::util::io_err)?;
-    for part in &parts {
-        if let Ok(entries) = std::fs::read_dir(&real_cur) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if name == *part {
-                    continue;
-                }
-                let _ = symlink(real_cur.join(&name), mir_cur.join(&name));
-            }
-        }
-        real_cur.push(part);
-        mir_cur.push(part);
-        std::fs::create_dir_all(&mir_cur).map_err(crate::util::io_err)?;
-    }
-
-    for entry in std::fs::read_dir(&real_cur).map_err(crate::util::io_err)? {
+    for entry in std::fs::read_dir(&real_root).map_err(crate::util::io_err)? {
         let entry = entry.map_err(crate::util::io_err)?;
         let name = entry.file_name();
         if name.as_os_str() == jail_d_name {
             continue;
         }
-        symlink(real_cur.join(&name), mir_cur.join(&name)).map_err(crate::util::io_err)?;
+        symlink(real_root.join(&name), mir_root.join(&name)).map_err(crate::util::io_err)?;
     }
 
     if jail_dir.is_dir() {
-        let abs_jail_dir = real_cur.join(jail_d_name);
-        let mirror_jail_d = mir_cur.join(jail_d_name);
-        std::fs::create_dir_all(&mirror_jail_d).map_err(crate::util::io_err)?;
-        for entry in std::fs::read_dir(&abs_jail_dir).map_err(crate::util::io_err)? {
+        let real_jail_dir = std::fs::canonicalize(jail_dir).map_err(crate::util::io_err)?;
+        let expected_jail_dir = real_root.join(jail_d_name);
+        let mirror_jail_d = if real_jail_dir == expected_jail_dir {
+            let d = mir_root.join(jail_d_name);
+            std::fs::create_dir_all(&d).map_err(crate::util::io_err)?;
+            d
+        } else {
+            let d = mirror_ancestors(&root_mirror, &real_jail_dir)?;
+            symlink(&d, mir_root.join(jail_d_name)).map_err(crate::util::io_err)?;
+            d
+        };
+        for entry in std::fs::read_dir(&real_jail_dir).map_err(crate::util::io_err)? {
             let entry = entry.map_err(crate::util::io_err)?;
             let name = entry.file_name();
             if name.as_os_str() == policy_name {
                 continue;
             }
-            symlink(abs_jail_dir.join(&name), mirror_jail_d.join(&name))
+            symlink(real_jail_dir.join(&name), mirror_jail_d.join(&name))
                 .map_err(crate::util::io_err)?;
         }
     }
-    Ok(mir_cur)
+    Ok(mir_root)
 }
 
 #[cfg(not(unix))]
@@ -1107,5 +1131,66 @@ mod tests {
             .join("jail.d")
             .join("zzz-caddy-abuseguard-policy.local")
             .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn f2b_mirror_follows_symlinked_config_dir_for_relative_includes() {
+        use std::os::unix::fs::symlink;
+
+        let dir = crate::testutil::TempDir::new("f2b-symlink-mirror");
+        let work = dir.join("work");
+        let etc_like = dir.join("etc-like");
+        let srv_cfg = dir.join("srv").join("config");
+        let real_root = srv_cfg.join("fail2ban");
+        let real_jail_d = real_root.join("jail.d");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&etc_like).unwrap();
+        std::fs::create_dir_all(&real_jail_d).unwrap();
+        std::fs::write(
+            dir.join("srv").join("upper.local"),
+            b"[caddy-rate-local]\nignoreip = 192.0.2.66\n",
+        )
+        .unwrap();
+        std::fs::write(
+            srv_cfg.join("native.local"),
+            b"[sshd]\nignoreip = 192.0.2.77\n",
+        )
+        .unwrap();
+        std::fs::write(real_root.join("jail.conf"), b"[DEFAULT]\n").unwrap();
+        let generated = real_jail_d.join("zzz-caddy-abuseguard-policy.local");
+        std::fs::write(&generated, b"[sshd]\nignoreip = 192.0.2.99\n").unwrap();
+
+        // /etc/fail2ban -> /srv/config/fail2ban
+        let link_root = etc_like.join("fail2ban");
+        symlink(&real_root, &link_root).unwrap();
+        let link_jail_d = link_root.join("jail.d");
+        let link_policy = link_jail_d.join("zzz-caddy-abuseguard-policy.local");
+
+        let mirror = build_f2b_mirror(
+            link_jail_d.to_str().unwrap(),
+            link_policy.to_str().unwrap(),
+            work.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert!(mirror.starts_with(&work));
+        // `../native.local` must resolve against `/srv/config`, not `etc-like`.
+        assert_eq!(
+            std::fs::read(mirror.join("../native.local")).unwrap(),
+            b"[sshd]\nignoreip = 192.0.2.77\n"
+        );
+        assert_eq!(
+            std::fs::read(mirror.join("../../upper.local")).unwrap(),
+            b"[caddy-rate-local]\nignoreip = 192.0.2.66\n"
+        );
+        assert!(!mirror
+            .join("jail.d")
+            .join("zzz-caddy-abuseguard-policy.local")
+            .exists());
+        assert_eq!(
+            std::fs::read(&generated).unwrap(),
+            b"[sshd]\nignoreip = 192.0.2.99\n"
+        );
     }
 }
