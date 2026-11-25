@@ -239,9 +239,77 @@ pub fn format_go_duration(d: Duration) -> String {
     out
 }
 
+// prefer_local_bin_path ensures /usr/local/bin precedes /usr/bin (or is
+// appended when /usr/bin is absent) without overriding earlier custom/test dirs.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn prefer_local_bin_path(raw: &str) -> String {
+    let entries: Vec<&str> = raw.split(':').filter(|s| !s.is_empty()).collect();
+    let local_idx = entries.iter().position(|&d| d == "/usr/local/bin");
+    let usr_idx = entries.iter().position(|&d| d == "/usr/bin");
+    if let Some(l) = local_idx {
+        if usr_idx.map_or(true, |u| l < u) {
+            return raw.to_string();
+        }
+    }
+    let mut out: Vec<&str> = Vec::with_capacity(entries.len() + 1);
+    let mut inserted = false;
+    for dir in entries {
+        if dir == "/usr/local/bin" {
+            continue;
+        }
+        if !inserted && dir == "/usr/bin" {
+            out.push("/usr/local/bin");
+            inserted = true;
+        }
+        out.push(dir);
+    }
+    if !inserted {
+        out.push("/usr/local/bin");
+    }
+    out.join(":")
+}
+
+// Called at single-threaded process startup so fail2ban-client in /usr/local/bin
+// is found even under stripped PATH (e.g. cron or custom sudo secure_path).
+pub fn ensure_local_bin_in_path() {
+    #[cfg(unix)]
+    {
+        let cur = std::env::var("PATH").unwrap_or_default();
+        let next = prefer_local_bin_path(&cur);
+        if next != cur {
+            std::env::set_var("PATH", next);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefer_local_bin_preserves_custom_prefix_and_beats_usr_bin() {
+        assert_eq!(
+            prefer_local_bin_path("/tmp/test-bin:/usr/bin:/bin"),
+            "/tmp/test-bin:/usr/local/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            prefer_local_bin_path("/usr/sbin:/usr/bin:/sbin:/bin"),
+            "/usr/sbin:/usr/local/bin:/usr/bin:/sbin:/bin"
+        );
+        assert_eq!(
+            prefer_local_bin_path("/usr/bin:/usr/local/bin:/bin"),
+            "/usr/local/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            prefer_local_bin_path("/tmp/test-bin:/usr/local/bin:/usr/bin:/bin"),
+            "/tmp/test-bin:/usr/local/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            prefer_local_bin_path("/tmp/test-bin"),
+            "/tmp/test-bin:/usr/local/bin"
+        );
+        assert_eq!(prefer_local_bin_path(""), "/usr/local/bin");
+    }
 
     #[test]
     fn parse_go_durations() {

@@ -79,13 +79,17 @@ reset_env() {
 	ARCH=amd64
 	FAIL2BAN_RS_NEEDS_INSTALL=0
 	FAIL2BAN_RS_SWAPPED=0
-	FAIL2BAN_RS_HAD_DISTRO=0
 	FAIL2BAN_RS_TARGET_NAME=""
 	FAIL2BAN_RS_STAGE_DIR=""
 	FAIL2BAN_RS_ARCHIVE=""
 	FAIL2BAN_RS_INSTALLER=""
 	FAIL2BAN_RS_STAGED_CLIENT=""
 	FAIL2BAN_RS_ROLLBACK_DIR=""
+	F2B_DEB=""
+	F2B_REMOVE_STARTED=0
+	F2B_LOGROTATE_CREATED=0
+	F2B_ENABLE_CHANGED=0
+	F2B_UNITS_CHANGED=0
 	FAIL2BAN_PAUSED=0
 	FAIL2BAN_STOPPED=0
 	FAIL2BAN_SOCKET_STOPPED=0
@@ -237,7 +241,6 @@ rm -rf -- "$TMP/badroot-src"
 (
 	reset_env
 	: > "$TMP/inst.log"
-	FAIL2BAN_RS_HAD_DISTRO=1
 	printf '[DEFAULT]\n' > "$F2B_ETC/fail2ban.conf"
 	printf '[DEFAULT]\n' > "$F2B_ETC/jail.conf"
 	systemctl() {
@@ -332,7 +335,6 @@ rm -rf -- "$TMP/badroot-src"
 (
 	reset_env
 	: > "$TMP/calls"
-	FAIL2BAN_RS_HAD_DISTRO=1
 	printf '[DEFAULT]\n' > "$F2B_ETC/fail2ban.conf"
 	printf '[DEFAULT]\n' > "$F2B_ETC/jail.conf"
 	# Simulate Debian: fail2ban.service is active, fail2ban.socket does NOT exist
@@ -490,7 +492,6 @@ EOF
 (
 	reset_env
 	: > "$TMP/calls"
-	FAIL2BAN_RS_HAD_DISTRO=1
 	printf '[DEFAULT]\n' > "$F2B_ETC/fail2ban.conf"
 	printf '[DEFAULT]\n' > "$F2B_ETC/jail.conf"
 	systemctl() {
@@ -498,6 +499,10 @@ EOF
 		case "$*" in
 			"is-active --quiet fail2ban.socket") return 4 ;;
 			"is-active --quiet fail2ban.service") return 0 ;;
+			"disable fail2ban.service")
+				# Must run before restore_fail2ban_rs_install deletes the unit file.
+				[ -f "$F2B_UNIT_DIR/fail2ban.service" ] || return 9
+				return 0 ;;
 			*) return 0 ;;
 		esac
 	}
@@ -514,6 +519,7 @@ EOF
 	STAGED_RELEASE_BIN=""
 	UNIT_ROLLBACK_DIR=""
 	F2B_ROLLBACK_DIR=""
+	F2B_ENABLE_CHANGED=1
 	ensure_fail2ban_logrotate
 	mkdir "$TMP/deb"
 	F2B_DEB="$TMP/deb/exact-version.deb"
@@ -524,7 +530,120 @@ EOF
 	[ -f "$TMP/reinstalled" ] && [ ! -e "$F2B_LOGROTATE" ] || exit 5
 	[ ! -e "$F2B_BIN_DIR/fail2ban-server" ] || exit 2
 	[ ! -e "$F2B_RS_MARKER" ] || exit 3
+	grep -qx 'systemctl disable fail2ban.service' "$TMP/calls" || exit 6
 	grep -Eq '^systemctl (re)?start fail2ban.service$' "$TMP/calls" || exit 4
 ) || fail "first-time install on_install_exit did not roll back fail2ban-rs"
+
+# --- 11) else branch (keep new config on backup restore failure) keeps enable -
+(
+	reset_env
+	: > "$TMP/calls"
+	systemctl() {
+		printf 'systemctl %s\n' "$*" >> "$TMP/calls"
+		return 0
+	}
+	INSTALL_COMPLETE=0
+	ENGINE_SWAPPED=1
+	ENGINE_BACKUP="$TMP/nonexistent-engine-backup"
+	ENGINE_BIN="$TMP/fs/bin/caddy-abuseguard"
+	PANEL_SWAPPED=0
+	STAGED_BIN=""
+	STAGED_RELEASE_BIN=""
+	UNIT_ROLLBACK_DIR=""
+	F2B_ROLLBACK_DIR=""
+	F2B_ENABLE_CHANGED=1
+	F2B_UNITS_CHANGED=1
+	ensure_fail2ban_logrotate
+	on_install_exit 2>/dev/null
+	if grep -qx 'systemctl disable fail2ban.service' "$TMP/calls"; then exit 1; fi
+	grep -qx 'systemctl restart fail2ban' "$TMP/calls" || exit 2
+	[ -f "$F2B_LOGROTATE" ] || exit 3
+) || fail "on_install_exit else branch disabled fail2ban.service or removed logrotate"
+
+# --- 12) panel PATH normalization and logtarget-aware log viewer -------------
+(
+	funcs="$TMP/panel-funcs.sh"
+	: > "$funcs"
+	for name in ensure_local_bin_path show_fail2ban_logs; do
+		awk -v sig="$name() {" '
+			index($0, sig) == 1 { p=1 }
+			p { print }
+			p && /^}$/ { exit }
+		' "$ROOT/abuseguard.sh" >> "$funcs"
+	done
+	# shellcheck disable=SC1090
+	source "$funcs"
+
+	PATH="/tmp/mock:/usr/bin:/bin" ensure_local_bin_path
+	# subshell check via explicit calls so PATH mutation is observed cleanly
+	check_path() {
+		local got
+		got="$(PATH="$1"; ensure_local_bin_path; printf '%s' "$PATH")"
+		[ "$got" = "$2" ] || { printf 'PATH(%s) -> %s (want %s)\n' "$1" "$got" "$2" >&2; exit 1; }
+	}
+	check_path "/tmp/mock:/usr/bin:/bin" "/tmp/mock:/usr/local/bin:/usr/bin:/bin"
+	check_path "/usr/sbin:/usr/bin:/sbin:/bin" "/usr/sbin:/usr/local/bin:/usr/bin:/sbin:/bin"
+	check_path "/usr/bin:/usr/local/bin:/bin" "/usr/local/bin:/usr/bin:/bin"
+	check_path "/tmp/mock:/usr/local/bin:/usr/bin:/bin" "/tmp/mock:/usr/local/bin:/usr/bin:/bin"
+	check_path "/tmp/mock" "/tmp/mock:/usr/local/bin"
+	check_path "" "/usr/local/bin"
+
+	f2b_log="$TMP/fail2ban.log"
+	printf '2026-11-25 12:00:00 fail2ban.actions: NOTICE [sshd] Ban 198.51.100.7\n' > "$f2b_log"
+	journalctl() { printf 'journal:%s\n' "$*"; }
+
+	# File logtarget -> reads the file, not journalctl
+	fail2ban-client() { printf 'Current logging target is:\n`- %s\n' "$f2b_log"; }
+	out="$(show_fail2ban_logs)"
+	grep -q 'Ban 198.51.100.7' <<< "$out" || exit 2
+
+	# SYSTEMD-JOURNAL logtarget -> reads journalctl even though file exists on disk
+	fail2ban-client() { printf 'Current logging target is:\n`- SYSTEMD-JOURNAL\n'; }
+	out="$(show_fail2ban_logs)"
+	[ "$out" = 'journal:-u fail2ban -n 20 --no-pager' ] || exit 3
+
+	# SYSLOG logtarget -> reads fail2ban syslog identifier
+	fail2ban-client() { printf 'Current logging target is:\n`- SYSLOG\n'; }
+	out="$(show_fail2ban_logs)"
+	[ "$out" = 'journal:-t fail2ban -n 20 --no-pager' ] || exit 4
+
+	# Unreachable daemon -> falls back to unit journal
+	fail2ban-client() { return 1; }
+	out="$(show_fail2ban_logs)"
+	[ "$out" = 'journal:-u fail2ban -n 20 --no-pager' ] || exit 5
+) || fail "panel PATH or logtarget log viewer checks failed"
+
+# --- 13) queue action logs enqueue failures via logger and still exits 0 -----
+(
+	act_line="$(sed -n 's/^actionban = //p' "$ROOT/assets/fail2ban/action.d/caddy-abuseguard-queue.conf")"
+	[ -n "$act_line" ] || exit 1
+	mock_bin="$TMP/queue-bin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/logger" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$TMP/logger.out"
+EOF
+	cat > "$mock_bin/stub-fail" <<'EOF'
+#!/usr/bin/env bash
+echo "[abuseguard] enqueue: disk full" >&2
+exit 1
+EOF
+	cat > "$mock_bin/stub-ok" <<'EOF'
+#!/usr/bin/env bash
+echo "[abuseguard] enqueue: disabled" >&2
+exit 0
+EOF
+	chmod 0755 "$mock_bin/logger" "$mock_bin/stub-fail" "$mock_bin/stub-ok"
+	prefix="/usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard enqueue --ip <ip> --profile <profile> --failures <failures> --window <window> --transport <transport> --port <target_port>"
+	case "$act_line" in *"$prefix"*) ;; *) exit 6 ;; esac
+	cmd_fail="${act_line/"$prefix"/"$mock_bin/stub-fail"}"
+	PATH="$mock_bin:$PATH" sh -c "$cmd_fail" || exit 2
+	grep -q 'enqueue: disk full' "$TMP/logger.out" || exit 3
+
+	: > "$TMP/logger.out"
+	cmd_ok="${act_line/"$prefix"/"$mock_bin/stub-ok"}"
+	PATH="$mock_bin:$PATH" sh -c "$cmd_ok" || exit 4
+	[ ! -s "$TMP/logger.out" ] || exit 5
+) || fail "queue action failure logging check failed"
 
 echo "fail2ban-rs tests: pass"

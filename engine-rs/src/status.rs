@@ -129,7 +129,9 @@ fn collect<'a>(
         let table_probe =
             s.spawn(|| query("nft", &["-j", "list", "tables"]).and_then(|b| parse_tables(&b)));
         let jail_probes = JAILS.map(|jail| {
-            s.spawn(move || query("fail2ban-client", &["status", jail]).and_then(|b| parse_banned(&b)))
+            s.spawn(move || {
+                query("fail2ban-client", &["status", jail, "short"]).and_then(|b| parse_banned(&b))
+            })
         });
         let services = Services {
             proxy: proxy.join().unwrap_or_default(),
@@ -446,14 +448,14 @@ mod tests {
         std::fs::write(root.join("intel-last-sync.txt"), br#"{"generated_at":"2026-01-12T00:00:00Z"}"#).unwrap();
         std::fs::write(root.join("intel-applied.json"), br#"{"applied_at":"2026-01-12T01:30:00Z","intel_entries":1}"#).unwrap();
         let now = OffsetDateTime::parse("2026-01-12T03:00:00Z", &Rfc3339).unwrap();
-        let query = |program: &str, args: &[&str]| match (program, args.last().copied()) {
-            ("systemctl", Some("nginx.service" | "fail2ban.service")) =>
+        let query = |program: &str, args: &[&str]| match (program, args) {
+            ("systemctl", [.., "nginx.service" | "fail2ban.service"]) =>
                 Some(b"LoadState=loaded\nActiveState=active\n".to_vec()),
-            ("systemctl", Some("certbot.timer")) =>
+            ("systemctl", [.., "certbot.timer"]) =>
                 Some(b"LoadState=loaded\nActiveState=inactive\n".to_vec()),
             ("nft", _) => Some(br#"{"nftables":[{"table":{"family":"inet","name":"caddy_abuseguard"}}]}"#.to_vec()),
-            ("fail2ban-client", Some("caddy-probe-h2")) => None,
-            ("fail2ban-client", _) => Some(b"Currently banned: 5\n".to_vec()),
+            ("fail2ban-client", ["status", "caddy-probe-h2", "short"]) => None,
+            ("fail2ban-client", ["status", _, "short"]) => Some(b"Currently banned: 5\n".to_vec()),
             _ => None,
         };
         let snapshot = collect(&config, "0.7.1", now, &query);

@@ -26,6 +26,7 @@ use util::{fatalf, logf};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
+    util::ensure_local_bin_in_path();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         usage();

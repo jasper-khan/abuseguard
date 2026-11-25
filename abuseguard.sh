@@ -2,6 +2,36 @@
 # AbuseGuard 控制面板。运行： ag
 set -uo pipefail
 
+# Ensure /usr/local/bin precedes /usr/bin (or is appended when /usr/bin is
+# absent) without overriding earlier custom/test directories in PATH.
+ensure_local_bin_path() {
+	[ -n "${PATH:-}" ] || { PATH=/usr/local/bin; export PATH; return 0; }
+	local dir out="" inserted=0 seen_usr=0
+	local -a dirs=()
+	IFS=':' read -r -a dirs <<< "$PATH"
+	for dir in ${dirs[@]+"${dirs[@]}"}; do
+		[ -n "$dir" ] || continue
+		if [ "$dir" = /usr/local/bin ]; then
+			[ "$seen_usr" = 0 ] && return 0
+		elif [ "$dir" = /usr/bin ]; then
+			seen_usr=1
+		fi
+	done
+	for dir in ${dirs[@]+"${dirs[@]}"}; do
+		[ -n "$dir" ] || continue
+		[ "$dir" = /usr/local/bin ] && continue
+		if [ "$inserted" = 0 ] && [ "$dir" = /usr/bin ]; then
+			out="${out:+$out:}/usr/local/bin"
+			inserted=1
+		fi
+		out="${out:+$out:}$dir"
+	done
+	[ "$inserted" = 1 ] || out="${out:+$out:}/usr/local/bin"
+	PATH="$out"
+	export PATH
+}
+ensure_local_bin_path
+
 CONF_DIR=/etc/caddy-abuseguard
 CONFIG="$CONF_DIR/config.json"
 WHITELIST="$CONF_DIR/whitelist"
@@ -1687,6 +1717,25 @@ act_toggle() {
 	pause
 }
 
+show_fail2ban_logs() {
+	local target=""
+	target="$(fail2ban-client get logtarget 2>/dev/null | sed -n '/^[[:space:]]*`-/{ s/^[[:space:]]*`-[[:space:]]*//; s/[[:space:]]*$//; p; q; }')" || true
+	case "${target^^}" in
+		""|SYSTEMD-JOURNAL|STDOUT|SYSOUT|STDERR)
+			journalctl -u fail2ban -n 20 --no-pager 2>/dev/null ;;
+		SYSLOG|SYSLOG\[*)
+			journalctl -t fail2ban -n 20 --no-pager 2>/dev/null ;;
+		/*)
+			if [ -r "$target" ]; then
+				tail -n 20 -- "$target" 2>/dev/null
+			else
+				journalctl -u fail2ban -n 20 --no-pager 2>/dev/null
+			fi ;;
+		*)
+			journalctl -u fail2ban -n 20 --no-pager 2>/dev/null ;;
+	esac
+}
+
 act_logs() {
 	local mode
 	mode="$(proxy_mode)" || mode=''
@@ -1698,7 +1747,8 @@ act_logs() {
 			echo "-- caddy（最近 20 条）--"; journalctl -u caddy -n 20 --no-pager 2>/dev/null ;;
 		*) echo "后端选择记录异常，未读取反向代理日志。" ;;
 	esac
-	echo "-- fail2ban（最近 20 条）--"; journalctl -u fail2ban -n 20 --no-pager 2>/dev/null
+	echo "-- fail2ban（最近 20 条）--"
+	show_fail2ban_logs
 	pause
 }
 
