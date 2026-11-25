@@ -584,7 +584,10 @@ EOF
 	check_path "/tmp/mock:/usr/bin:/bin" "/tmp/mock:/usr/local/bin:/usr/bin:/bin"
 	check_path "/usr/sbin:/usr/bin:/sbin:/bin" "/usr/sbin:/usr/local/bin:/usr/bin:/sbin:/bin"
 	check_path "/usr/bin:/usr/local/bin:/bin" "/usr/local/bin:/usr/bin:/bin"
-	check_path "/tmp/mock:/usr/local/bin:/usr/bin:/bin" "/tmp/mock:/usr/local/bin:/usr/bin:/bin"
+	check_path "/bin:/usr/bin" "/usr/local/bin:/bin:/usr/bin"
+	check_path "/tmp/mock:/bin:/usr/bin" "/tmp/mock:/usr/local/bin:/bin:/usr/bin"
+	check_path "/bin:/usr/local/bin:/usr/bin" "/usr/local/bin:/bin:/usr/bin"
+	check_path "/tmp/mock:/usr/local/bin:/bin:/usr/bin" "/tmp/mock:/usr/local/bin:/bin:/usr/bin"
 	check_path "/tmp/mock" "/tmp/mock:/usr/local/bin"
 	check_path "" "/usr/local/bin"
 
@@ -602,10 +605,10 @@ EOF
 	out="$(show_fail2ban_logs)"
 	[ "$out" = 'journal:-u fail2ban -n 20 --no-pager' ] || exit 3
 
-	# SYSLOG logtarget -> reads fail2ban syslog identifier
+	# SYSLOG logtarget -> queries fail2ban unit (fail2ban-rs uses fail2ban.actions ident)
 	fail2ban-client() { printf 'Current logging target is:\n`- SYSLOG\n'; }
 	out="$(show_fail2ban_logs)"
-	[ "$out" = 'journal:-t fail2ban -n 20 --no-pager' ] || exit 4
+	[ "$out" = 'journal:-u fail2ban -n 20 --no-pager' ] || exit 4
 
 	# Unreachable daemon -> falls back to unit journal
 	fail2ban-client() { return 1; }

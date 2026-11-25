@@ -239,15 +239,16 @@ pub fn format_go_duration(d: Duration) -> String {
     out
 }
 
-// prefer_local_bin_path ensures /usr/local/bin precedes /usr/bin (or is
-// appended when /usr/bin is absent) without overriding earlier custom/test dirs.
+// prefer_local_bin_path ensures /usr/local/bin precedes /usr/bin and /bin (on
+// usrmerge Debian/Ubuntu /bin -> /usr/bin) without overriding earlier custom dirs.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn prefer_local_bin_path(raw: &str) -> String {
+    let is_sys_bin = |d: &str| matches!(d, "/usr/bin" | "/bin");
     let entries: Vec<&str> = raw.split(':').filter(|s| !s.is_empty()).collect();
     let local_idx = entries.iter().position(|&d| d == "/usr/local/bin");
-    let usr_idx = entries.iter().position(|&d| d == "/usr/bin");
+    let sys_idx = entries.iter().position(|&d| is_sys_bin(d));
     if let Some(l) = local_idx {
-        if usr_idx.map_or(true, |u| l < u) {
+        if sys_idx.map_or(true, |s| l < s) {
             return raw.to_string();
         }
     }
@@ -257,7 +258,7 @@ pub fn prefer_local_bin_path(raw: &str) -> String {
         if dir == "/usr/local/bin" {
             continue;
         }
-        if !inserted && dir == "/usr/bin" {
+        if !inserted && is_sys_bin(dir) {
             out.push("/usr/local/bin");
             inserted = true;
         }
@@ -303,6 +304,18 @@ mod tests {
         assert_eq!(
             prefer_local_bin_path("/tmp/test-bin:/usr/local/bin:/usr/bin:/bin"),
             "/tmp/test-bin:/usr/local/bin:/usr/bin:/bin"
+        );
+        assert_eq!(
+            prefer_local_bin_path("/bin:/usr/bin"),
+            "/usr/local/bin:/bin:/usr/bin"
+        );
+        assert_eq!(
+            prefer_local_bin_path("/tmp/test-bin:/bin:/usr/bin"),
+            "/tmp/test-bin:/usr/local/bin:/bin:/usr/bin"
+        );
+        assert_eq!(
+            prefer_local_bin_path("/bin:/usr/local/bin:/usr/bin"),
+            "/usr/local/bin:/bin:/usr/bin"
         );
         assert_eq!(
             prefer_local_bin_path("/tmp/test-bin"),

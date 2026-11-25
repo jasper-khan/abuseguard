@@ -2,25 +2,25 @@
 # AbuseGuard 控制面板。运行： ag
 set -uo pipefail
 
-# Ensure /usr/local/bin precedes /usr/bin (or is appended when /usr/bin is
-# absent) without overriding earlier custom/test directories in PATH.
+# Ensure /usr/local/bin precedes /usr/bin and /bin (on usrmerge Debian/Ubuntu
+# /bin -> /usr/bin) without overriding earlier custom/test directories in PATH.
 ensure_local_bin_path() {
 	[ -n "${PATH:-}" ] || { PATH=/usr/local/bin; export PATH; return 0; }
-	local dir out="" inserted=0 seen_usr=0
+	local dir out="" inserted=0 seen_sys=0
 	local -a dirs=()
 	IFS=':' read -r -a dirs <<< "$PATH"
 	for dir in ${dirs[@]+"${dirs[@]}"}; do
 		[ -n "$dir" ] || continue
 		if [ "$dir" = /usr/local/bin ]; then
-			[ "$seen_usr" = 0 ] && return 0
-		elif [ "$dir" = /usr/bin ]; then
-			seen_usr=1
+			[ "$seen_sys" = 0 ] && return 0
+		elif [ "$dir" = /usr/bin ] || [ "$dir" = /bin ]; then
+			seen_sys=1
 		fi
 	done
 	for dir in ${dirs[@]+"${dirs[@]}"}; do
 		[ -n "$dir" ] || continue
 		[ "$dir" = /usr/local/bin ] && continue
-		if [ "$inserted" = 0 ] && [ "$dir" = /usr/bin ]; then
+		if [ "$inserted" = 0 ] && { [ "$dir" = /usr/bin ] || [ "$dir" = /bin ]; }; then
 			out="${out:+$out:}/usr/local/bin"
 			inserted=1
 		fi
@@ -1721,10 +1721,6 @@ show_fail2ban_logs() {
 	local target=""
 	target="$(fail2ban-client get logtarget 2>/dev/null | sed -n '/^[[:space:]]*`-/{ s/^[[:space:]]*`-[[:space:]]*//; s/[[:space:]]*$//; p; q; }')" || true
 	case "${target^^}" in
-		""|SYSTEMD-JOURNAL|STDOUT|SYSOUT|STDERR)
-			journalctl -u fail2ban -n 20 --no-pager 2>/dev/null ;;
-		SYSLOG|SYSLOG\[*)
-			journalctl -t fail2ban -n 20 --no-pager 2>/dev/null ;;
 		/*)
 			if [ -r "$target" ]; then
 				tail -n 20 -- "$target" 2>/dev/null

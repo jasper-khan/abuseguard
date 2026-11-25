@@ -174,9 +174,9 @@ pub fn apply_policy(conf_dir: &str) -> Result<(), String> {
     let allow_entries = non_empty_lines(&allow_data);
 
     // Preserve admin-managed native ignoreip per jail before the kernel change,
-    // reading the effective config through a temp mirror that omits the
+    // reading the effective config through a sibling temp mirror that omits the
     // generated policy file without touching /etc/fail2ban.
-    let merge = capture_native_ignoreip(&p.f2b_dir, &p.f2b_policy, &work, &allow_entries)?;
+    let merge = capture_native_ignoreip(&p.f2b_dir, &p.f2b_policy, &allow_entries)?;
 
     let intel_data = crate::intel::format_intel(&c).map_err(|e| {
         format!(
@@ -283,13 +283,14 @@ impl Drop for TempDirGuard<'_> {
     }
 }
 
-fn mkdtemp_policy(conf_dir: &str) -> Result<String, String> {
+fn mkdtemp_in(parent_dir: &str, prefix: &str) -> Result<String, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     for _ in 0..1000 {
         let cand = format!(
-            "{}/.policy.{}-{}",
-            conf_dir,
+            "{}/{}.{}-{}",
+            parent_dir,
+            prefix,
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         );
@@ -307,6 +308,10 @@ fn mkdtemp_policy(conf_dir: &str) -> Result<String, String> {
         }
     }
     Err("无法创建策略临时目录".to_string())
+}
+
+fn mkdtemp_policy(conf_dir: &str) -> Result<String, String> {
+    mkdtemp_in(conf_dir, ".policy")
 }
 
 // cmd_ok runs the command and returns whether it exited 0.
@@ -329,15 +334,13 @@ fn cmd_output(prog: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-// Build a read-only symlink mirror of the fail2ban config directory inside
-// `mirror`, omitting only AbuseGuard's generated policy file so `-d` sees
-// admin-managed ignoreip without mutating live /etc/fail2ban.
+// Build a read-only symlink mirror of the fail2ban config directory as a
+// sibling of `f2b_root` (same parent dir, e.g. `/etc/.abuseguard-f2b.*`),
+// omitting only AbuseGuard's generated policy file so `-d` preserves relative
+// `[INCLUDES]` paths like `before = ../native.local` without mutating live
+// `/etc/fail2ban`.
 #[cfg(unix)]
-fn build_f2b_mirror(
-    f2b_dir: &str,
-    f2b_policy: &str,
-    mirror: &std::path::Path,
-) -> Result<(), String> {
+fn build_f2b_mirror(f2b_dir: &str, f2b_policy: &str) -> Result<String, String> {
     use std::os::unix::fs::symlink;
     use std::path::Path;
 
@@ -351,59 +354,71 @@ fn build_f2b_mirror(
     let policy_name = Path::new(f2b_policy)
         .file_name()
         .ok_or_else(|| format!("无效的 fail2ban 策略路径：{}", f2b_policy))?;
-    let abs_root = std::fs::canonicalize(f2b_root).map_err(crate::util::io_err)?;
-    std::fs::create_dir_all(mirror).map_err(crate::util::io_err)?;
-
-    for entry in std::fs::read_dir(&abs_root).map_err(crate::util::io_err)? {
-        let entry = entry.map_err(crate::util::io_err)?;
-        let name = entry.file_name();
-        if name.as_os_str() == jail_d_name {
-            continue;
-        }
-        symlink(abs_root.join(&name), mirror.join(&name)).map_err(crate::util::io_err)?;
-    }
-
-    if jail_dir.is_dir() {
-        let abs_jail_dir = std::fs::canonicalize(jail_dir).map_err(crate::util::io_err)?;
-        let mirror_jail_d = mirror.join(jail_d_name);
-        std::fs::create_dir_all(&mirror_jail_d).map_err(crate::util::io_err)?;
-        for entry in std::fs::read_dir(&abs_jail_dir).map_err(crate::util::io_err)? {
+    let abs_root = if f2b_root.is_absolute() {
+        f2b_root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(crate::util::io_err)?
+            .join(f2b_root)
+    };
+    let root_parent = abs_root
+        .parent()
+        .ok_or_else(|| format!("无效的 fail2ban 配置目录：{}", f2b_dir))?;
+    let root_parent_str = root_parent.to_string_lossy();
+    let mirror_str = mkdtemp_in(&root_parent_str, ".abuseguard-f2b")?;
+    let populate = (|| -> Result<(), String> {
+        let mirror = Path::new(&mirror_str);
+        for entry in std::fs::read_dir(&abs_root).map_err(crate::util::io_err)? {
             let entry = entry.map_err(crate::util::io_err)?;
             let name = entry.file_name();
-            if name.as_os_str() == policy_name {
+            if name.as_os_str() == jail_d_name {
                 continue;
             }
-            symlink(abs_jail_dir.join(&name), mirror_jail_d.join(&name))
-                .map_err(crate::util::io_err)?;
+            symlink(abs_root.join(&name), mirror.join(&name)).map_err(crate::util::io_err)?;
         }
+
+        if jail_dir.is_dir() {
+            let abs_jail_dir = abs_root.join(jail_d_name);
+            let mirror_jail_d = mirror.join(jail_d_name);
+            std::fs::create_dir_all(&mirror_jail_d).map_err(crate::util::io_err)?;
+            for entry in std::fs::read_dir(&abs_jail_dir).map_err(crate::util::io_err)? {
+                let entry = entry.map_err(crate::util::io_err)?;
+                let name = entry.file_name();
+                if name.as_os_str() == policy_name {
+                    continue;
+                }
+                symlink(abs_jail_dir.join(&name), mirror_jail_d.join(&name))
+                    .map_err(crate::util::io_err)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = populate {
+        let _ = std::fs::remove_dir_all(&mirror_str);
+        return Err(e);
     }
-    Ok(())
+    Ok(mirror_str)
 }
 
 #[cfg(not(unix))]
-fn build_f2b_mirror(
-    _f2b_dir: &str,
-    _f2b_policy: &str,
-    _mirror: &std::path::Path,
-) -> Result<(), String> {
+fn build_f2b_mirror(_f2b_dir: &str, _f2b_policy: &str) -> Result<String, String> {
     Err("仅支持 Unix 平台".to_string())
 }
 
 // capture_native_ignoreip merges the whitelist with each jail's own effective
-// ignoreip by dumping a temporary mirror config dir that omits the generated
+// ignoreip by dumping a sibling mirror config dir that omits the generated
 // policy file, so live /etc/fail2ban is never modified while reading.
 fn capture_native_ignoreip(
     f2b_dir: &str,
     f2b_policy: &str,
-    work_dir: &str,
     allow: &[String],
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
-    let mirror = std::path::Path::new(work_dir).join("f2b-conf");
-    if let Err(e) = build_f2b_mirror(f2b_dir, f2b_policy, &mirror) {
-        return Err(format!("无法读取 fail2ban 当前配置；未更改任何策略：{}", e));
-    }
-    let mirror_str = mirror.to_string_lossy();
-    let dump = match cmd_output("fail2ban-client", &["-c", mirror_str.as_ref(), "-d"]) {
+    let mirror = match build_f2b_mirror(f2b_dir, f2b_policy) {
+        Ok(m) => m,
+        Err(e) => return Err(format!("无法读取 fail2ban 当前配置；未更改任何策略：{}", e)),
+    };
+    let _mirror_cleanup = TempDirGuard(&mirror);
+    let dump = match cmd_output("fail2ban-client", &["-c", &mirror, "-d"]) {
         Err(_) => return Err("无法读取 fail2ban 当前配置；未更改任何策略。".to_string()),
         Ok(d) if d.iter().all(|b| b.is_ascii_whitespace()) => {
             return Err("无法读取 fail2ban 当前配置；未更改任何策略。".to_string());
@@ -1010,8 +1025,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn f2b_mirror_excludes_generated_policy_without_touching_live_dir() {
+    fn f2b_mirror_excludes_generated_policy_and_preserves_relative_parent() {
         let dir = crate::testutil::TempDir::new("f2b-mirror");
+        std::fs::write(dir.join("native.local"), b"[sshd]\nignoreip = 192.0.2.77\n").unwrap();
         let f2b_root = dir.join("etc-fail2ban");
         let jail_d = f2b_root.join("jail.d");
         std::fs::create_dir_all(&jail_d).unwrap();
@@ -1020,18 +1036,21 @@ mod tests {
         let generated = jail_d.join("zzz-caddy-abuseguard-policy.local");
         std::fs::write(&generated, b"[sshd]\nignoreip = 192.0.2.1\n").unwrap();
 
-        let mirror = dir.join("work-mirror");
-        build_f2b_mirror(
-            jail_d.to_str().unwrap(),
-            generated.to_str().unwrap(),
-            &mirror,
-        )
-        .unwrap();
+        let mirror_str =
+            build_f2b_mirror(jail_d.to_str().unwrap(), generated.to_str().unwrap()).unwrap();
+        let _cleanup = TempDirGuard(&mirror_str);
+        let mirror = std::path::Path::new(&mirror_str);
 
         // Live generated policy file must never be removed or modified.
         assert_eq!(
             std::fs::read(&generated).unwrap(),
             b"[sshd]\nignoreip = 192.0.2.1\n"
+        );
+        // Sibling mirror keeps relative `../native.local` resolution identical to f2b_root.
+        assert_eq!(mirror.parent(), f2b_root.parent());
+        assert_eq!(
+            std::fs::read(mirror.join("../native.local")).unwrap(),
+            b"[sshd]\nignoreip = 192.0.2.77\n"
         );
         // Mirror exposes the rest of the config while omitting the generated file.
         assert_eq!(
