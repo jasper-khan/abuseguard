@@ -79,7 +79,6 @@ reset_env() {
 	ARCH=amd64
 	FAIL2BAN_RS_NEEDS_INSTALL=0
 	FAIL2BAN_RS_SWAPPED=0
-	FAIL2BAN_RS_HAD_PREV=0
 	FAIL2BAN_RS_HAD_DISTRO=0
 	FAIL2BAN_RS_TARGET_NAME=""
 	FAIL2BAN_RS_STAGE_DIR=""
@@ -252,7 +251,7 @@ rm -rf -- "$TMP/badroot-src"
 	restore_fail2ban_rs_install
 	[ ! -e "$F2B_BIN_DIR/fail2ban-server" ] || exit 2
 	[ ! -e "$F2B_RS_MARKER" ] || exit 3
-	grep -qx -- '--uninstall' "$TMP/inst.log" || exit 4
+	[ ! -e "$F2B_UNIT_DIR/fail2ban.socket" ] || exit 4
 	cleanup_fail2ban_rs_stage
 ) || fail "distro migration rollback did not uninstall new fail2ban-rs files"
 
@@ -266,7 +265,9 @@ rm -rf -- "$TMP/badroot-src"
 	rm -f -- "$POLICY_UNIT_DIR/fail2ban.service"
 
 	pkg_installed() { [ "$1" = fail2ban ]; }
+	stage_distro_fail2ban_pkg() { return 0; }
 	apt-get() {
+		if [ "$1" = -s ]; then printf 'Remv fail2ban [1.1.0]\n'; return 0; fi
 		printf 'apt-get %s\n' "$*" >> "$TMP/calls"
 		# Simulate older deb-systemd-helper masking fail2ban.service on remove
 		ln -s /dev/null "$POLICY_UNIT_DIR/fail2ban.service" 2>/dev/null || true
@@ -278,7 +279,7 @@ rm -rf -- "$TMP/badroot-src"
 
 	remove_distro_fail2ban_pkg
 	[ ! -L "$POLICY_UNIT_DIR/fail2ban.service" ] || exit 2
-	grep -qx 'apt-get remove -y -qq fail2ban' "$TMP/calls" || exit 3
+	grep -qx 'apt-get remove --no-auto-remove -y -qq fail2ban' "$TMP/calls" || exit 3
 	grep -qx 'systemctl daemon-reload' "$TMP/calls" || exit 4
 	grep -qx 'systemctl disable --now fail2ban.socket' "$TMP/calls" || exit 5
 	grep -qx 'systemctl reenable fail2ban.service' "$TMP/calls" || exit 6
@@ -286,6 +287,46 @@ rm -rf -- "$TMP/badroot-src"
 	grep -qx 'verify-daemon' "$TMP/calls" || exit 8
 	grep -qx 'verify running' "$TMP/calls" || exit 9
 ) || fail "remove_distro_fail2ban_pkg sequence failed"
+
+# A missing rollback package or reverse dependency must prevent removal.
+(
+	reset_env
+	pkg_installed() { return 0; }
+	for scenario in missing-deb reverse-dependency; do
+		apt-get() {
+			if [ "$1" = -s ]; then
+				echo "Remv fail2ban [1.1.0]"
+				[ "$scenario" != reverse-dependency ] || echo "Remv dependent [1.0]"
+			else
+				touch "$TMP/unexpected-remove"
+			fi
+		}
+		stage_distro_fail2ban_pkg() { [ "$scenario" != missing-deb ]; }
+		remove_distro_fail2ban_pkg
+		[ ! -e "$TMP/unexpected-remove" ] || exit 1
+	done
+) || fail "unable to safely roll back a package removal"
+
+# A socket-activated installation returns to socket-only operation after rollback.
+(
+	reset_env
+	systemctl() {
+		case "$*" in
+			"is-enabled fail2ban.socket") echo enabled ;;
+			"is-enabled fail2ban.service") echo disabled; return 1 ;;
+			"is-active --quiet fail2ban.socket") return 0 ;;
+			"is-active --quiet fail2ban.service") [ -f "$TMP/new-service-active" ] ;;
+			*) echo "$*" >> "$TMP/calls" ;;
+		esac
+	}
+	snapshot_fail2ban_units
+	touch "$TMP/new-service-active"
+	restore_fail2ban_units
+	grep -qx 'reenable fail2ban.socket' "$TMP/calls" || exit 1
+	grep -qx 'disable fail2ban.service' "$TMP/calls" || exit 2
+	grep -qx 'stop fail2ban.service' "$TMP/calls" || exit 3
+	if grep -Eq '^(re)?start fail2ban.service$' "$TMP/calls"; then exit 4; fi
+) || fail "socket-only startup state was not restored"
 
 # --- 6) Debian host without fail2ban.socket: stop only active service --------
 (
@@ -412,8 +453,9 @@ EOF
 	systemctl() {
 		case "$*" in
 			"show -p MainPID --value fail2ban.service") printf '%s\n' "$MOCK_PID" ;;
-			"show -p FragmentPath --value fail2ban.service") printf '%s\n' "$MOCK_FRAG" ;;
-			"show -p DropInPaths --value fail2ban.service") printf '%s\n' "$MOCK_DROPINS" ;;
+			"cat --no-pager fail2ban.service")
+				cat "$MOCK_FRAG" || return 1
+				[ -z "$MOCK_DROPINS" ] || cat "$MOCK_DROPINS" ;;
 			*) return 1 ;;
 		esac
 	}
@@ -472,10 +514,17 @@ EOF
 	STAGED_RELEASE_BIN=""
 	UNIT_ROLLBACK_DIR=""
 	F2B_ROLLBACK_DIR=""
+	ensure_fail2ban_logrotate
+	mkdir "$TMP/deb"
+	F2B_DEB="$TMP/deb/exact-version.deb"
+	touch "$F2B_DEB"
+	F2B_REMOVE_STARTED=1
+	dpkg() { [ "$*" = "--force-confold -i $F2B_DEB" ] && touch "$TMP/reinstalled"; }
 	on_install_exit
+	[ -f "$TMP/reinstalled" ] && [ ! -e "$F2B_LOGROTATE" ] || exit 5
 	[ ! -e "$F2B_BIN_DIR/fail2ban-server" ] || exit 2
 	[ ! -e "$F2B_RS_MARKER" ] || exit 3
-	grep -qx 'systemctl start fail2ban.service' "$TMP/calls" || exit 4
+	grep -Eq '^systemctl (re)?start fail2ban.service$' "$TMP/calls" || exit 4
 ) || fail "first-time install on_install_exit did not roll back fail2ban-rs"
 
 echo "fail2ban-rs tests: pass"

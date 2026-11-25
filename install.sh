@@ -482,7 +482,6 @@ F2B_LOGROTATE="${F2B_LOGROTATE:-/etc/logrotate.d/fail2ban}"
 F2B_PROC_ROOT="${F2B_PROC_ROOT:-/proc}"
 FAIL2BAN_RS_NEEDS_INSTALL=0
 FAIL2BAN_RS_SWAPPED=0
-FAIL2BAN_RS_HAD_PREV=0
 FAIL2BAN_RS_HAD_DISTRO=0
 FAIL2BAN_RS_TARGET_NAME=""
 FAIL2BAN_RS_STAGE_DIR=""
@@ -490,16 +489,54 @@ FAIL2BAN_RS_ARCHIVE=""
 FAIL2BAN_RS_INSTALLER=""
 FAIL2BAN_RS_STAGED_CLIENT=""
 FAIL2BAN_RS_ROLLBACK_DIR=""
+F2B_DEB=""
+F2B_REMOVE_STARTED=0
+F2B_LOGROTATE_CREATED=0
+F2B_UNITS_CHANGED=0
+declare -A F2B_UNIT_ENABLED F2B_UNIT_ACTIVE
+
+snapshot_fail2ban_units() {
+	local unit
+	for unit in fail2ban.socket fail2ban.service; do
+		F2B_UNIT_ENABLED[$unit]="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+		if systemctl is-active --quiet "$unit"; then F2B_UNIT_ACTIVE[$unit]=1; else F2B_UNIT_ACTIVE[$unit]=0; fi
+	done
+}
+
+restore_fail2ban_units() {
+	local unit state failed=0
+	for unit in fail2ban.socket fail2ban.service; do
+		state="${F2B_UNIT_ENABLED[$unit]}"
+		case "$state" in
+			enabled) systemctl reenable "$unit" || failed=1 ;;
+			enabled-runtime) systemctl disable "$unit" && systemctl enable --runtime "$unit" || failed=1 ;;
+			disabled) systemctl disable "$unit" || failed=1 ;;
+			masked|masked-runtime)
+				systemctl disable "$unit" 2>/dev/null || true
+				if [ "$state" = masked ]; then systemctl mask "$unit" || failed=1
+				else systemctl mask --runtime "$unit" || failed=1; fi ;;
+		esac
+		if [ "${F2B_UNIT_ACTIVE[$unit]}" = 1 ]; then
+			if [ "$unit" = fail2ban.service ] && systemctl is-active --quiet "$unit"; then
+				systemctl restart "$unit" || failed=1
+			else
+				systemctl start "$unit" || failed=1
+			fi
+		elif systemctl is-active --quiet "$unit"; then systemctl stop "$unit" || failed=1; fi
+	done
+	[ "$failed" = 0 ] || warn "警告：无法完整恢复 fail2ban 的 systemd 状态。"
+}
 
 fail2ban_rs_installed_matches() { # EXPECTED_NAME
 	local expected="$1" installed=""
-	[ -f "$F2B_RS_MARKER" ] || return 1
+	[ -f "$F2B_RS_MARKER" ] && [ ! -e "$F2B_RS_STATE_DIR/installing" ] || return 1
 	IFS= read -r installed < "$F2B_RS_MARKER" || return 1
 	[ "$installed" = "$expected" ] || return 1
 	[ -x "$F2B_BIN_DIR/fail2ban-server" ] \
 		&& [ -x "$F2B_BIN_DIR/fail2ban-client" ] \
 		&& [ -x "$F2B_BIN_DIR/fail2ban-regex" ] \
 		&& [ -f "$F2B_UNIT_DIR/fail2ban.service" ] \
+		&& [ -f "$F2B_UNIT_DIR/fail2ban.socket" ] \
 		&& [ -f "$F2B_ETC/fail2ban.conf" ] \
 		&& [ -f "$F2B_ETC/jail.conf" ]
 }
@@ -512,6 +549,7 @@ fail2ban_rs_managed_paths() {
 		"$F2B_UNIT_DIR/fail2ban.service" \
 		"$F2B_UNIT_DIR/fail2ban.socket" \
 		"$F2B_RS_STATE_DIR/installed" \
+		"$F2B_RS_STATE_DIR/installing" \
 		"$F2B_RS_STATE_DIR/apache-fakegooglebot.sha256" \
 		"$F2B_RS_STATE_DIR/python.zip" \
 		"$F2B_MAN_DIR/man1/fail2ban.1" \
@@ -640,28 +678,28 @@ stage_fail2ban_rs() {
 
 backup_fail2ban_rs_install() {
 	local path idx=0
-	FAIL2BAN_RS_HAD_PREV=0
-	if [ ! -f "$F2B_RS_MARKER" ] && [ ! -f "$F2B_RS_STATE_DIR/python.zip" ]; then
-		return 0
+	if [ ! -f "$F2B_RS_MARKER" ] && [ ! -f "$F2B_RS_STATE_DIR/installing" ] && [ ! -f "$F2B_RS_STATE_DIR/python.zip" ]; then
+		while IFS= read -r path; do
+			{ [ ! -e "$path" ] && [ ! -L "$path" ]; } || die "已有非受管文件 $path，无法安全接管。"
+		done < <(fail2ban_rs_managed_paths)
 	fi
-	FAIL2BAN_RS_HAD_PREV=1
 	FAIL2BAN_RS_ROLLBACK_DIR="$(mktemp -d)" || die "无法创建 fail2ban-rs 回滚目录。"
 	: > "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
 	while IFS= read -r path; do
 		idx=$((idx + 1))
-		if [ -e "$path" ]; then
+		if [ -e "$path" ] || [ -L "$path" ]; then
 			cp -a -- "$path" "$FAIL2BAN_RS_ROLLBACK_DIR/$idx" || die "无法备份 $path。"
 			printf 'present\t%s\t%s\n' "$idx" "$path" >> "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
 		else
 			printf 'absent\t%s\t%s\n' "$idx" "$path" >> "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
 		fi
-	done < <(fail2ban_rs_managed_paths)
+	done < <(fail2ban_rs_managed_paths; printf '%s\n' "$F2B_ETC/filter.d/ignorecommands/apache-fakegooglebot")
 }
 
 restore_fail2ban_rs_install() {
 	local state idx path failed=0
 	[ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] || return 0
-	if [ "${FAIL2BAN_RS_HAD_PREV:-0}" = 1 ] && [ -n "${FAIL2BAN_RS_ROLLBACK_DIR:-}" ] \
+	if [ -n "${FAIL2BAN_RS_ROLLBACK_DIR:-}" ] \
 		&& [ -f "$FAIL2BAN_RS_ROLLBACK_DIR/manifest" ]; then
 		systemctl stop fail2ban.socket >/dev/null 2>&1 || true
 		systemctl stop fail2ban.service >/dev/null 2>&1 || true
@@ -669,23 +707,14 @@ restore_fail2ban_rs_install() {
 			case "$state" in
 				present)
 					mkdir -p "$(dirname "$path")" 2>/dev/null || failed=1
-					cp -a -- "$FAIL2BAN_RS_ROLLBACK_DIR/$idx" "$path" || failed=1 ;;
-				absent) rm -f -- "$path" ;;
+					cp -aT --remove-destination -- "$FAIL2BAN_RS_ROLLBACK_DIR/$idx" "$path" || failed=1 ;;
+				absent) rm -f -- "$path" || failed=1 ;;
 			esac
 		done < "$FAIL2BAN_RS_ROLLBACK_DIR/manifest"
-		[ "$failed" = 0 ] || warn "警告：无法完整恢复旧版 fail2ban-rs，请手动检查 /usr/local。"
-		hash -r
-		systemctl daemon-reload >/dev/null 2>&1 || true
-	elif [ -n "${FAIL2BAN_RS_INSTALLER:-}" ] && [ -f "$FAIL2BAN_RS_INSTALLER" ]; then
-		systemctl stop fail2ban.socket >/dev/null 2>&1 || true
-		systemctl stop fail2ban.service >/dev/null 2>&1 || true
-		bash "$FAIL2BAN_RS_INSTALLER" --uninstall >/dev/null 2>&1 \
-			|| warn "警告：无法回滚新安装的 fail2ban-rs，请手动检查 /usr/local。"
-		# Also sweep managed paths in case the sub-installer exited before
-		# writing its installed marker (which --uninstall gates on).
-		while IFS= read -r path; do
-			rm -f -- "$path"
-		done < <(fail2ban_rs_managed_paths)
+		if [ "$failed" != 0 ]; then
+			warn "无法完整恢复旧版 fail2ban-rs，已保留备份 $FAIL2BAN_RS_ROLLBACK_DIR。"
+			FAIL2BAN_RS_ROLLBACK_DIR=""
+		fi
 		hash -r
 		systemctl daemon-reload >/dev/null 2>&1 || true
 	fi
@@ -701,6 +730,7 @@ unmask_fail2ban_service() {
 ensure_fail2ban_logrotate() {
 	[ ! -e "$F2B_LOGROTATE" ] && [ ! -L "$F2B_LOGROTATE" ] || return 0
 	install -d -m 0755 "$(dirname "$F2B_LOGROTATE")" || die "无法创建 logrotate 配置目录。"
+	F2B_LOGROTATE_CREATED=1
 	cat > "$F2B_LOGROTATE" <<EOF || die "无法写入 $F2B_LOGROTATE。"
 /var/log/fail2ban.log {
 	weekly
@@ -720,7 +750,7 @@ EOF
 }
 
 verify_fail2ban_rs_daemon() {
-	local expected="" pid="" exe="" frag="" dropins="" d=""
+	local expected="" pid="" exe="" unit_text=""
 	expected="$(readlink -f "$F2B_BIN_DIR/fail2ban-server" 2>/dev/null || printf '%s' "$F2B_BIN_DIR/fail2ban-server")"
 	pid="$(systemctl show -p MainPID --value fail2ban.service 2>/dev/null || true)"
 	[[ "$pid" =~ ^[1-9][0-9]*$ ]] \
@@ -729,24 +759,18 @@ verify_fail2ban_rs_daemon() {
 	if [ "$exe" != "$expected" ]; then
 		die "fail2ban.service 当前运行的不是 fail2ban-rs（MainPID=$pid -> ${exe:-未知}，期望 $expected）。请检查 systemctl cat fail2ban.service 中的自定义 unit 或 drop-in 覆盖；安装已中止并将回滚。"
 	fi
-	frag="$(systemctl show -p FragmentPath --value fail2ban.service 2>/dev/null || true)"
-	if [ -n "$frag" ] && [ "$frag" != "$F2B_UNIT_DIR/fail2ban.service" ] && [ -f "$frag" ]; then
-		if grep -Ev '^[[:space:]]*[#;]' "$frag" 2>/dev/null | grep -qE '/usr/bin/fail2ban-(server|client)'; then
-			die "fail2ban.service 使用了自定义 unit（$frag）且仍引用 /usr/bin/fail2ban-*；请先更新或移除自定义 unit 后重试。"
-		fi
+	unit_text="$(systemctl cat --no-pager fail2ban.service)" || die "无法读取 fail2ban.service 及其 drop-in。"
+	if awk '!/^[[:space:]]*[#;]/ && index($0, "/usr/bin/fail2ban-") { found=1 } END { exit !found }' <<< "$unit_text"; then
+		die "fail2ban.service 或其 drop-in 仍引用 /usr/bin/fail2ban-*；请更新覆盖配置后重试。"
 	fi
-	dropins="$(systemctl show -p DropInPaths --value fail2ban.service 2>/dev/null || true)"
-	for d in $dropins; do
-		if [ -f "$d" ] && grep -Ev '^[[:space:]]*[#;]' "$d" 2>/dev/null | grep -qE '/usr/bin/fail2ban-(server|client)'; then
-			die "fail2ban.service 的 drop-in（$d）仍引用 /usr/bin/fail2ban-*；请先更新或移除该 drop-in 后重试。"
-		fi
-	done
 }
 
 commit_fail2ban_rs() {
 	local sock_active=0 svc_active=0
 	[ "$FAIL2BAN_RS_NEEDS_INSTALL" = 1 ] && [ "$FAIL2BAN_RS_SWAPPED" = 0 ] || return 0
 	backup_fail2ban_rs_install
+	snapshot_fail2ban_units
+	F2B_UNITS_CHANGED=1
 	systemctl is-active --quiet fail2ban.socket 2>/dev/null && sock_active=1 || true
 	systemctl is-active --quiet fail2ban.service 2>/dev/null && svc_active=1 || true
 	if [ "$sock_active" = 1 ] || [ "$svc_active" = 1 ]; then
@@ -766,8 +790,7 @@ commit_fail2ban_rs() {
 				|| die "无法停止现有 fail2ban.service，安装已中止。"
 		fi
 	fi
-	# Mark before invoking the sub-installer: fail2ban-rs writes its version
-	# marker before copying binaries, so a partial write must still roll back.
+	# A release installer can fail after replacing only some of its files.
 	FAIL2BAN_RS_SWAPPED=1
 	log "正在安装 $FAIL2BAN_RS_TARGET_NAME ..."
 	bash "$FAIL2BAN_RS_INSTALLER" "$FAIL2BAN_RS_ARCHIVE" >/dev/null \
@@ -775,20 +798,67 @@ commit_fail2ban_rs() {
 	hash -r
 }
 
+stage_distro_fail2ban_pkg() {
+	local version arch dir file
+	version="$(dpkg-query -W -f='${Version}' fail2ban)" || return 1
+	arch="$(dpkg-query -W -f='${Architecture}' fail2ban)" || return 1
+	dir="$(mktemp -d)" || return 1
+	for file in /var/cache/apt/archives/fail2ban_*.deb; do
+		[ -f "$file" ] || continue
+		if [ "$(dpkg-deb -W --showformat='${Package} ${Version} ${Architecture}' "$file")" = "fail2ban $version $arch" ]; then
+			cp -- "$file" "$dir/previous.deb" && F2B_DEB="$dir/previous.deb" && return 0
+		fi
+	done
+	if (cd "$dir" && apt-get download "fail2ban=$version" >/dev/null); then
+		for file in "$dir"/fail2ban_*.deb; do
+			if [ -f "$file" ] && [ "$(dpkg-deb -W --showformat='${Package} ${Version} ${Architecture}' "$file")" = "fail2ban $version $arch" ]; then
+				F2B_DEB="$file"
+				return 0
+			fi
+		done
+	fi
+	for file in "$dir"/*.deb; do [ ! -f "$file" ] || rm -f -- "$file"; done
+	rmdir -- "$dir" 2>/dev/null || true
+	return 1
+}
+
+finish_distro_backup() {
+	[ -n "${F2B_DEB:-}" ] || return 0
+	if [ "$F2B_REMOVE_STARTED" = 1 ] && [ "$INSTALL_COMPLETE" != 1 ]; then
+		if ! dpkg --force-confold -i "$F2B_DEB"; then
+			warn "旧 fail2ban 软件包恢复失败，已保留回滚包 $F2B_DEB。"
+			return 0
+		fi
+		systemctl daemon-reload || warn "安装旧软件包后 systemd 重载失败。"
+	fi
+	rm -f -- "$F2B_DEB"
+	rmdir -- "$(dirname "$F2B_DEB")" 2>/dev/null || true
+	F2B_DEB=""
+}
+
 remove_distro_fail2ban_pkg() {
 	pkg_installed fail2ban || return 0
-	log "fail2ban-rs 已接管并运行正常，正在移除旧版发行版 fail2ban 软件包（保留 /etc/fail2ban 配置与 /var/lib/fail2ban 数据库）..."
-	if ! apt-get remove -y -qq fail2ban >/dev/null; then
-		warn "未能自动移除旧版 fail2ban 软件包；fail2ban-rs 已安装，稍后可手动执行：sudo apt-get remove -y fail2ban"
+	local plan
+	plan="$(LC_ALL=C apt-get -s --no-auto-remove remove fail2ban)" || die "无法预检 fail2ban 软件包移除计划。"
+	if ! awk '$1 == "Remv" && $2 == "fail2ban" { target=1 } $1 == "Remv" && $2 != "fail2ban" { other=1 } END { exit !(target && !other) }' <<< "$plan"; then
+		warn "软件包移除计划涉及其他包或未包含 fail2ban，保留发行版软件包。"
+		return 0
 	fi
+	if ! stage_distro_fail2ban_pkg; then
+		warn "无法取得已安装版本的 fail2ban 回滚包，保留发行版软件包。"
+		return 0
+	fi
+	log "正在移除旧版 fail2ban 软件包，保留配置和数据库。"
+	F2B_REMOVE_STARTED=1
+	apt-get remove --no-auto-remove -y -qq fail2ban >/dev/null || die "移除旧版 fail2ban 失败，正在回滚。"
 	unmask_fail2ban_service
 	hash -r
 	systemctl daemon-reload
 	systemctl disable --now fail2ban.socket >/dev/null 2>&1 || true
 	systemctl reenable fail2ban.service >/dev/null 2>&1 || systemctl enable fail2ban.service >/dev/null 2>&1 || true
 	systemctl restart fail2ban.service || die "移除旧版 fail2ban 软件包后，fail2ban-rs 未能重新启动（查看：journalctl -u fail2ban）"
-	verify_fail2ban_rs_daemon
 	verify_fail2ban_jails running
+	verify_fail2ban_rs_daemon
 }
 
 # Snapshot every fail2ban asset this installer overwrites, so a failure can
@@ -955,12 +1025,22 @@ on_install_exit() {
 		if declare -F cleanup_fail2ban_rs_rollback >/dev/null 2>&1; then cleanup_fail2ban_rs_rollback; fi
 		return 0
 	fi
+	if [ "${F2B_ENABLE_CHANGED:-0}" = 1 ]; then
+		# Remove newly enabled links while the unit file still exists.
+		systemctl disable fail2ban.service >/dev/null 2>&1 || true
+	fi
+	if [ "${F2B_LOGROTATE_CREATED:-0}" = 1 ]; then rm -f -- "$F2B_LOGROTATE"; fi
 	if [ "$ENGINE_SWAPPED" = 0 ]; then
 		if [ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ] && declare -F restore_fail2ban_rs_install >/dev/null 2>&1; then
 			restore_fail2ban_rs_install
 		fi
 		restore_f2b_assets
-		resume_fail2ban_after_failure
+		if [ "${F2B_UNITS_CHANGED:-0}" = 1 ]; then
+			finish_distro_backup
+			restore_fail2ban_units
+		else
+			resume_fail2ban_after_failure
+		fi
 		[ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 	elif [ -n "$ENGINE_BACKUP" ] \
@@ -988,15 +1068,13 @@ on_install_exit() {
 		# Restore the old config only after its engine is back, keeping the
 		# engine and its fail2ban config a compatible pair.
 		restore_f2b_assets
-		if [ "${FAIL2BAN_SOCKET_STOPPED:-0}" = 1 ]; then
-			systemctl start fail2ban.socket >/dev/null 2>&1 || true
-		fi
-		if systemctl restart fail2ban >/dev/null 2>&1; then
-			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，检测已恢复；修复问题后请重新运行安装器。"
+		if [ "${F2B_UNITS_CHANGED:-0}" = 1 ]; then
+			finish_distro_backup
+			restore_fail2ban_units
 		else
-			warn "安装未完成：已恢复旧引擎、旧策略单元与旧 fail2ban 配置，但 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
+			systemctl restart fail2ban || warn "旧配置已恢复，但 fail2ban 重启失败。"
 		fi
-	elif [ -z "$ENGINE_BACKUP" ] && [ "${FAIL2BAN_RS_SWAPPED:-0}" = 1 ]; then
+	elif [ -z "$ENGINE_BACKUP" ] && [ "${F2B_UNITS_CHANGED:-0}" = 1 ]; then
 		# First-time AbuseGuard install: no previous engine/panel to conflict
 		# with, so roll back fail2ban-rs and our fail2ban assets cleanly.
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
@@ -1004,21 +1082,13 @@ on_install_exit() {
 			restore_fail2ban_rs_install
 		fi
 		restore_f2b_assets
-		if [ "${FAIL2BAN_SOCKET_STOPPED:-0}" = 1 ]; then
-			systemctl start fail2ban.socket >/dev/null 2>&1 || true
-		fi
-		if [ "$FAIL2BAN_STOPPED" = 1 ]; then
-			if systemctl start fail2ban.service >/dev/null 2>&1; then
-				warn "安装未完成：已回滚 fail2ban-rs 与新增 fail2ban 配置，旧 fail2ban 已恢复运行；修复问题后请重新运行安装器。"
-			else
-				warn "安装未完成：已回滚 fail2ban-rs 与新增 fail2ban 配置，但旧 fail2ban 未能重新启动；请检查 journalctl -u fail2ban。"
-			fi
-		else
-			warn "安装未完成：已回滚 fail2ban-rs 与新增 fail2ban 配置；修复问题后请重新运行安装器。"
-		fi
+		finish_distro_backup
+		restore_fail2ban_units
+		warn "安装未完成：已尝试恢复 fail2ban 软件包、配置与 systemd 状态。"
 	else
 		# No previous engine, or the old panel/engine could not be restored.
 		# Keep the new engine rather than pair a new panel with the old one.
+		if [ -n "${F2B_DEB:-}" ]; then finish_distro_backup; fi
 		[ -z "$ENGINE_BACKUP" ] || warn "警告：旧引擎备份仍保留在 $ENGINE_BACKUP。"
 		[ -z "${UNIT_ROLLBACK_DIR:-}" ] || rm -rf -- "$UNIT_ROLLBACK_DIR"
 		if systemctl restart fail2ban >/dev/null 2>&1; then
@@ -2013,8 +2083,10 @@ fi
 if [ "$FAIL2BAN_RS_NEEDS_INSTALL" = 1 ] && [ "$FAIL2BAN_RS_SWAPPED" = 0 ]; then
 	commit_fail2ban_rs
 else
+	if [ "$F2B_UNITS_CHANGED" = 0 ]; then snapshot_fail2ban_units; fi
 	pause_fail2ban_for_upgrade
 fi
+F2B_UNITS_CHANGED=1
 commit_engine
 commit_panel
 # The new policy and sync units run `policy-apply`, which only the new engine
@@ -2061,21 +2133,24 @@ else
 	# an autostart policy behind.
 	systemctl enable nginx >/dev/null 2>&1 || warn "警告：无法让 nginx 开机自启。"
 fi
+F2B_ENABLE_CHANGED=1
 unmask_fail2ban_service
 ensure_fail2ban_logrotate
 systemctl disable --now fail2ban.socket >/dev/null 2>&1 || true
 systemctl reenable fail2ban.service >/dev/null 2>&1 || systemctl enable fail2ban.service >/dev/null 2>&1 || true
 # A reload does not attach newly installed actions to already-running jails.
 systemctl restart fail2ban.service || die "fail2ban 未能正常启动（查看：journalctl -u fail2ban）"
-verify_fail2ban_rs_daemon
 verify_fail2ban_jails running
+verify_fail2ban_rs_daemon
 # Re-run against the live daemon: writes/validates ignoreip, reloads if it
 # changed, and clears bans that a newly allowlisted source still carries.
 "$ENGINE_BIN" policy-apply || die "fail2ban 就绪后应用策略失败，安装未完成。"
+remove_distro_fail2ban_pkg
 # Only now is the cutover usable; before this point a failure restores the old
 # engine+config. Reclaim the rollback copy without waiting for the EXIT trap
 # (the interactive path execs the panel, which skips EXIT traps).
 INSTALL_COMPLETE=1
+finish_distro_backup
 discard_panel_stage
 [ -z "$ENGINE_BACKUP" ] || rm -f -- "$ENGINE_BACKUP"
 ENGINE_BACKUP=""
@@ -2085,7 +2160,6 @@ UNIT_ROLLBACK_DIR=""
 F2B_ROLLBACK_DIR=""
 cleanup_fail2ban_rs_stage
 cleanup_fail2ban_rs_rollback
-remove_distro_fail2ban_pkg
 systemctl enable --now caddy-abuseguard-report.timer caddy-abuseguard-sync.timer >/dev/null 2>&1 || true
 
 log "AbuseGuard 安装完成。"
