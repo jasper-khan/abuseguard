@@ -602,7 +602,23 @@ fi
 
 # --- 4) reload/validate ------------------------------------------------------
 run "systemctl daemon-reload"
-run "systemctl reload fail2ban >/dev/null 2>&1 || true"
+if [ "$DRY" = 1 ]; then
+	echo "  would: 校验 /etc/fail2ban 配置并重启重载 fail2ban（使残留 jail 恢复原有动作）"
+elif systemctl is-active --quiet fail2ban.service 2>/dev/null; then
+	f2b_cli="$(PATH="/usr/local/bin:$PATH" command -v fail2ban-client 2>/dev/null || true)"
+	if [ -n "$f2b_cli" ] && "$f2b_cli" -t >/dev/null 2>&1; then
+		# A plain reload stops removed AbuseGuard actions without attaching a
+		# differently named default action (e.g. sshd returning to nftables).
+		if "$f2b_cli" reload --restart >/dev/null 2>&1 \
+			|| systemctl restart fail2ban.service >/dev/null 2>&1; then
+			log "已重载 fail2ban（残留 jail 已恢复原有动作）。"
+		else
+			warn "fail2ban 重载/重启失败，请手动检查：sudo fail2ban-client -t && sudo systemctl restart fail2ban"
+		fi
+	else
+		warn "清理后 /etc/fail2ban 配置校验未通过，未重载 fail2ban；请手动检查：sudo fail2ban-client -t"
+	fi
+fi
 if [ "$PROXY_MODE" = caddy ] && [ "$DRY" != 1 ] && [ -x "$CADDY_BIN" ] && [ -f "$CADDYFILE" ]; then
 	if validate_caddyfile "$CADDYFILE" >/dev/null 2>&1; then
 		systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true

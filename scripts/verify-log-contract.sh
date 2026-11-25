@@ -30,7 +30,7 @@ DATEPATTERN='"ts":{EPOCH}'
 ok()   { printf '\033[1;32m[contract]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[contract]\033[0m %s\n' "$*" >&2; exit 1; }
 
-command -v fail2ban-regex >/dev/null || fail "fail2ban-regex not found (apt-get install fail2ban)"
+command -v fail2ban-regex >/dev/null || fail "fail2ban-regex not found (run: sudo bash ./scripts/install-fail2ban-rs.sh)"
 [ -f "$SNIPPET" ] || fail "snippet not found: $SNIPPET"
 [ -x "$CADDY" ]   || fail "caddy binary not executable: $CADDY"
 

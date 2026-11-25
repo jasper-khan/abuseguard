@@ -137,8 +137,8 @@ jobs:
       # keeps an incompatible Caddy from silently disabling every jail. On
       # failure the job stops here, before any upload, so releases/latest keeps
       # the last known-good binary.
-      - name: Install fail2ban (for fail2ban-regex)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq fail2ban
+      - name: Install fail2ban-rs (for fail2ban-regex)
+        run: sudo bash ./scripts/install-fail2ban-rs.sh
 
       - name: Verify log <-> filter contract (built Caddy, amd64)
         run: |
