@@ -196,7 +196,7 @@ fail2ban-client unban "$BAD" >/dev/null
 echo 'PASS: SSH authentication failures trigger the global ban'
 
 # The disposable test feed is tiny; lower the configured bounds so the intel
-# validators accept it (production keeps the 90k-120k bounds).
+# validators accept it (production keeps the 90k-250k bounds).
 jq '.intel.min_entries = 1 | .intel.max_entries = 1000' /etc/caddy-abuseguard/config.json > "$WORK/config.json" \
 	|| fail 'could not lower intel bounds'
 install -m 0640 -o root -g abuseguard "$WORK/config.json" /etc/caddy-abuseguard/config.json

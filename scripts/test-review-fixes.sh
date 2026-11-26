@@ -55,6 +55,7 @@ cleanup() {
 	rm -f -- "$WHITELIST_EXPECTED"
 	rm -f -- "$CONF_TEST/whitelist"
 	rm -f -- "$CONF_TEST/web-server"
+	rm -f -- "$CONF_TEST/config.json"
 	rm -f -- "$NGINX_RUNTIME_TEST"
 	rm -f -- "$NGINX_TOKEN_CAPTURE"
 	rm -f -- "$NGINX_ADD_CAPTURE"
@@ -88,6 +89,7 @@ extract_function commit_staged_binary "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function install_release_binary "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function latest_release_tag "$ROOT/install.sh" >> "$FUNCTIONS"
 extract_function release_asset "$ROOT/install.sh" >> "$FUNCTIONS"
+extract_function migrate_default_intel_max_entries "$ROOT/install.sh" >> "$FUNCTIONS"
 # shellcheck disable=SC1090
 source "$FUNCTIONS"
 log() { :; }
@@ -556,5 +558,28 @@ fi
 
 rm -f -- "$WEB_SERVER_FILE"
 if proxy_mode >/dev/null 2>&1; then fail "missing backend record was accepted"; fi
+
+# Default intel.max_entries (120000 on default feed) migrates to template value; custom bounds/feeds stay intact.
+if command -v jq >/dev/null 2>&1; then
+	mkdir -p "$CONF_TEST"
+	jq '.intel.max_entries = 120000 | .abuseipdb.report_key_file = "/etc/caddy-abuseguard/custom.key"' \
+		"$ROOT/assets/config/config.json.template" > "$CONF_TEST/config.json"
+	migrate_default_intel_max_entries "$CONF_TEST/config.json" "$ROOT/assets/config/config.json.template"
+	[ "$(jq -r '.intel.max_entries' "$CONF_TEST/config.json")" = "250000" ] \
+		|| fail "default intel.max_entries=120000 was not migrated to 250000"
+	[ "$(jq -r '.abuseipdb.report_key_file' "$CONF_TEST/config.json")" = "/etc/caddy-abuseguard/custom.key" ] \
+		|| fail "intel.max_entries migration altered unrelated config fields"
+
+	jq '.intel.max_entries = 180000' "$ROOT/assets/config/config.json.template" > "$CONF_TEST/config.json"
+	migrate_default_intel_max_entries "$CONF_TEST/config.json" "$ROOT/assets/config/config.json.template"
+	[ "$(jq -r '.intel.max_entries' "$CONF_TEST/config.json")" = "180000" ] \
+		|| fail "custom intel.max_entries was overwritten"
+
+	jq '.intel.source_url = "https://example.invalid/custom.ipv4" | .intel.max_entries = 120000' \
+		"$ROOT/assets/config/config.json.template" > "$CONF_TEST/config.json"
+	migrate_default_intel_max_entries "$CONF_TEST/config.json" "$ROOT/assets/config/config.json.template"
+	[ "$(jq -r '.intel.max_entries' "$CONF_TEST/config.json")" = "120000" ] \
+		|| fail "custom intel.source_url had its max_entries overwritten"
+fi
 
 echo "review fix tests: pass"

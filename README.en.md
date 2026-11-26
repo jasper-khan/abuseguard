@@ -182,7 +182,7 @@ Newly generated Caddy configurations enable only HTTP/1.1 and HTTP/2; Nginx site
 
 ## Threat intel
 
-Threat intel is enforced as a kernel set, not as a "one hit then 90-day ban" jail. Every 6h (and on demand from the panel) the engine pulls a public AbuseIPDB-derived blocklist: it keeps IPv4 only, refuses a list that is implausibly small (<90k) or large (>120k), and writes `intel.txt` atomically once validation passes. Any download or parse failure keeps the previous list.
+Threat intel is enforced as a kernel set, not as a "one hit then 90-day ban" jail. Every 6h (and on demand from the panel) the engine pulls a public AbuseIPDB-derived blocklist: it keeps IPv4 only, refuses a list that is implausibly small (<90k) or large (>250k), and writes `intel.txt` atomically once validation passes. Any download or parse failure keeps the previous list.
 
 The root-only `caddy-abuseguard policy-apply` (run by `caddy-abuseguard-policy.service` at boot and by `caddy-abuseguard-sync.service` after each sync) then validates the whitelist and feed in-process, rebuilds the set in one nft transaction, and only then writes a root-owned boot snapshot. An empty set is allowed only when no policy was ever established; a missing, corrupt, undersized, oversized, or failed apply keeps the last effective kernel policy and snapshot instead of replacing it with an empty or partial list.
 

@@ -1604,11 +1604,35 @@ stage_engine
 log "引擎：$PROBED_BINARY_VERSION_OUTPUT"
 
 # --- config, whitelist, key (only if absent) ---------------------------------
+migrate_default_intel_max_entries() {
+	local cfg="$1" tmpl="$2" tmpl_url tmpl_max cur_url cur_max tmp
+	[ -f "$cfg" ] && [ -f "$tmpl" ] || return 0
+	command -v jq >/dev/null 2>&1 || return 0
+	tmpl_url="$(jq -r '.intel.source_url // empty' "$tmpl" 2>/dev/null)" || return 0
+	tmpl_max="$(jq -r '.intel.max_entries // empty' "$tmpl" 2>/dev/null)" || return 0
+	cur_url="$(jq -r '.intel.source_url // empty' "$cfg" 2>/dev/null)" || return 0
+	cur_max="$(jq -r '.intel.max_entries // empty' "$cfg" 2>/dev/null)" || return 0
+	if [ -n "$tmpl_url" ] && [ "$cur_url" = "$tmpl_url" ] && [ "$cur_max" = "120000" ] \
+		&& [ -n "$tmpl_max" ] && [ "$tmpl_max" != "120000" ]; then
+		tmp="$(mktemp "$cfg.tmp.XXXXXX")" || return 1
+		if ! jq --argjson m "$tmpl_max" '.intel.max_entries = $m' "$cfg" > "$tmp"; then
+			rm -f -- "$tmp"
+			return 1
+		fi
+		chmod 0640 "$tmp"
+		if [ "$(id -u)" = 0 ]; then
+			chown root:abuseguard "$tmp"
+		fi
+		mv -f -- "$tmp" "$cfg"
+		log "已将默认情报库上限 intel.max_entries 从 120000 升级为 $tmpl_max"
+	fi
+}
 if [ ! -f "$CONF_DIR/config.json" ]; then
 	install -m 0640 -o root -g abuseguard "$SRC_DIR/assets/config/config.json.template" "$CONF_DIR/config.json"
 	log "已写入 $CONF_DIR/config.json"
 else
 	log "保留已有的 $CONF_DIR/config.json"
+	migrate_default_intel_max_entries "$CONF_DIR/config.json" "$SRC_DIR/assets/config/config.json.template"
 fi
 if [ ! -f "$CONF_DIR/whitelist" ]; then
 	install -m 0640 -o root -g abuseguard "$SRC_DIR/assets/whitelist.default" "$CONF_DIR/whitelist"
