@@ -637,7 +637,7 @@ echo "[abuseguard] enqueue: disabled" >&2
 exit 0
 EOF
 	chmod 0755 "$mock_bin/logger" "$mock_bin/stub-fail" "$mock_bin/stub-ok"
-	prefix="/usr/sbin/runuser -u abuseguard -- /usr/local/libexec/caddy-abuseguard enqueue --ip <ip> --profile <profile> --failures <failures> --window <window> --transport <transport> --port <target_port>"
+	prefix="/usr/bin/setpriv --reuid=abuseguard --regid=abuseguard --init-groups -- /usr/local/libexec/caddy-abuseguard enqueue --ip <ip> --profile <profile> --failures <failures> --window <window> --transport <transport> --port <target_port>"
 	case "$act_line" in *"$prefix"*) ;; *) exit 6 ;; esac
 	cmd_fail="${act_line/"$prefix"/"$mock_bin/stub-fail"}"
 	PATH="$mock_bin:$PATH" sh -c "$cmd_fail" || exit 2
