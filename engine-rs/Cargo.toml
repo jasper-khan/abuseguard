@@ -17,6 +17,9 @@ ureq = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 sha2 = "0.10"
 hex = "0.4"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
+unicode-width = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "0.38", features = ["fs", "process"] }

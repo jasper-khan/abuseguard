@@ -18,6 +18,7 @@ mod ssh_admin;
 mod status;
 #[cfg(test)]
 mod testutil;
+mod tui;
 mod util;
 
 use report::now_utc;
@@ -55,6 +56,7 @@ fn main() {
         "install-inventory" => install_inventory::run(&rest),
         "ssh-admin" => ssh_admin::run(&rest),
         "status" => status::run(&rest, VERSION),
+        "tui" => tui::run(&rest, VERSION),
         "firewall-render" => config_render::run_firewall_render(&rest),
         "nginx-render" => nginx_render::run(&rest),
         "caddy-render" => caddy_render::run(&rest),
@@ -67,7 +69,7 @@ fn main() {
 }
 
 fn usage() {
-    logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | policy-apply (root, Linux) | status --json | firewall-render | nginx-render | caddy-render | migrate-caddy-sites | config-transaction | install-inventory | ssh-admin | version");
+    logf("subcommands: enqueue | report send-auto | sync-intel | allowlist-validate (--entry <IP/CIDR> | --file <path>) | allowlist-check --ip <IP> | policy-apply (root, Linux) | status --json | tui [--panel <path>] | firewall-render | nginx-render | caddy-render | migrate-caddy-sites | config-transaction | install-inventory | ssh-admin | version");
 }
 
 fn must_config() -> config::Config {

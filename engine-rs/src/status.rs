@@ -15,47 +15,80 @@ const METADATA_LIMIT: usize = 64 * 1024;
 const FEED_LIMIT: u64 = 8 * 1024 * 1024;
 const JAILS: [&str; 4] = ["caddy-rate-local", "caddy-probe-h1", "caddy-probe-h2", "sshd"];
 
-#[derive(Serialize)]
-struct Snapshot<'a> {
-    schema_version: u8,
-    version: &'a str,
-    backend: Option<&'static str>,
-    services: Services,
-    timers: Timers,
-    firewall_table_present: Option<bool>,
-    intel_table_present: Option<bool>,
-    jails: BTreeMap<&'static str, Option<u64>>,
-    banned_total: Option<u64>,
-    reporting_enabled: Option<bool>,
-    report_key_present: Option<bool>,
-    intel: Intel,
+#[derive(Serialize, Debug, Clone)]
+pub struct Snapshot<'a> {
+    pub schema_version: u8,
+    pub version: &'a str,
+    pub backend: Option<&'static str>,
+    pub services: Services,
+    pub timers: Timers,
+    pub firewall_table_present: Option<bool>,
+    pub intel_table_present: Option<bool>,
+    pub jails: BTreeMap<&'static str, Option<u64>>,
+    pub banned_total: Option<u64>,
+    pub reporting_enabled: Option<bool>,
+    pub report_key_present: Option<bool>,
+    pub intel: Intel,
 }
 
-#[derive(Serialize)]
-struct Services {
-    proxy: Option<&'static str>,
-    fail2ban: Option<&'static str>,
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct Services {
+    pub proxy: Option<&'static str>,
+    pub fail2ban: Option<&'static str>,
 }
 
-#[derive(Serialize, Default)]
-struct Unit {
-    state: Option<&'static str>,
-    next: Option<String>,
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct Unit {
+    pub state: Option<&'static str>,
+    pub next: Option<String>,
 }
 
-#[derive(Serialize)]
-struct Timers {
-    report: Unit,
-    sync: Unit,
-    certbot: Unit,
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct Timers {
+    pub report: Unit,
+    pub sync: Unit,
+    pub certbot: Unit,
 }
 
-#[derive(Serialize)]
-struct Intel {
-    local_entries: Option<u64>,
-    synced_age_hours: Option<u64>,
-    applied_entries: Option<u64>,
-    applied_age_hours: Option<u64>,
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct Intel {
+    pub local_entries: Option<u64>,
+    pub synced_age_hours: Option<u64>,
+    pub applied_entries: Option<u64>,
+    pub applied_age_hours: Option<u64>,
+}
+
+impl<'a> Snapshot<'a> {
+    pub fn empty(version: &'a str) -> Self {
+        let mut jails = BTreeMap::new();
+        for j in JAILS {
+            jails.insert(j, None);
+        }
+        Self {
+            schema_version: 1,
+            version,
+            backend: None,
+            services: Services::default(),
+            timers: Timers::default(),
+            firewall_table_present: None,
+            intel_table_present: None,
+            jails,
+            banned_total: None,
+            reporting_enabled: None,
+            report_key_present: None,
+            intel: Intel::default(),
+        }
+    }
+}
+
+pub fn collect_live<'a>(version: &'a str) -> Snapshot<'a> {
+    let config_path = crate::config::config_path();
+    collect(
+        Path::new(&config_path),
+        version,
+        OffsetDateTime::now_utc(),
+        &run_probe,
+    )
 }
 
 pub fn run(args: &[String], version: &str) {

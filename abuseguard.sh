@@ -50,6 +50,7 @@ INTEL="$STATE_DIR/intel.txt"
 JAILS="caddy-rate-local caddy-probe-h1 caddy-probe-h2 sshd"
 PANEL_REFRESH_SECONDS=1800
 FIREWALL_FILE="$CONF_DIR/firewall.nft"
+PORT_NOTES_FILE="$CONF_DIR/port-notes.tsv"
 FIREWALL_SERVICE=caddy-abuseguard-firewall.service
 POLICY_APPLIED="$CONF_DIR/intel-applied.json"
 INTEL_TABLE=caddy_abuseguard_intel
@@ -617,6 +618,30 @@ firewall_ports() {
 	' "$FIREWALL_FILE"
 }
 
+firewall_note_clean() {
+	printf '%s' "${1:-}" | tr '\r\n\t' '   ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\{2,\}/ /g'
+}
+
+firewall_port_note_save() {
+	local proto="$1" port="$2" source="${3:-any}" note tmp
+	note="$(firewall_note_clean "${4:-}")"
+	[ -d "$CONF_DIR" ] || return 0
+	tmp="$(mktemp "$CONF_DIR/.port-notes.XXXXXX")" || return 1
+	if [ -r "$PORT_NOTES_FILE" ]; then
+		awk -F'\t' -v p="$proto" -v po="$port" -v s="$source" '
+			NF >= 4 && !($1 == p && $2 == po && $3 == s) { print }
+		' "$PORT_NOTES_FILE" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+	fi
+	if [ -n "$note" ]; then
+		printf '%s\t%s\t%s\t%s\n' "$proto" "$port" "$source" "$note" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
+	fi
+	if [ ! -s "$tmp" ]; then
+		rm -f -- "$tmp" "$PORT_NOTES_FILE"
+		return 0
+	fi
+	chmod 0644 "$tmp" && mv -f -- "$tmp" "$PORT_NOTES_FILE" || { rm -f -- "$tmp"; return 1; }
+}
+
 # 该端口是否已有任意来源的规则。
 firewall_has_port() {
 	printf '%s\n' "$1" | grep -qE "^tcp[[:space:]]+$2([[:space:]]|$)"
@@ -799,6 +824,9 @@ firewall_change_port() {
 	if ! firewall_save "$ports"; then
 		[ -z "$ssh_retire_backup" ] || ssh_restore_file "$ssh_retire_file" "$ssh_retire_backup"
 		return 1
+	fi
+	if [ "$action" = close ] && [ -f "$PORT_NOTES_FILE" ]; then
+		firewall_port_note_save "$proto" "$port" "$source" "" || true
 	fi
 	if [ -n "$ssh_retire_backup" ] && ! rm -f -- "$ssh_retire_backup"; then
 		echo "规则已生效，但无法删除 SSH 配置备份：$ssh_retire_backup" >&2
@@ -1867,6 +1895,542 @@ menu() {
 	esac
 }
 
+# ---- Rust TUI 数据与操作桥接（复用本脚本全部校验与事务逻辑） ----
+tui_json_lines() {
+	jq -R . | jq -s .
+}
+
+tui_data() {
+	local scope="${1:-panel}"
+	case "$scope" in
+		panel)
+			local mode="" backend_err="" cf_set=null
+			local sites_json='[]' certs_json='[]' ports_json='[]' conflicts_json='[]'
+			local banned_json='[]' wl_json='[]' ssh_ports_json='[]' ssh_keys_json='[]'
+			local nft_ok=false fw_run=false boot_ok=false ipv4_ok=false ipv6_ok=false
+			local intel_run=false intel_n=""
+			local ssh_pw=unknown ssh_pk=unknown ssh_kbd=unknown root_pw=false root_key=false conn_fam=""
+			local rep_on=false key_set=false
+			local line d u j ips warn
+
+			if ! mode="$(proxy_mode)"; then
+				mode=""
+				backend_err="后端选择记录异常：$WEB_SERVER_FILE"
+			elif [ "$mode" = nginx ] && ! nginx_runtime_load >/dev/null 2>&1; then
+				backend_err="Nginx 辅助脚本不可用：$NGINX_RUNTIME"
+			fi
+
+			if [ -z "$backend_err" ]; then
+				if cf_is_set; then cf_set=true; else cf_set=false; fi
+				sites_json="$(sites_lines 2>/dev/null | jq -R -s '
+					split("\n") | map(select(length > 0) | split("\t") | {domain: .[0], upstream: (.[1] // "?")})
+				')" || sites_json='[]'
+				if [ "$mode" = nginx ]; then
+					certs_json="$(nginx_certificate_status 2>/dev/null | jq -R -s '
+						split("\n") | map(select(length > 0) | split("\t") |
+							if length >= 3 then {domain: .[0], expiry: .[1], status: .[2]}
+							else {domain: "", expiry: .[0], status: "unknown"} end)
+					')" || certs_json='[]'
+				fi
+			fi
+
+			if nft -t list ruleset >/dev/null 2>&1; then nft_ok=true; fi
+			if firewall_running; then fw_run=true; fi
+			if systemctl is-enabled --quiet "$FIREWALL_SERVICE" 2>/dev/null; then boot_ok=true; fi
+			firewall_policy_load
+			[ "$fw_ipv4_in" = 1 ] && ipv4_ok=true
+			[ "$fw_ipv6_in" = 1 ] && ipv6_ok=true
+			if intel_table_present; then
+				intel_run=true
+				intel_n="$(intel_applied_count)"
+			fi
+			local notes_arg=""
+			[ -r "$PORT_NOTES_FILE" ] && notes_arg="$PORT_NOTES_FILE"
+			ports_json="$(firewall_ports 2>/dev/null | awk -v nf="$notes_arg" '
+				BEGIN {
+					if (nf != "") {
+						while ((getline line < nf) > 0) {
+							n = split(line, a, "\t");
+							if (n >= 4) notes[a[1] " " a[2] " " a[3]] = a[4];
+						}
+						close(nf);
+					}
+				}
+				NF >= 2 {
+					src = (NF >= 3 && $3 != "") ? $3 : "any";
+					key = $1 " " $2 " " src;
+					printf "%s\t%s\t%s\t%s\n", $1, $2, src, (key in notes ? notes[key] : "");
+				}
+			' | jq -R -s '
+				split("\n") | map(select(length > 0) | split("\t") | {proto: .[0], port: .[1], source: (.[2] // "any"), note: (.[3] // "")})
+			')" || ports_json='[]'
+			warn="$(firewall_check_conflicts 2>&1)" || true
+			if [ -n "$warn" ]; then
+				conflicts_json="$(printf '%s\n' "$warn" | tui_json_lines)" || conflicts_json='[]'
+			fi
+
+			banned_json="$(
+				for j in $JAILS; do
+					ips="$(fail2ban-client status "$j" 2>/dev/null | sed -n '/Banned IP list/s/.*:[[:space:]]*//p' | tr ' ' '\n' | sed '/^$/d')"
+					if [ -n "$ips" ]; then
+						while IFS= read -r line; do
+							[ -n "$line" ] && printf '%s\t%s\n' "$j" "$line"
+						done <<< "$ips"
+					fi
+				done | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {jail: .[0], ip: .[1]})'
+			)" || banned_json='[]'
+
+			if [ -r "$WHITELIST" ]; then
+				wl_json="$(
+					while IFS= read -r line; do
+						line="${line%%#*}"; line="$(printf '%s' "$line" | tr -d '[:space:]')"
+						[ -n "$line" ] && printf '%s\n' "$line"
+					done < "$WHITELIST" | tui_json_lines
+				)" || wl_json='[]'
+			fi
+
+			ssh_ports_json="$(ssh_current_ports 2>/dev/null | sed '/^$/d' | tui_json_lines)" || ssh_ports_json='[]'
+			ssh_pw="$(ssh_auth_state passwordauthentication)"
+			ssh_pk="$(ssh_auth_state pubkeyauthentication)"
+			ssh_kbd="$(ssh_auth_state kbdinteractiveauthentication)"
+			root_password_login_ready && root_pw=true
+			root_key_login_ready && root_key=true
+			if [ -n "${SSH_CONNECTION:-}" ]; then
+				set -- $SSH_CONNECTION
+				case "${3:-}" in *:*) conn_fam=IPv6 ;; ?*) conn_fam=IPv4 ;; esac
+			fi
+			if [ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ]; then
+				ssh_keys_json="$(grep . "$SSH_AUTH_KEYS" 2>/dev/null | jq -R -s '
+					split("\n") | map(select(length > 0)) | to_entries | map({index: (.key + 1), raw: .value})
+				')" || ssh_keys_json='[]'
+			fi
+
+			[ "$(reporting_state)" = on ] && rep_on=true
+			[ -s "$KEYFILE" ] && key_set=true
+
+			jq -n \
+				--arg backend "$mode" \
+				--arg backend_error "$backend_err" \
+				--argjson cf_token_set "$cf_set" \
+				--argjson sites "$sites_json" \
+				--argjson certs "$certs_json" \
+				--argjson nft_available "$nft_ok" \
+				--argjson fw_running "$fw_run" \
+				--argjson boot_enabled "$boot_ok" \
+				--argjson ipv4_in "$ipv4_ok" \
+				--argjson ipv6_in "$ipv6_ok" \
+				--argjson intel_running "$intel_run" \
+				--arg intel_entries "$intel_n" \
+				--argjson ports "$ports_json" \
+				--argjson conflicts "$conflicts_json" \
+				--argjson banned "$banned_json" \
+				--argjson whitelist "$wl_json" \
+				--argjson ssh_ports "$ssh_ports_json" \
+				--arg ssh_pw "$ssh_pw" \
+				--arg ssh_pk "$ssh_pk" \
+				--arg ssh_kbd "$ssh_kbd" \
+				--argjson root_pw "$root_pw" \
+				--argjson root_key "$root_key" \
+				--arg ssh_conn_family "$conn_fam" \
+				--argjson ssh_keys "$ssh_keys_json" \
+				--arg repo "$ABUSEGUARD_REPO" \
+				--argjson reporting_on "$rep_on" \
+				--argjson report_key_set "$key_set" \
+				'{
+					backend: $backend,
+					backend_error: $backend_error,
+					cf_token_set: $cf_token_set,
+					sites: $sites,
+					certs: $certs,
+					firewall: {
+						nft_available: $nft_available,
+						running: $fw_running,
+						boot_enabled: $boot_enabled,
+						ipv4_in: $ipv4_in,
+						ipv6_in: $ipv6_in,
+						intel_running: $intel_running,
+						intel_entries: $intel_entries,
+						ports: $ports,
+						conflicts: $conflicts
+					},
+					banned: $banned,
+					whitelist: $whitelist,
+					ssh: {
+						ports: $ssh_ports,
+						password_auth: $ssh_pw,
+						pubkey_auth: $ssh_pk,
+						kbd_auth: $ssh_kbd,
+						root_pw_ready: $root_pw,
+						root_key_ready: $root_key,
+						ssh_conn_family: $ssh_conn_family,
+						keys: $ssh_keys
+					},
+					repo: $repo,
+					reporting_on: $reporting_on,
+					report_key_set: $report_key_set
+				}'
+			;;
+		logs)
+			local mode="" proxy_json='[]' certbot_json='[]' f2b_json='[]' target=""
+			mode="$(proxy_mode)" || mode=""
+			case "$mode" in
+				nginx)
+					proxy_json="$(journalctl -u nginx -n 80 --no-pager 2>/dev/null | tui_json_lines)" || proxy_json='[]'
+					certbot_json="$(journalctl -u certbot -n 80 --no-pager 2>/dev/null | tui_json_lines)" || certbot_json='[]' ;;
+				caddy)
+					proxy_json="$(journalctl -u caddy -n 80 --no-pager 2>/dev/null | tui_json_lines)" || proxy_json='[]' ;;
+			esac
+			target="$(fail2ban-client get logtarget 2>/dev/null | sed -n '/^[[:space:]]*`-/{ s/^[[:space:]]*`-[[:space:]]*//; s/[[:space:]]*$//; p; q; }')" || true
+			case "${target^^}" in
+				/*)
+					if [ -r "$target" ]; then
+						f2b_json="$(tail -n 80 -- "$target" 2>/dev/null | tui_json_lines)" || f2b_json='[]'
+					else
+						f2b_json="$(journalctl -u fail2ban -n 80 --no-pager 2>/dev/null | tui_json_lines)" || f2b_json='[]'
+					fi ;;
+				*)
+					f2b_json="$(journalctl -u fail2ban -n 80 --no-pager 2>/dev/null | tui_json_lines)" || f2b_json='[]' ;;
+			esac
+			jq -n \
+				--arg backend "$mode" \
+				--argjson proxy "$proxy_json" \
+				--argjson certbot "$certbot_json" \
+				--argjson fail2ban "$f2b_json" \
+				'{backend: $backend, proxy: $proxy, certbot: $certbot, fail2ban: $fail2ban}'
+			;;
+		ruleset)
+			nft -a list ruleset
+			;;
+		*)
+			echo "未知 tui-data 作用域：$scope" >&2
+			return 2
+			;;
+	esac
+}
+
+tui_action() {
+	local verb="${1:-}"
+	shift || true
+	case "$verb" in
+		site-add)
+			local dom="${1:-}" up="${2:-}" mode out tls d
+			dom="$(printf '%s' "$dom" | tr -d '[:space:]')"
+			up="$(printf '%s' "$up" | tr -d '[:space:]')"
+			domain_valid "$dom" || { echo "域名格式无效。"; return 1; }
+			hostport_valid "$up" || { echo "上游 IP:端口 格式无效。"; return 1; }
+			mode="$(proxy_mode)" || { echo "后端选择记录异常：$WEB_SERVER_FILE"; return 1; }
+			if [ "$mode" = nginx ]; then
+				nginx_runtime_load || return 1
+				while IFS=$'\t' read -r d _; do
+					[ "$d" = "$dom" ] && { echo "该域名已存在。"; return 1; }
+				done < <(sites_lines)
+				if out="$(nginx_add_site "$dom" "$up" 2>&1)"; then
+					[ -z "$out" ] || printf '%s\n' "$out"
+					echo "已添加 $dom → $up（nginx 已应用配置）"
+					return 0
+				else
+					echo "添加失败，未启用该站点："
+					printf '%s\n' "$out"
+					return 1
+				fi
+			fi
+			[ -e "$SITES_DIR/$dom.caddy" ] && { echo "该域名已存在。"; return 1; }
+			tls=auto
+			if cf_is_set; then tls=cloudflare; fi
+			out="$("$ENGINE" caddy-render "$dom" "$up" "$tls")" || { echo "无法生成 Caddy 配置；未修改配置。"; return 1; }
+			"$ENGINE" config-transaction add "$SITES_DIR" "$dom" <<< "$out" || { echo "无法写入站点配置，或该域名已存在。"; return 1; }
+			if ! out="$(validate_caddyfile "$CADDYFILE" 2>&1)"; then
+				if "$ENGINE" config-transaction rollback "$SITES_DIR" "$dom"; then
+					echo "配置校验失败，已回滚："
+				else
+					echo "配置校验失败，且回滚未完成；请检查 $SITES_DIR/.site-transaction：" >&2
+				fi
+				printf '%s\n' "$out" | grep -iE 'error|invalid' | head -5
+				return 1
+			fi
+			if ! caddy_reload_or_restart; then
+				if "$ENGINE" config-transaction rollback "$SITES_DIR" "$dom"; then
+					echo "Caddy 应用失败，新站点配置已移除。"
+					caddy_restart_active && echo "Caddy 已恢复运行。" || echo "Caddy 服务未恢复，请检查服务日志。" >&2
+				else
+					echo "Caddy 应用失败，新站点配置移除失败；请检查 $SITES_DIR/.site-transaction。" >&2
+				fi
+				return 1
+			fi
+			if ! "$ENGINE" config-transaction commit "$SITES_DIR" "$dom"; then
+				echo "Caddy 已应用配置，但站点事务未完成；请检查 $SITES_DIR/.site-transaction。" >&2
+				return 1
+			fi
+			echo "已添加 $dom → $up（caddy 已应用配置）"
+			;;
+		site-del)
+			local target="${1:-}" mode out
+			[ -n "$target" ] || { echo "未指定域名。"; return 1; }
+			mode="$(proxy_mode)" || { echo "后端选择记录异常：$WEB_SERVER_FILE"; return 1; }
+			if [ "$mode" = nginx ]; then
+				nginx_runtime_load || return 1
+				if out="$(nginx_delete_site "$target" 2>&1)"; then
+					[ -z "$out" ] || printf '%s\n' "$out"
+					echo "已删除 $target（nginx 已应用配置）"
+					return 0
+				else
+					echo "删除失败，原站点配置保持不变："
+					printf '%s\n' "$out"
+					return 1
+				fi
+			fi
+			"$ENGINE" config-transaction remove "$SITES_DIR" "$target" || { echo "无法备份站点配置，未删除。"; return 1; }
+			if ! caddy_reload_or_restart; then
+				if "$ENGINE" config-transaction rollback "$SITES_DIR" "$target"; then
+					echo "Caddy 应用失败，已恢复原站点配置。"
+					caddy_restart_active && echo "Caddy 已恢复运行。" || echo "Caddy 服务未恢复，请检查服务日志。" >&2
+				else
+					echo "Caddy 应用失败，原站点配置恢复失败；请检查 $SITES_DIR/.site-transaction。" >&2
+				fi
+				return 1
+			fi
+			if ! "$ENGINE" config-transaction commit "$SITES_DIR" "$target"; then
+				echo "Caddy 已应用配置，但站点事务未完成；请检查 $SITES_DIR/.site-transaction。" >&2
+				return 1
+			fi
+			echo "已删除 $target（caddy 已应用配置）"
+			;;
+		cf-token)
+			local t
+			IFS= read -r t || true
+			[ -n "$t" ] || { echo "Cloudflare API Token 不能为空。"; return 1; }
+			( pause() { :; }; printf '%s\n' "$t" | act_cftoken )
+			;;
+		fw-open)
+			local proto="${1:-}" port="${2:-}" source="${3:-any}" note="${4:-}"
+			firewall_change_port open "$proto" "$port" "$source" || return 1
+			if [ "$#" -ge 4 ]; then
+				firewall_port_note_save "$proto" "$((10#$port))" "${source:-any}" "$note" || true
+			fi
+			;;
+		fw-close)
+			firewall_change_port close "${1:-}" "${2:-}" "${3:-any}"
+			;;
+		fw-family)
+			local fam="${1:-}" target="${2:-}" label
+			case "$fam:$target" in
+				ipv4:0|ipv4:1) label=IPv4 ;;
+				ipv6:0|ipv6:1) label=IPv6 ;;
+				*) echo "参数无效。"; return 1 ;;
+			esac
+			if firewall_set_policy "$fam" "$target"; then
+				if [ "$target" = 1 ]; then echo "已开启 $label 入站。"; else echo "已关闭 $label 入站。"; fi
+				firewall_running || echo "防火墙未运行，重启或重新应用规则后生效。"
+			else
+				echo "修改失败，规则保持不变。"
+				return 1
+			fi
+			;;
+		fw-apply)
+			firewall_apply
+			;;
+		ban-ip)
+			local ip="${1:-}" allow_status=0
+			ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
+			[ -n "$ip" ] || { echo "IP 不能为空。"; return 1; }
+			case "$ip" in */*) echo "手动封禁仅支持单个 IPv4/IPv6 地址，不支持网段。"; return 1 ;; esac
+			wl_valid "$ip" || { echo "IP 格式无效。"; return 1; }
+			"$ENGINE" allowlist-check --ip "$ip" >/dev/null 2>&1 || allow_status=$?
+			case "$allow_status" in
+				0) echo "该 IP 已在白名单中，不能封禁。"; return 1 ;;
+				1) ;;
+				*) echo "无法可靠检查白名单，已取消封禁。"; return 1 ;;
+			esac
+			if fail2ban-client set caddy-rate-local banip "$ip" >/dev/null 2>&1; then
+				echo "已封禁 $ip（caddy-rate-local，90 天）。"
+			else
+				echo "封禁失败（检查 jail 是否启用）。"
+				return 1
+			fi
+			;;
+		unban-ip)
+			local ip="${1:-}" rc=0
+			ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
+			[ -n "$ip" ] || { echo "IP 不能为空。"; return 1; }
+			wl_valid "$ip" || { echo "IP 格式无效。"; return 1; }
+			if fail2ban-client unban "$ip" >/dev/null 2>&1; then
+				echo "已清除 $ip 的定时行为封禁（所有 jail）。"
+			else
+				echo "解封失败，或该 IP 当前未被封禁。"
+				return 1
+			fi
+			"$ENGINE" allowlist-check --ip "$ip" >/dev/null 2>&1 || rc=$?
+			if [ "$rc" = 0 ]; then
+				echo "该 IP 在白名单中；内核情报例外已放行，仍受端口规则限制。"
+			elif nft get element inet "$INTEL_TABLE" block4 '{' "$ip" '}' >/dev/null 2>&1; then
+				echo "注意：$ip 仍在威胁情报名单上，内核仍会拦截。要放行请加入白名单。"
+			fi
+			;;
+		wl-add)
+			local added=0 skipped=0 ip tok tmp
+			tmp="$(wl_candidate)" || { echo "无法创建白名单候选文件。"; return 1; }
+			while IFS= read -r ip || [ -n "$ip" ]; do
+				ip="${ip//,/ }"
+				for tok in $ip; do
+					[ -n "$tok" ] || continue
+					if ! wl_valid "$tok"; then echo "跳过(格式无效)：$tok"; skipped=$((skipped+1)); continue; fi
+					if grep -qxF "$tok" "$tmp" 2>/dev/null; then echo "跳过(已存在)：$tok"; skipped=$((skipped+1)); continue; fi
+					printf '%s\n' "$tok" >> "$tmp"; added=$((added+1)); echo "已添加：$tok"
+				done
+			done
+			if [ "$added" -gt 0 ] && wl_commit "$tmp"; then
+				tmp=""
+				echo "新增 $added，跳过 $skipped。"
+				wl_apply
+			else
+				rm -f -- "$tmp"
+				if [ "$added" -eq 0 ]; then
+					echo "未新增有效条目（跳过 $skipped）。"
+				else
+					echo "候选白名单未通过完整校验，原文件保持不变。"
+				fi
+				return 1
+			fi
+			;;
+		wl-del)
+			local target="${1:-}" tmp
+			[ -n "$target" ] || { echo "未指定白名单条目。"; return 1; }
+			tmp="$(wl_candidate)" || { echo "无法创建白名单候选文件。"; return 1; }
+			if awk -v t="$target" '{l=$0; sub(/#.*/,"",l); gsub(/[ \t]/,"",l); if (l!=t) print}' "$WHITELIST" > "$tmp" \
+				&& wl_commit "$tmp"; then
+				tmp=""
+				echo "已删除：$target"
+				wl_apply
+			else
+				rm -f -- "$tmp"
+				echo "候选白名单无效，原文件保持不变。"
+				return 1
+			fi
+			;;
+		wl-edit)
+			local tmp
+			tmp="$(wl_candidate)" || { echo "无法创建白名单候选文件。"; pause; return 1; }
+			if "${EDITOR:-nano}" "$tmp" && wl_commit "$tmp"; then
+				tmp=""
+				echo "白名单已保存。"
+				wl_apply || pause
+			else
+				rm -f -- "$tmp"
+				echo "白名单格式无效或编辑失败，原文件保持不变。"
+				pause
+				return 1
+			fi
+			;;
+		ssh-port)
+			local new="${1:-}"
+			[ -n "$new" ] || { echo "新端口不能为空。"; return 1; }
+			printf '%s\ny\n' "$new" | act_ssh_port
+			;;
+		ssh-auth)
+			local which="${1:-}" confirm="${2:-no}"
+			case "$which" in
+				password)
+					if [ "$confirm" = yes ]; then
+						printf 'yes\n' | act_ssh_auth passwordauthentication PasswordAuthentication "密码登录"
+					else
+						act_ssh_auth passwordauthentication PasswordAuthentication "密码登录" </dev/null
+					fi ;;
+				pubkey)
+					if [ "$confirm" = yes ]; then
+						printf 'yes\n' | act_ssh_auth pubkeyauthentication PubkeyAuthentication "密钥登录"
+					else
+						act_ssh_auth pubkeyauthentication PubkeyAuthentication "密钥登录" </dev/null
+					fi ;;
+				*) echo "未知认证类型：$which"; return 1 ;;
+			esac
+			;;
+		ssh-key-add)
+			act_ssh_key_add
+			;;
+		ssh-key-del)
+			local idx="${1:-}" confirm="${2:-no}"
+			[ -n "$idx" ] || { echo "未指定公钥编号。"; return 1; }
+			if [ "$confirm" = yes ]; then
+				printf '%s\nyes\n' "$idx" | act_ssh_key_remove
+			else
+				printf '%s\nno\n' "$idx" | act_ssh_key_remove
+			fi
+			;;
+		ssh-password)
+			act_ssh_password
+			;;
+		sync-intel)
+			runuser -u abuseguard -- "$ENGINE" sync-intel || return 1
+			echo "正在应用内核情报策略..."
+			policy_apply || { echo "策略应用失败；上一次生效的策略保持不变。"; return 1; }
+			echo "威胁情报已同步并应用到内核。"
+			;;
+		flush-report)
+			runuser -u abuseguard -- "$ENGINE" report send-auto
+			;;
+		abuse-key)
+			local k tmp
+			IFS= read -r k || true
+			[ -n "$k" ] || { echo "API Key 不能为空。"; return 1; }
+			tmp="$(mktemp "$CONF_DIR/.abuseipdb-key.XXXXXX")" || { echo "无法创建临时文件。"; return 1; }
+			if printf '%s\n' "$k" > "$tmp" && chown root:abuseguard "$tmp" && chmod 0640 "$tmp" && mv -f -- "$tmp" "$KEYFILE"; then
+				echo "已保存 AbuseIPDB API Key。"
+			else
+				rm -f -- "$tmp"
+				echo "保存 API Key 失败。"
+				return 1
+			fi
+			;;
+		toggle-report)
+			[ -f "$CONFIG" ] || { echo "没有配置文件：$CONFIG"; return 1; }
+			local en newv tmp
+			en="$(jq -r '.abuseipdb.enabled' "$CONFIG" 2>/dev/null)"
+			[ "$en" = "true" ] && newv=false || newv=true
+			tmp="$(mktemp)" || return 1
+			if jq ".abuseipdb.enabled = $newv" "$CONFIG" > "$tmp" && cat "$tmp" > "$CONFIG"; then
+				rm -f -- "$tmp"
+				[ "$newv" = true ] && echo "AbuseIPDB 上报已开启。" || echo "AbuseIPDB 上报已关闭。"
+			else
+				rm -f -- "$tmp"
+				echo "更新配置失败。"
+				return 1
+			fi
+			;;
+		update)
+			local tag f=/tmp/abuseguard-install.sh
+			if ! tag="$(latest_release_tag)"; then
+				echo "无法解析最新 release（需要能直连 github.com）。"
+				pause
+				return 1
+			fi
+			echo "正在从 $ABUSEGUARD_REPO $tag 重新运行安装器..."
+			if ! $AG_CURL -o "$f" "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/$tag/install.sh"; then
+				echo "无法获取 $tag 的 install.sh（GitHub 直连失败）。"
+				pause
+				return 1
+			fi
+			if ABUSEGUARD_REPO="$ABUSEGUARD_REPO" ABUSEGUARD_RELEASE_TAG="$tag" \
+				ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
+				rm -f "$f"
+				echo "更新完成，正在重新加载控制面板..."
+				return 0
+			else
+				rm -f "$f"
+				echo "更新失败。"
+				pause
+				return 1
+			fi
+			;;
+		uninstall)
+			act_uninstall
+			;;
+		*)
+			echo "未知 tui-action：$verb" >&2
+			return 2
+			;;
+	esac
+}
+
 # The panel needs root (reads /etc/caddy-abuseguard, drives fail2ban/systemctl).
 # If launched as a normal user, transparently re-exec under sudo so plain
 # `ag` opens the panel (prompting for a password only if sudo needs one).
@@ -1883,7 +2447,19 @@ case "${1:-}" in
 	--firewall-open)
 		[ "$#" -eq 3 ] || { echo "用法：ag --firewall-open tcp|udp 端口" >&2; exit 2; }
 		firewall_change_port open "$2" "$3"; exit $? ;;
-	"") ;;
-	*) echo "用法：ag [--policy-apply | --firewall-apply | --firewall-open tcp|udp 端口]" >&2; exit 2 ;;
+	--classic) ;;
+	--tui-data) shift; tui_data "$@"; exit $? ;;
+	--tui-action) shift; tui_action "$@"; exit $? ;;
+	"")
+		if [ -t 0 ] && [ -t 1 ] && [ "${TERM:-}" != dumb ] && [ "${AG_CLASSIC_UI:-0}" != 1 ] && [ -x "$ENGINE" ]; then
+			"$ENGINE" tui --panel "$0"
+			_ag_tui_rc=$?
+			case "$_ag_tui_rc" in
+				2) ;;
+				75) exec /usr/local/bin/ag ;;
+				*) exit "$_ag_tui_rc" ;;
+			esac
+		fi ;;
+	*) echo "用法：ag [--policy-apply | --firewall-apply | --firewall-open tcp|udp 端口 | --classic]" >&2; exit 2 ;;
 esac
 while true; do menu; done
