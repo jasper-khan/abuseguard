@@ -9,7 +9,8 @@ cleanup() {
 	rm -f -- "$TMP/test-key" "$TMP/test-key.pub" "$TMP/second-key" "$TMP/second-key.pub"
 	rm -f -- "$TMP/auth/00-abuseguard-auth.conf" "$TMP/auth/00-abuseguard-auth.conf.tmp"
 	rm -f -- "$TMP/auth/00-aaa-hardening.conf" "$TMP/auth/50-cloud-init.conf"
-	rm -f -- "$TMP/root/.ssh/authorized_keys" "$TMP/root/.ssh/authorized_keys.tmp" "$TMP/root/.ssh/authorized_keys.lock"
+	rm -f -- "$TMP/root/.ssh/authorized_keys" "$TMP/root/.ssh/authorized_keys.tmp"
+	rm -f -- "$TMP/root/.ssh/authorized_keys.lock"
 	rmdir -- "$TMP/auth" "$TMP/root/.ssh" "$TMP/root" 2>/dev/null || true
 	rmdir -- "$TMP" 2>/dev/null || true
 }
@@ -127,7 +128,8 @@ reset_all() {
 	printf 'Include %s/*.conf\n' "$SSHD_DROPIN_DIR" > "$SSHD_MAIN"
 	rm -f -- "$SSHD_AUTH_DROPIN" "$SSHD_AUTH_DROPIN.tmp"
 	rm -f -- "$SSHD_DROPIN_DIR/00-aaa-hardening.conf" "$SSHD_DROPIN_DIR/50-cloud-init.conf"
-	rm -f -- "$SSH_AUTH_KEYS" "$SSH_AUTH_KEYS.tmp" "$SSH_AUTH_KEYS.lock"
+	rm -f -- "$SSH_AUTH_KEYS" "$SSH_AUTH_KEYS.tmp"
+	rm -f -- "$SSH_AUTH_KEYS.lock"
 	SOCKET_ACTIVE=0; RELOAD_FAIL=0; SSHD_T_FAIL=0; CHPASSWD_FAIL=0
 	ROOT_PERMIT_ROOT_LOGIN=yes
 	ROOT_AUTH_METHODS=any; ROOT_USE_DNS=no; ROOT_DENY_SOURCE=""

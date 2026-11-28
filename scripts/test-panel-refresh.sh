@@ -339,15 +339,16 @@ tui_tmp="$(mktemp -d)"
 (
 	set -euo pipefail
 	cleanup_tui_tmp() {
-		rm -f -- \
-			"$tui_tmp/whitelist" \
-			"$tui_tmp/firewall.nft" \
-			"$tui_tmp/port-notes.tsv" \
-			"$tui_tmp/key" \
-			"$tui_tmp/ssh/authorized_keys" \
-			"$tui_tmp/ssh/authorized_keys.tmp" \
-			"$tui_tmp/ssh/authorized_keys.lock"
-		rmdir -- "$tui_tmp/ssh" "$tui_tmp/upd" "$tui_tmp" 2>/dev/null || true
+		rm -f -- "$tui_tmp/whitelist"
+		rm -f -- "$tui_tmp/firewall.nft"
+		rm -f -- "$tui_tmp/port-notes.tsv"
+		rm -f -- "$tui_tmp/key"
+		rm -f -- "$tui_tmp/ssh/authorized_keys"
+		rm -f -- "$tui_tmp/ssh/authorized_keys.tmp"
+		rm -f -- "$tui_tmp/ssh/authorized_keys.lock"
+		rmdir -- "$tui_tmp/ssh" 2>/dev/null || true
+		rmdir -- "$tui_tmp/upd" 2>/dev/null || true
+		rmdir -- "$tui_tmp" 2>/dev/null || true
 	}
 	trap cleanup_tui_tmp EXIT
 	source "$PANEL_SOURCE"
