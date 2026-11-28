@@ -338,7 +338,18 @@ fi
 tui_tmp="$(mktemp -d)"
 (
 	set -euo pipefail
-	trap 'rm -rf -- "$tui_tmp"' EXIT
+	cleanup_tui_tmp() {
+		rm -f -- \
+			"$tui_tmp/whitelist" \
+			"$tui_tmp/firewall.nft" \
+			"$tui_tmp/port-notes.tsv" \
+			"$tui_tmp/key" \
+			"$tui_tmp/ssh/authorized_keys" \
+			"$tui_tmp/ssh/authorized_keys.tmp" \
+			"$tui_tmp/ssh/authorized_keys.lock"
+		rmdir -- "$tui_tmp/ssh" "$tui_tmp/upd" "$tui_tmp" 2>/dev/null || true
+	}
+	trap cleanup_tui_tmp EXIT
 	source "$PANEL_SOURCE"
 	CONF_DIR="$tui_tmp"
 	WHITELIST="$tui_tmp/whitelist"
@@ -386,17 +397,37 @@ tui_tmp="$(mktemp -d)"
 	big_out="$(tui_data panel)"
 	[ "$(printf '%s' "$big_out" | jq '.banned | length')" = 5000 ]
 
-	# 3. SSH key deletion must refuse when authorized_keys order drifted.
+	# 3. SSH key deletion must refuse when authorized_keys order drifted, and concurrent add/remove must serialize via lock.
 	k1='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyOneFixtureDataForTest one@test'
 	k2='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyTwoFixtureDataForTest two@test'
+	k3='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyThreeFixtureDataForTest three@test'
 	printf '%s\n%s\n' "$k2" "$k1" > "$SSH_AUTH_KEYS"
 	ssh_key_ready() { return 0; }
 	if printf '%s\n' "$k1" | tui_action ssh-key-del 1 no >/dev/null 2>&1; then
 		echo "ssh-key-del deleted wrong key after reorder" >&2; exit 1
 	fi
 	[ "$(grep -c . "$SSH_AUTH_KEYS")" = 2 ]
-	printf '%s\n' "$k2" | tui_action ssh-key-del 1 no >/dev/null
-	[ "$(cat "$SSH_AUTH_KEYS")" = "$k1" ]
+	# Hold the shared write lock briefly while launching concurrent add + del.
+	(
+		ssh-keygen() { return 0; }
+		( umask 077; : >> "$SSH_AUTH_KEYS.lock" )
+		( flock -x 9; sleep 0.25 ) 9<>"$SSH_AUTH_KEYS.lock" &
+		lock_holder=$!
+		sleep 0.05
+		printf '%s\n' "$k2" | tui_action ssh-key-del 1 no >/dev/null &
+		del_pid=$!
+		printf '%s\n' "$k3" | act_ssh_key_add >/dev/null &
+		add_pid=$!
+		wait "$lock_holder"
+		wait "$del_pid"
+		wait "$add_pid"
+	)
+	grep -qxF "$k1" "$SSH_AUTH_KEYS"
+	grep -qxF "$k3" "$SSH_AUTH_KEYS"
+	if grep -qxF "$k2" "$SSH_AUTH_KEYS"; then
+		echo "deleted key survived concurrent add/del" >&2; exit 1
+	fi
+	[ "$(grep -c . "$SSH_AUTH_KEYS")" = 2 ]
 
 	# 4. wl-edit must propagate wl_apply failure instead of letting pause mask it.
 	wl_candidate() { mktemp "$tui_tmp/wl.XXXXXX"; }
@@ -408,7 +439,22 @@ tui_tmp="$(mktemp -d)"
 		echo "wl-edit masked wl_apply failure" >&2; exit 1
 	fi
 
-	# 5. fw-open must report port-note save failure explicitly.
+	# 5. fw-open and last-note cleanup must report port-note failures explicitly.
+	printf 'udp\t8443\tany\tlast-note\n' > "$PORT_NOTES_FILE"
+	if (
+		rm() {
+			local arg
+			for arg in "$@"; do
+				[ "$arg" = "$PORT_NOTES_FILE" ] && return 1
+			done
+			command rm "$@"
+		}
+		firewall_port_note_save udp 8443 any ""
+	); then
+		echo "clearing last port note masked rm failure" >&2; exit 1
+	fi
+	[ -f "$PORT_NOTES_FILE" ]
+	rm -f -- "$PORT_NOTES_FILE"
 	firewall_change_port() { return 0; }
 	firewall_port_note_save() { return 1; }
 	fw_err=""

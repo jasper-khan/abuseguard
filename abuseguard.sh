@@ -642,8 +642,10 @@ firewall_port_note_save() {
 		printf '%s\t%s\t%s\t%s\n' "$proto" "$port" "$source" "$note" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
 	fi
 	if [ ! -s "$tmp" ]; then
-		rm -f -- "$tmp" "$PORT_NOTES_FILE"
-		return 0
+		local rm_rc=0
+		rm -f -- "$PORT_NOTES_FILE" || rm_rc=$?
+		rm -f -- "$tmp" || true
+		return "$rm_rc"
 	fi
 	chmod 0644 "$tmp" && mv -f -- "$tmp" "$PORT_NOTES_FILE" || { rm -f -- "$tmp"; return 1; }
 }
@@ -1336,9 +1338,9 @@ act_ssh_auth() {
 	fi
 }
 
-# 添加公钥到 root 的 authorized_keys。
+# 添加公钥到 root 的 authorized_keys（与删除共用写锁，防止并发覆盖）。
 act_ssh_key_add() {
-	local key tmp
+	local key lock tmp
 	[ -d "$SSH_ROOT_HOME" ] || mkdir -m 700 -p "$SSH_ROOT_HOME" || { echo "无法创建 $SSH_ROOT_HOME。"; return 1; }
 	read -r -p "  粘贴公钥（ssh-ed25519/ssh-rsa/...，留空取消）: " key || return 1
 	[ -n "$key" ] || return 0
@@ -1353,39 +1355,41 @@ act_ssh_key_add() {
 		echo "未找到 ssh-keygen，无法验证公钥。"
 		return 1
 	fi
-	tmp="$SSH_AUTH_KEYS.tmp"
-	printf '%s\n' "$key" > "$tmp"
-	if ! ssh-keygen -lf "$tmp" >/dev/null 2>&1; then
-		rm -f -- "$tmp"
+	if ! printf '%s\n' "$key" | ssh-keygen -lf - >/dev/null 2>&1; then
 		echo "公钥格式无效。"
 		return 1
 	fi
-	rm -f -- "$tmp"
-	# 按类型+blob 去重，注释不同视为同一把钥匙。
-	if awk -v t="$ktype" -v b="$kblob" 'NF { if ($1 == t && $2 == b) { found=1; exit } } END { exit found ? 0 : 1 }' "$SSH_AUTH_KEYS" 2>/dev/null; then
-		echo "该公钥已存在。"
-		return 0
-	fi
-	# 原子追加：先写临时文件再整体替换，失败不破坏原文件。
-	tmp="$SSH_AUTH_KEYS.tmp"
-	{
-		if [ -f "$SSH_AUTH_KEYS" ]; then
-			cat "$SSH_AUTH_KEYS"
-			if [ -s "$SSH_AUTH_KEYS" ] && [ "$(tail -c 1 "$SSH_AUTH_KEYS" | tr -d '\n')" ]; then
-				printf '\n'
-			fi
+	lock="$SSH_AUTH_KEYS.lock"
+	( umask 077; : >> "$lock" ) || { echo "无法创建公钥锁文件。"; return 1; }
+	(
+		flock -x 9 || { echo "无法获取公钥写锁。"; exit 1; }
+		# 按类型+blob 去重，注释不同视为同一把钥匙。
+		if awk -v t="$ktype" -v b="$kblob" 'NF { if ($1 == t && $2 == b) { found=1; exit } } END { exit found ? 0 : 1 }' "$SSH_AUTH_KEYS" 2>/dev/null; then
+			echo "该公钥已存在。"
+			exit 0
 		fi
-		printf '%s\n' "$key"
-	} > "$tmp" || { rm -f -- "$tmp"; return 1; }
-	chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-	mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; return 1; }
-	chmod 700 "$SSH_ROOT_HOME"
-	echo "公钥已添加（第 $(grep -c . "$SSH_AUTH_KEYS") 条）。请保持当前会话，用新会话验证密钥可登录。"
+		# 原子追加：先写临时文件再整体替换，失败不破坏原文件。
+		tmp="$SSH_AUTH_KEYS.tmp"
+		{
+			if [ -f "$SSH_AUTH_KEYS" ]; then
+				cat "$SSH_AUTH_KEYS"
+				if [ -s "$SSH_AUTH_KEYS" ] && [ "$(tail -c 1 "$SSH_AUTH_KEYS" | tr -d '\n')" ]; then
+					printf '\n'
+				fi
+			fi
+			printf '%s\n' "$key"
+		} > "$tmp" || { rm -f -- "$tmp"; exit 1; }
+		chmod 600 "$tmp" || { rm -f -- "$tmp"; exit 1; }
+		mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; exit 1; }
+		chmod 700 "$SSH_ROOT_HOME"
+		echo "公钥已添加（第 $(grep -c . "$SSH_AUTH_KEYS") 条）。请保持当前会话，用新会话验证密钥可登录。"
+	) 9<>"$lock"
 }
 
 # 从 root 的 authorized_keys 删除一条公钥；可选第 1 参数用于核对目标行原文未发生漂移。
 act_ssh_key_remove() {
-	local expected="${1:-}" keys idx=0 n target tmp remain answer awk_rc=0
+	local expected="${1:-}" from_caller=0 keys idx=0 n target lock tmp remain answer awk_rc=0
+	[ -n "$expected" ] && from_caller=1
 	[ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ] || { echo "还没有公钥。"; return 1; }
 	keys="$(grep . "$SSH_AUTH_KEYS")"
 	echo
@@ -1397,17 +1401,25 @@ act_ssh_key_remove() {
 	[ -n "$n" ] || return 0
 	case "$n" in *[!0-9]*) echo "编号无效。"; return 1 ;; esac
 	if [ "$n" -lt 1 ] || [ "$n" -gt "$idx" ]; then
-		if [ -n "$expected" ]; then
+		if [ "$from_caller" = 1 ]; then
 			echo "目标公钥已变更或位置已移动，请按 r 刷新后重试。"
 		else
 			echo "编号无效。"
 		fi
 		return 1
 	fi
+	if [ -z "$expected" ]; then
+		expected="$(printf '%s\n' "$keys" | sed -n "${n}p")"
+	fi
 	target="$n"
-	tmp="$SSH_AUTH_KEYS.tmp"
-	remain=0
-	if [ -n "$expected" ]; then
+	lock="$SSH_AUTH_KEYS.lock"
+	( umask 077; : >> "$lock" ) || { echo "无法创建公钥锁文件。"; return 1; }
+	(
+		flock -x 9 || { echo "无法获取公钥写锁。"; exit 1; }
+		[ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ] || { echo "目标公钥已变更或位置已移动，请按 r 刷新后重试。"; exit 1; }
+		tmp="$SSH_AUTH_KEYS.tmp"
+		remain=0
+		awk_rc=0
 		AG_EXPECTED_SSH_KEY="$expected" awk -v t="$target" '
 			length($0) && ++i == t {
 				if ($0 != ENVIRON["AG_EXPECTED_SSH_KEY"]) { mismatch = 1; exit 3 }
@@ -1420,28 +1432,26 @@ act_ssh_key_remove() {
 		if [ "$awk_rc" -eq 3 ]; then
 			rm -f -- "$tmp"
 			echo "目标公钥已变更或位置已移动，请按 r 刷新后重试。"
-			return 1
+			exit 1
 		elif [ "$awk_rc" -ne 0 ]; then
 			rm -f -- "$tmp"
-			return 1
+			exit 1
 		fi
-	else
-		awk -v t="$target" 'length($0) && ++i == t { next } { print }' "$SSH_AUTH_KEYS" > "$tmp" || { rm -f -- "$tmp"; return 1; }
-	fi
-	remain="$(awk 'NF{n++} END{print n+0}' "$tmp")"
-	chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-	if ! ssh_key_ready "$tmp"; then
-		if ! root_password_login_ready; then
-			rm -f -- "$tmp"
-			echo "删除后无法确认有有效公钥或可独立使用的 root 密码，已拒绝。"
-			return 1
+		remain="$(awk 'NF{n++} END{print n+0}' "$tmp")"
+		chmod 600 "$tmp" || { rm -f -- "$tmp"; exit 1; }
+		if ! ssh_key_ready "$tmp"; then
+			if ! root_password_login_ready; then
+				rm -f -- "$tmp"
+				echo "删除后无法确认有有效公钥或可独立使用的 root 密码，已拒绝。"
+				exit 1
+			fi
+			echo "删除后将没有有效公钥。请保持当前会话，先用新连接验证 root 密码登录。"
+			read -r -p " 输入 yes 继续: " answer || { rm -f -- "$tmp"; exit 1; }
+			[ "$answer" = yes ] || { rm -f -- "$tmp"; echo "已取消。"; exit 1; }
 		fi
-		echo "删除后将没有有效公钥。请保持当前会话，先用新连接验证 root 密码登录。"
-		read -r -p " 输入 yes 继续: " answer || { rm -f -- "$tmp"; return 1; }
-		[ "$answer" = yes ] || { rm -f -- "$tmp"; echo "已取消。"; return 1; }
-	fi
-	mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; return 1; }
-	echo "已删除，剩余 $remain 条。"
+		mv -f -- "$tmp" "$SSH_AUTH_KEYS" || { rm -f -- "$tmp"; exit 1; }
+		echo "已删除，剩余 $remain 条。"
+	) 9<>"$lock"
 }
 
 # 修改 root 密码。
