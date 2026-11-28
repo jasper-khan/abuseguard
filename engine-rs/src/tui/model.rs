@@ -447,7 +447,11 @@ pub enum PendingAction {
     SshPort { port: String },
     SshAuth { which: String, confirmed_yes: bool },
     SshKeyAdd { pubkey: String },
-    SshKeyDel { index: usize, confirmed_yes: bool },
+    SshKeyDel {
+        index: usize,
+        raw: String,
+        confirmed_yes: bool,
+    },
     SshPassword { p1: String, p2: String },
     SyncIntel,
     FlushReport,
@@ -1932,6 +1936,7 @@ impl App {
                         typed: String::new(),
                         action: PendingAction::SshKeyDel {
                             index: item.index,
+                            raw: item.raw,
                             confirmed_yes: is_last_valid,
                         },
                     }));

@@ -190,6 +190,7 @@ impl ShellBackend {
             }
             PendingAction::SshKeyDel {
                 index,
+                raw,
                 confirmed_yes,
             } => {
                 let idx = index.to_string();
@@ -200,7 +201,7 @@ impl ShellBackend {
                         &idx,
                         if *confirmed_yes { "yes" } else { "no" },
                     ],
-                    None,
+                    Some(format!("{}\n", raw)),
                 )
             }
             PendingAction::SshPassword { p1, p2 } => self.run_raw(

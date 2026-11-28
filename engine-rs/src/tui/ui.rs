@@ -1603,6 +1603,8 @@ mod tests {
             app.handle_key(key(KeyCode::Enter)),
             CommandEffect::RunAction(PendingAction::SshKeyDel {
                 index: 1,
+                raw: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyDataForRenderTest jasper@work"
+                    .to_string(),
                 confirmed_yes: true
             })
         );

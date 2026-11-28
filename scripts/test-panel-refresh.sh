@@ -331,3 +331,107 @@ CADDY
 	rmdir -- "$caddy_sites"
 	echo "Caddy panel renderer fixture passed"
 fi
+
+# TUI bridge regression checks: IPv6 bans, trailing-comment whitelist, large
+# banned list (>128 KiB), SSH key identity guard, private mktemp updater,
+# wl-edit failure propagation, and port-note save failure reporting.
+tui_tmp="$(mktemp -d)"
+(
+	set -euo pipefail
+	trap 'rm -rf -- "$tui_tmp"' EXIT
+	source "$PANEL_SOURCE"
+	CONF_DIR="$tui_tmp"
+	WHITELIST="$tui_tmp/whitelist"
+	FIREWALL_FILE="$tui_tmp/firewall.nft"
+	PORT_NOTES_FILE="$tui_tmp/port-notes.tsv"
+	SSH_ROOT_HOME="$tui_tmp/ssh"
+	SSH_AUTH_KEYS="$SSH_ROOT_HOME/authorized_keys"
+	KEYFILE="$tui_tmp/key"
+	mkdir -p "$SSH_ROOT_HOME"
+
+	# 1. No fixed /tmp updater/uninstaller paths in abuseguard.sh.
+	if grep -Eq '=/tmp/abuseguard-(install|uninstall)\.sh' "$PANEL"; then
+		echo "fixed /tmp script path found" >&2; exit 1
+	fi
+
+	# 2. Trailing-comment whitelist + IPv6 banned list + large (>128 KiB) banned payload.
+	printf '127.0.0.0/8\n::1\n# trailing comment without newline' > "$WHITELIST"
+	proxy_mode() { echo caddy; }
+	sites_lines() { :; }
+	cf_is_set() { return 1; }
+	nft() { return 1; }
+	firewall_running() { return 1; }
+	firewall_ports() { printf 'tcp 22 any\n'; }
+	firewall_check_conflicts() { :; }
+	systemctl() { return 1; }
+	intel_table_present() { return 1; }
+	ssh_current_ports() { echo 22; }
+	ssh_auth_state() { echo on; }
+	root_password_login_ready() { return 0; }
+	root_key_login_ready() { return 0; }
+	reporting_state() { echo off; }
+	JAILS="sshd"
+	fail2ban-client() {
+		printf '   `- Banned IP list:\t192.0.2.3 2001:db8::1\n'
+	}
+	panel_out="$(tui_data panel)"
+	[ "$(printf '%s' "$panel_out" | jq -r '.whitelist | join(",")')" = '127.0.0.0/8,::1' ]
+	[ "$(printf '%s' "$panel_out" | jq -r '.banned | map(.ip) | join(",")')" = '192.0.2.3,2001:db8::1' ]
+
+	# Large banned list (>200 KiB JSON, exceeding Linux 128 KiB MAX_ARG_STRLEN).
+	big_ips="$(awk 'BEGIN { for (i = 0; i < 5000; i++) printf "198.51.%d.%d ", int(i / 256), i % 256 }')"
+	fail2ban-client() {
+		printf '   `- Banned IP list:\t%s\n' "$big_ips"
+	}
+	big_out="$(tui_data panel)"
+	[ "$(printf '%s' "$big_out" | jq '.banned | length')" = 5000 ]
+
+	# 3. SSH key deletion must refuse when authorized_keys order drifted.
+	k1='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyOneFixtureDataForTest one@test'
+	k2='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeyTwoFixtureDataForTest two@test'
+	printf '%s\n%s\n' "$k2" "$k1" > "$SSH_AUTH_KEYS"
+	ssh_key_ready() { return 0; }
+	if printf '%s\n' "$k1" | tui_action ssh-key-del 1 no >/dev/null 2>&1; then
+		echo "ssh-key-del deleted wrong key after reorder" >&2; exit 1
+	fi
+	[ "$(grep -c . "$SSH_AUTH_KEYS")" = 2 ]
+	printf '%s\n' "$k2" | tui_action ssh-key-del 1 no >/dev/null
+	[ "$(cat "$SSH_AUTH_KEYS")" = "$k1" ]
+
+	# 4. wl-edit must propagate wl_apply failure instead of letting pause mask it.
+	wl_candidate() { mktemp "$tui_tmp/wl.XXXXXX"; }
+	wl_commit() { rm -f -- "$1"; return 0; }
+	wl_apply() { return 1; }
+	pause() { return 0; }
+	EDITOR=true
+	if tui_action wl-edit >/dev/null 2>&1; then
+		echo "wl-edit masked wl_apply failure" >&2; exit 1
+	fi
+
+	# 5. fw-open must report port-note save failure explicitly.
+	firewall_change_port() { return 0; }
+	firewall_port_note_save() { return 1; }
+	fw_err=""
+	if fw_err="$(tui_action fw-open tcp 8443 any 'note' 2>&1)"; then
+		echo "fw-open swallowed port-note save failure" >&2; exit 1
+	fi
+	printf '%s' "$fw_err" | grep -F '备注未保存' >/dev/null
+
+	# 6. tui_action update uses a private mktemp path under TMPDIR and cleans it up.
+	upd_dir="$tui_tmp/upd"
+	mkdir -p "$upd_dir"
+	TMPDIR="$upd_dir"
+	latest_release_tag() { echo v1.1.1; }
+	AG_CURL="fake_curl"
+	fake_curl() {
+		local out=""
+		while [ "$#" -gt 0 ]; do
+			if [ "$1" = -o ]; then out="$2"; shift 2; else shift; fi
+		done
+		[ "${out#"$upd_dir"/abuseguard-install.}" != "$out" ] || { echo "bad temp path: $out" >&2; return 1; }
+		printf '#!/usr/bin/env bash\nexit 0\n' > "$out"
+	}
+	tui_action update >/dev/null
+	[ -z "$(ls -A "$upd_dir")" ] || { echo "updater leaked temp file" >&2; exit 1; }
+)
+echo "TUI bridge regression tests passed"

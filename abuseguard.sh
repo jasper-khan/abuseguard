@@ -411,11 +411,17 @@ act_status() {
 	panel_pause
 }
 
+jail_banned_ips() {
+	fail2ban-client status "$1" 2>/dev/null \
+		| sed -n 's/.*Banned IP list:[[:space:]]*//p' \
+		| tr ' \t' '\n\n' | sed '/^$/d'
+}
+
 act_banned() {
 	local ips
 	for j in $JAILS; do
 		echo "== $j =="
-		ips="$(fail2ban-client status "$j" 2>/dev/null | sed -n '/Banned IP list/s/.*:[[:space:]]*//p' | tr ' ' '\n' | sed '/^$/d')"
+		ips="$(jail_banned_ips "$j")"
 		if [ -n "$ips" ]; then printf '%s\n' "$ips" | sed 's/^/  /'; else echo "  （无）"; fi
 	done
 	pause
@@ -826,7 +832,9 @@ firewall_change_port() {
 		return 1
 	fi
 	if [ "$action" = close ] && [ -f "$PORT_NOTES_FILE" ]; then
-		firewall_port_note_save "$proto" "$port" "$source" "" || true
+		if ! firewall_port_note_save "$proto" "$port" "$source" ""; then
+			echo "警告：规则已生效，但未能清理端口备注：$PORT_NOTES_FILE" >&2
+		fi
 	fi
 	if [ -n "$ssh_retire_backup" ] && ! rm -f -- "$ssh_retire_backup"; then
 		echo "规则已生效，但无法删除 SSH 配置备份：$ssh_retire_backup" >&2
@@ -1375,9 +1383,9 @@ act_ssh_key_add() {
 	echo "公钥已添加（第 $(grep -c . "$SSH_AUTH_KEYS") 条）。请保持当前会话，用新会话验证密钥可登录。"
 }
 
-# 从 root 的 authorized_keys 删除一条公钥。
+# 从 root 的 authorized_keys 删除一条公钥；可选第 1 参数用于核对目标行原文未发生漂移。
 act_ssh_key_remove() {
-	local keys idx=0 n target tmp remain answer
+	local expected="${1:-}" keys idx=0 n target tmp remain answer awk_rc=0
 	[ -f "$SSH_AUTH_KEYS" ] && [ -s "$SSH_AUTH_KEYS" ] || { echo "还没有公钥。"; return 1; }
 	keys="$(grep . "$SSH_AUTH_KEYS")"
 	echo
@@ -1388,11 +1396,38 @@ act_ssh_key_remove() {
 	read -r -p "  要删除的编号（留空取消）: " n || return 1
 	[ -n "$n" ] || return 0
 	case "$n" in *[!0-9]*) echo "编号无效。"; return 1 ;; esac
-	[ "$n" -ge 1 ] && [ "$n" -le "$idx" ] || { echo "编号无效。"; return 1; }
+	if [ "$n" -lt 1 ] || [ "$n" -gt "$idx" ]; then
+		if [ -n "$expected" ]; then
+			echo "目标公钥已变更或位置已移动，请按 r 刷新后重试。"
+		else
+			echo "编号无效。"
+		fi
+		return 1
+	fi
 	target="$n"
 	tmp="$SSH_AUTH_KEYS.tmp"
 	remain=0
-	awk -v t="$target" 'length($0) && ++i == t { next } { print }' "$SSH_AUTH_KEYS" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+	if [ -n "$expected" ]; then
+		AG_EXPECTED_SSH_KEY="$expected" awk -v t="$target" '
+			length($0) && ++i == t {
+				if ($0 != ENVIRON["AG_EXPECTED_SSH_KEY"]) { mismatch = 1; exit 3 }
+				matched = 1
+				next
+			}
+			{ print }
+			END { if (!mismatch && !matched) exit 3 }
+		' "$SSH_AUTH_KEYS" > "$tmp" || awk_rc=$?
+		if [ "$awk_rc" -eq 3 ]; then
+			rm -f -- "$tmp"
+			echo "目标公钥已变更或位置已移动，请按 r 刷新后重试。"
+			return 1
+		elif [ "$awk_rc" -ne 0 ]; then
+			rm -f -- "$tmp"
+			return 1
+		fi
+	else
+		awk -v t="$target" 'length($0) && ++i == t { next } { print }' "$SSH_AUTH_KEYS" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+	fi
 	remain="$(awk 'NF{n++} END{print n+0}' "$tmp")"
 	chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
 	if ! ssh_key_ready "$tmp"; then
@@ -1777,44 +1812,50 @@ act_logs() {
 }
 
 act_update() {
-	local tag f=/tmp/abuseguard-install.sh
+	local tag f
 	if ! tag="$(latest_release_tag)"; then
 		echo "无法解析最新 release（需要能直连 github.com）。"
 		pause
 		return 1
 	fi
+	f="$(mktemp "${TMPDIR:-/tmp}/abuseguard-install.XXXXXX")" || { echo "无法创建临时文件。"; pause; return 1; }
 	echo "正在从 $ABUSEGUARD_REPO $tag 重新运行安装器..."
 	if ! $AG_CURL -o "$f" "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/$tag/install.sh"; then
+		rm -f -- "$f"
 		echo "无法获取 $tag 的 install.sh（GitHub 直连失败）。"
 		pause
 		return 1
 	fi
 	if ABUSEGUARD_REPO="$ABUSEGUARD_REPO" ABUSEGUARD_RELEASE_TAG="$tag" \
 		ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
-		rm -f "$f"
+		rm -f -- "$f"
 		echo "更新完成，正在重新加载控制面板..."
 		exec /usr/local/bin/ag
 	else
-		rm -f "$f"
+		rm -f -- "$f"
 		echo "更新失败。"
 	fi
 	pause
 }
 
 act_uninstall() {
-	local tag f=/tmp/abuseguard-uninstall.sh
+	local tag f rc=0
 	if ! tag="$(latest_release_tag)"; then
 		echo "无法解析最新 release（需要能直连 github.com）；请从本地克隆运行。"
 		pause
 		return 1
 	fi
+	f="$(mktemp "${TMPDIR:-/tmp}/abuseguard-uninstall.XXXXXX")" || { echo "无法创建临时文件。"; pause; return 1; }
 	if $AG_CURL -o "$f" "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/$tag/uninstall.sh"; then
-		bash "$f"
-		rm -f "$f"
+		bash "$f" || rc=$?
+		rm -f -- "$f"
 	else
+		rm -f -- "$f"
 		echo "无法获取 $tag 的 uninstall.sh（GitHub 直连失败）；请从本地克隆运行。"
+		rc=1
 	fi
 	pause
+	return "$rc"
 }
 
 act_intel() {
@@ -1971,7 +2012,7 @@ tui_data() {
 
 			banned_json="$(
 				for j in $JAILS; do
-					ips="$(fail2ban-client status "$j" 2>/dev/null | sed -n '/Banned IP list/s/.*:[[:space:]]*//p' | tr ' ' '\n' | sed '/^$/d')"
+					ips="$(jail_banned_ips "$j")"
 					if [ -n "$ips" ]; then
 						while IFS= read -r line; do
 							[ -n "$line" ] && printf '%s\t%s\n' "$j" "$line"
@@ -1982,10 +2023,7 @@ tui_data() {
 
 			if [ -r "$WHITELIST" ]; then
 				wl_json="$(
-					while IFS= read -r line; do
-						line="${line%%#*}"; line="$(printf '%s' "$line" | tr -d '[:space:]')"
-						[ -n "$line" ] && printf '%s\n' "$line"
-					done < "$WHITELIST" | tui_json_lines
+					awk '{ sub(/#.*/, ""); gsub(/[ \t\r]+/, ""); if (length($0) > 0) print }' "$WHITELIST" | tui_json_lines
 				)" || wl_json='[]'
 			fi
 
@@ -2008,12 +2046,23 @@ tui_data() {
 			[ "$(reporting_state)" = on ] && rep_on=true
 			[ -s "$KEYFILE" ] && key_set=true
 
-			jq -n \
+			[ -n "$sites_json" ] || sites_json='[]'
+			[ -n "$certs_json" ] || certs_json='[]'
+			[ -n "$ports_json" ] || ports_json='[]'
+			[ -n "$conflicts_json" ] || conflicts_json='[]'
+			[ -n "$banned_json" ] || banned_json='[]'
+			[ -n "$wl_json" ] || wl_json='[]'
+			[ -n "$ssh_ports_json" ] || ssh_ports_json='[]'
+			[ -n "$ssh_keys_json" ] || ssh_keys_json='[]'
+
+			# Stream all list payloads via stdin (bash builtin printf -> jq -s) to avoid Linux MAX_ARG_STRLEN (128 KiB).
+			printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+				"$sites_json" "$certs_json" "$ports_json" "$conflicts_json" \
+				"$banned_json" "$wl_json" "$ssh_ports_json" "$ssh_keys_json" \
+			| jq -s \
 				--arg backend "$mode" \
 				--arg backend_error "$backend_err" \
 				--argjson cf_token_set "$cf_set" \
-				--argjson sites "$sites_json" \
-				--argjson certs "$certs_json" \
 				--argjson nft_available "$nft_ok" \
 				--argjson fw_running "$fw_run" \
 				--argjson boot_enabled "$boot_ok" \
@@ -2021,18 +2070,12 @@ tui_data() {
 				--argjson ipv6_in "$ipv6_ok" \
 				--argjson intel_running "$intel_run" \
 				--arg intel_entries "$intel_n" \
-				--argjson ports "$ports_json" \
-				--argjson conflicts "$conflicts_json" \
-				--argjson banned "$banned_json" \
-				--argjson whitelist "$wl_json" \
-				--argjson ssh_ports "$ssh_ports_json" \
 				--arg ssh_pw "$ssh_pw" \
 				--arg ssh_pk "$ssh_pk" \
 				--arg ssh_kbd "$ssh_kbd" \
 				--argjson root_pw "$root_pw" \
 				--argjson root_key "$root_key" \
 				--arg ssh_conn_family "$conn_fam" \
-				--argjson ssh_keys "$ssh_keys_json" \
 				--arg repo "$ABUSEGUARD_REPO" \
 				--argjson reporting_on "$rep_on" \
 				--argjson report_key_set "$key_set" \
@@ -2040,8 +2083,8 @@ tui_data() {
 					backend: $backend,
 					backend_error: $backend_error,
 					cf_token_set: $cf_token_set,
-					sites: $sites,
-					certs: $certs,
+					sites: .[0],
+					certs: .[1],
 					firewall: {
 						nft_available: $nft_available,
 						running: $fw_running,
@@ -2050,20 +2093,20 @@ tui_data() {
 						ipv6_in: $ipv6_in,
 						intel_running: $intel_running,
 						intel_entries: $intel_entries,
-						ports: $ports,
-						conflicts: $conflicts
+						ports: .[2],
+						conflicts: .[3]
 					},
-					banned: $banned,
-					whitelist: $whitelist,
+					banned: .[4],
+					whitelist: .[5],
 					ssh: {
-						ports: $ssh_ports,
+						ports: .[6],
 						password_auth: $ssh_pw,
 						pubkey_auth: $ssh_pk,
 						kbd_auth: $ssh_kbd,
 						root_pw_ready: $root_pw,
 						root_key_ready: $root_key,
 						ssh_conn_family: $ssh_conn_family,
-						keys: $ssh_keys
+						keys: .[7]
 					},
 					repo: $repo,
 					reporting_on: $reporting_on,
@@ -2091,12 +2134,12 @@ tui_data() {
 				*)
 					f2b_json="$(journalctl -u fail2ban -n 80 --no-pager 2>/dev/null | tui_json_lines)" || f2b_json='[]' ;;
 			esac
-			jq -n \
-				--arg backend "$mode" \
-				--argjson proxy "$proxy_json" \
-				--argjson certbot "$certbot_json" \
-				--argjson fail2ban "$f2b_json" \
-				'{backend: $backend, proxy: $proxy, certbot: $certbot, fail2ban: $fail2ban}'
+			[ -n "$proxy_json" ] || proxy_json='[]'
+			[ -n "$certbot_json" ] || certbot_json='[]'
+			[ -n "$f2b_json" ] || f2b_json='[]'
+			printf '%s\n%s\n%s\n' "$proxy_json" "$certbot_json" "$f2b_json" \
+			| jq -s --arg backend "$mode" \
+				'{backend: $backend, proxy: .[0], certbot: .[1], fail2ban: .[2]}'
 			;;
 		ruleset)
 			nft -a list ruleset
@@ -2205,7 +2248,10 @@ tui_action() {
 			local proto="${1:-}" port="${2:-}" source="${3:-any}" note="${4:-}"
 			firewall_change_port open "$proto" "$port" "$source" || return 1
 			if [ "$#" -ge 4 ]; then
-				firewall_port_note_save "$proto" "$((10#$port))" "${source:-any}" "$note" || true
+				if ! firewall_port_note_save "$proto" "$((10#$port))" "${source:-any}" "$note"; then
+					echo "规则已生效，备注未保存（请检查 $PORT_NOTES_FILE 权限或磁盘空间）。" >&2
+					return 1
+				fi
 			fi
 			;;
 		fw-close)
@@ -2313,7 +2359,11 @@ tui_action() {
 			if "${EDITOR:-nano}" "$tmp" && wl_commit "$tmp"; then
 				tmp=""
 				echo "白名单已保存。"
-				wl_apply || pause
+				if ! wl_apply; then
+					echo "警告：白名单文件已保存，但策略应用失败。" >&2
+					pause
+					return 1
+				fi
 			else
 				rm -f -- "$tmp"
 				echo "白名单格式无效或编辑失败，原文件保持不变。"
@@ -2348,12 +2398,14 @@ tui_action() {
 			act_ssh_key_add
 			;;
 		ssh-key-del)
-			local idx="${1:-}" confirm="${2:-no}"
+			local idx="${1:-}" confirm="${2:-no}" expected=""
 			[ -n "$idx" ] || { echo "未指定公钥编号。"; return 1; }
+			IFS= read -r expected || true
+			[ -n "$expected" ] || { echo "缺少待删公钥校验信息，已拒绝删除。"; return 1; }
 			if [ "$confirm" = yes ]; then
-				printf '%s\nyes\n' "$idx" | act_ssh_key_remove
+				printf '%s\nyes\n' "$idx" | act_ssh_key_remove "$expected"
 			else
-				printf '%s\nno\n' "$idx" | act_ssh_key_remove
+				printf '%s\nno\n' "$idx" | act_ssh_key_remove "$expected"
 			fi
 			;;
 		ssh-password)
@@ -2397,25 +2449,27 @@ tui_action() {
 			fi
 			;;
 		update)
-			local tag f=/tmp/abuseguard-install.sh
+			local tag f
 			if ! tag="$(latest_release_tag)"; then
 				echo "无法解析最新 release（需要能直连 github.com）。"
 				pause
 				return 1
 			fi
+			f="$(mktemp "${TMPDIR:-/tmp}/abuseguard-install.XXXXXX")" || { echo "无法创建临时文件。"; pause; return 1; }
 			echo "正在从 $ABUSEGUARD_REPO $tag 重新运行安装器..."
 			if ! $AG_CURL -o "$f" "https://raw.githubusercontent.com/$ABUSEGUARD_REPO/$tag/install.sh"; then
+				rm -f -- "$f"
 				echo "无法获取 $tag 的 install.sh（GitHub 直连失败）。"
 				pause
 				return 1
 			fi
 			if ABUSEGUARD_REPO="$ABUSEGUARD_REPO" ABUSEGUARD_RELEASE_TAG="$tag" \
 				ABUSEGUARD_NONINTERACTIVE=1 bash "$f"; then
-				rm -f "$f"
+				rm -f -- "$f"
 				echo "更新完成，正在重新加载控制面板..."
 				return 0
 			else
-				rm -f "$f"
+				rm -f -- "$f"
 				echo "更新失败。"
 				pause
 				return 1
